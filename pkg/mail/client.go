@@ -16,6 +16,16 @@ func NewClient() *Client {
 	return &Client{}
 }
 
+// escapeJSString escapes a string for use in JavaScript single-quoted strings
+func escapeJSString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
+	s = strings.ReplaceAll(s, "'", "\\'")   // Escape single quotes
+	s = strings.ReplaceAll(s, "\n", "\\n")  // Escape newlines
+	s = strings.ReplaceAll(s, "\r", "\\r")  // Escape carriage returns
+	s = strings.ReplaceAll(s, "\t", "\\t")  // Escape tabs
+	return s
+}
+
 // runAppleScript executes an AppleScript and returns the output
 func (c *Client) runAppleScript(script string) (string, error) {
 	cmd := exec.Command("osascript", "-e", script)
@@ -377,6 +387,8 @@ tell application "Mail"
 		set newMessage to make new outgoing message with properties {subject:"%s", content:"%s", visible:false}
 
 		tell newMessage
+			set sender to (item 1 of (email addresses of targetAccount as list))
+
 			repeat with addr in {"%s"}
 				make new to recipient at end of to recipients with properties {address:addr}
 			end repeat
@@ -917,7 +929,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, mailboxName, messageID, attachmentName, savePath)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), escapeJSString(attachmentName), escapeJSString(savePath))
 
 	output, err := c.runJXA(script)
 	if err != nil {
