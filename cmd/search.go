@@ -36,14 +36,14 @@ By default searches INBOX of all accounts. Use --account and --mailbox to narrow
 		}
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ACCOUNT\tMAILBOX\tSUBJECT\tFROM\tDATE")
-		fmt.Fprintln(w, "-------\t-------\t-------\t----\t----")
+		fmt.Fprintln(w, "ID\tACCOUNT\tMAILBOX\tSUBJECT\tFROM\tDATE")
+		fmt.Fprintln(w, "--\t-------\t-------\t-------\t----\t----")
 		for _, msg := range messages {
 			subject := msg.Subject
 			if len(subject) > 40 {
 				subject = subject[:37] + "..."
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", msg.Account, msg.Mailbox, subject, msg.Sender, msg.DateReceived)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", msg.ID, msg.Account, msg.Mailbox, subject, msg.Sender, msg.DateReceived)
 		}
 		w.Flush()
 
