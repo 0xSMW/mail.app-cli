@@ -923,38 +923,72 @@ try {
 	return nil
 }
 
-// SearchMessagesJSON searches for messages across all mailboxes
-func (c *Client) SearchMessagesJSON(query string, limit int) ([]Message, error) {
-	limitClause := ""
-	if limit > 0 {
-		limitClause = fmt.Sprintf("if (result.length > %d) result = result.slice(0, %d);", limit, limit)
-	}
-
+// SearchMessagesJSON searches for messages across mailboxes
+// Note: By default only searches INBOX mailboxes for performance reasons
+func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxName string, limit int) ([]Message, error) {
 	// Escape single quotes in query
 	escapedQuery := strings.ReplaceAll(query, "'", "\\'")
+	escapedAccount := strings.ReplaceAll(accountName, "'", "\\'")
+	escapedMailbox := strings.ReplaceAll(mailboxName, "'", "\\'")
+
+	// Set a reasonable default limit if none specified
+	if limit == 0 {
+		limit = 50
+	}
 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
 const searchTerm = '%s'.toLowerCase();
+const targetAccount = '%s';
+const targetMailbox = '%s';
+const maxResults = %d;
 
 try {
 	const accounts = mail.accounts();
-	for (let i = 0; i < accounts.length; i++) {
+	outerLoop: for (let i = 0; i < accounts.length; i++) {
 		const acc = accounts[i];
+
+		// Skip if account specified and this isn't it
+		if (targetAccount !== '' && acc.name() !== targetAccount) {
+			continue;
+		}
+
 		const mailboxes = acc.mailboxes();
+
 		for (let j = 0; j < mailboxes.length; j++) {
 			const mbox = mailboxes[j];
-			const messages = mbox.messages();
+			const mboxName = mbox.name();
 
-			for (let k = 0; k < messages.length; k++) {
+			// If mailbox specified, only search that one
+			if (targetMailbox !== '') {
+				if (mboxName !== targetMailbox) {
+					continue;
+				}
+			} else {
+				// Otherwise only search INBOX for performance
+				if (mboxName !== 'INBOX' && mboxName !== 'Inbox') {
+					continue;
+				}
+			}
+
+			const messages = mbox.messages();
+			// Limit how many messages to check per mailbox for performance
+			// Messages are typically sorted newest first, so this checks recent messages
+			const maxToCheck = Math.min(messages.length, 500);
+
+			for (let k = 0; k < maxToCheck; k++) {
+				if (result.length >= maxResults) {
+					break outerLoop;
+				}
+
 				const msg = messages[k];
 				try {
 					const subject = (msg.subject() || '').toLowerCase();
 					const sender = (msg.sender() || '').toLowerCase();
-					const content = (msg.content() || '').toLowerCase();
 
-					if (subject.includes(searchTerm) || sender.includes(searchTerm) || content.includes(searchTerm)) {
+					// Only search subject and sender
+					if (subject.includes(searchTerm) || sender.includes(searchTerm)) {
 						result.push({
 							id: String(msg.id()),
 							subject: msg.subject() || '',
@@ -978,10 +1012,8 @@ try {
 	// Handle errors gracefully
 }
 
-%s
-
 JSON.stringify(result);
-`, escapedQuery, limitClause)
+`, escapedQuery, escapedAccount, escapedMailbox, limit)
 
 	output, err := c.runJXA(script)
 	if err != nil {
