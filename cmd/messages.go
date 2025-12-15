@@ -13,6 +13,7 @@ var (
 	msgAccount      string
 	msgMailbox      string
 	msgLimit        int
+	msgOffset       int
 	msgUnread       bool
 	msgFlaggedFilter bool
 	msgRead         bool
@@ -37,7 +38,7 @@ var messagesListCmd = &cobra.Command{
 		}
 
 		client := mail.NewClient()
-		messages, err := client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgUnread, msgFlaggedFilter, msgSince)
+		messages, err := client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, msgUnread, msgFlaggedFilter, msgSince)
 		if err != nil {
 			return fmt.Errorf("failed to get messages: %w", err)
 		}
@@ -244,6 +245,7 @@ func init() {
 
 	// List-specific flags
 	messagesListCmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum number of messages to display")
+	messagesListCmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Number of messages to skip (for pagination)")
 	messagesListCmd.Flags().BoolVarP(&msgUnread, "unread", "u", false, "Show only unread messages")
 	messagesListCmd.Flags().BoolVarP(&msgFlaggedFilter, "flagged", "f", false, "Show only flagged messages")
 	messagesListCmd.Flags().StringVarP(&msgSince, "since", "s", "", "Show messages since date (format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")

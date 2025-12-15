@@ -546,7 +546,12 @@ JSON.stringify(result);
 }
 
 // GetMessagesJSON retrieves messages from a mailbox using JXA
-func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+	offsetClause := ""
+	if offset > 0 {
+		offsetClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(%d);", offset, offset)
+	}
+
 	limitClause := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(0, %d);", limit, limit)
@@ -587,6 +592,7 @@ try {
 					%s
 					%s
 					%s
+					%s
 
 					for (let k = 0; k < messages.length; k++) {
 						const msg = messages[k];
@@ -618,7 +624,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, limitClause)
+`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause)
 
 	output, err := c.runJXA(script)
 	if err != nil {
