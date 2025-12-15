@@ -597,7 +597,7 @@ try {
 					const messages = mbox.messages();
 					for (let k = 0; k < messages.length; k++) {
 						const msg = messages[k];
-						if (msg.id() === '%s') {
+						if (String(msg.id()) === '%s') {
 							const toRecipients = [];
 							const toRecs = msg.toRecipients();
 							for (let t = 0; t < toRecs.length; t++) {
@@ -746,7 +746,7 @@ try {
 					const messages = mbox.messages();
 					for (let k = 0; k < messages.length; k++) {
 						const msg = messages[k];
-						if (msg.id() === '%s') {
+						if (String(msg.id()) === '%s') {
 							const attachments = msg.mailAttachments();
 							for (let a = 0; a < attachments.length; a++) {
 								const att = attachments[a];
