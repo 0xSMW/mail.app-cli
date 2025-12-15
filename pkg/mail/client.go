@@ -457,12 +457,17 @@ try {
 			const mailboxes = acc.mailboxes();
 			for (let j = 0; j < mailboxes.length; j++) {
 				const mbox = mailboxes[j];
-				result.push({
-					name: mbox.name(),
-					unreadCount: mbox.unreadCount(),
-					totalCount: mbox.messages().length,
-					account: acc.name()
-				});
+				try {
+					const msgs = mbox.messages();
+					result.push({
+						name: mbox.name(),
+						unreadCount: mbox.unreadCount(),
+						totalCount: msgs ? msgs.length : 0,
+						account: acc.name()
+					});
+				} catch (e) {
+					// Skip mailboxes that can't be queried
+				}
 			}
 		}
 	}
