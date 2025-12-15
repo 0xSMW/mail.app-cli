@@ -834,10 +834,16 @@ try {
 							const attachments = msg.mailAttachments();
 							for (let a = 0; a < attachments.length; a++) {
 								const att = attachments[a];
+								let mimeType = 'unknown';
+								try {
+									mimeType = att.mimeType() || 'unknown';
+								} catch (e) {
+									// mimeType() sometimes fails in Mail.app
+								}
 								result.push({
 									name: att.name(),
 									fileSize: att.fileSize(),
-									mimeType: att.mimeType() || 'unknown'
+									mimeType: mimeType
 								});
 							}
 							break;
