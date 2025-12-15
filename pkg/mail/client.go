@@ -248,21 +248,39 @@ func (c *Client) MarkMessageAsRead(accountName, mailboxName, messageID string, r
 	}
 
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of targetMailbox
-		set read status of msg to %s
-		return "Success"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+const mail = Application('Mail');
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
+
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
+
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		targetMsg.readStatus = %s;
+		'Success';
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, mailboxName, messageID, readStatus)
 
-	_, err := c.runAppleScript(script)
-	return err
+	output, err := c.runJXA(script)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(output, "Error") {
+		return fmt.Errorf(output)
+	}
+	return nil
 }
 
 // FlagMessage sets or unsets the flagged status of a message
@@ -273,41 +291,77 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 	}
 
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of targetMailbox
-		set flagged status of msg to %s
-		return "Success"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+const mail = Application('Mail');
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
+
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
+
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		targetMsg.flaggedStatus = %s;
+		'Success';
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, mailboxName, messageID, flagStatus)
 
-	_, err := c.runAppleScript(script)
-	return err
+	output, err := c.runJXA(script)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(output, "Error") {
+		return fmt.Errorf(output)
+	}
+	return nil
 }
 
 // DeleteMessage moves a message to trash
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of targetMailbox
-		delete msg
-		return "Success"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+const mail = Application('Mail');
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
+
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
+
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		targetMsg.delete();
+		'Success';
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, mailboxName, messageID)
 
-	_, err := c.runAppleScript(script)
-	return err
+	output, err := c.runJXA(script)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(output, "Error") {
+		return fmt.Errorf(output)
+	}
+	return nil
 }
 
 // SendMessage sends a new email message
@@ -664,34 +718,46 @@ JSON.stringify(result);
 // ArchiveMessage moves a message to the Archive mailbox
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of targetMailbox
+const mail = Application('Mail');
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
 
-		-- Try to find Archive mailbox
-		set archiveMailbox to missing value
-		repeat with mbox in mailboxes of targetAccount
-			if name of mbox is "Archive" or name of mbox is "All Mail" then
-				set archiveMailbox to mbox
-				exit repeat
-			end if
-		end repeat
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
 
-		if archiveMailbox is not missing value then
-			move msg to archiveMailbox
-			return "Success"
-		else
-			return "Error: Archive mailbox not found"
-		end if
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		const allMailboxes = acc.mailboxes();
+		let archiveBox = null;
+		for (let j = 0; j < allMailboxes.length; j++) {
+			const name = allMailboxes[j].name();
+			if (name === 'Archive' || name === 'All Mail') {
+				archiveBox = allMailboxes[j];
+				break;
+			}
+		}
+
+		if (archiveBox) {
+			targetMsg.mailbox = archiveBox;
+			'Success';
+		} else {
+			'Error: Archive mailbox not found';
+		}
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, mailboxName, messageID)
 
-	output, err := c.runAppleScript(script)
+	output, err := c.runJXA(script)
 	if err != nil {
 		return err
 	}
@@ -704,21 +770,33 @@ end tell
 // MoveMessage moves a message to a different mailbox
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set sourceBox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of sourceBox
-		set destBox to mailbox "%s" of targetAccount
-		move msg to destBox
-		return "Success"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+const mail = Application('Mail');
+try {
+	const acc = mail.accounts.byName('%s');
+	const sourceMbox = acc.mailboxes.byName('%s');
+	const messages = sourceMbox.messages();
+
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
+
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		const destMbox = acc.mailboxes.byName('%s');
+		targetMsg.mailbox = destMbox;
+		'Success';
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, sourceMailbox, messageID, targetMailbox)
 
-	output, err := c.runAppleScript(script)
+	output, err := c.runJXA(script)
 	if err != nil {
 		return err
 	}
@@ -788,27 +866,48 @@ JSON.stringify(result);
 // SaveAttachment saves an attachment to disk
 func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentName, savePath string) error {
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msg to message id "%s" of targetMailbox
+const mail = Application('Mail');
+const app = Application.currentApplication();
+app.includeStandardAdditions = true;
 
-		repeat with att in mail attachments of msg
-			if name of att is "%s" then
-				save att in POSIX file "%s"
-				return "Success"
-			end if
-		end repeat
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
 
-		return "Error: Attachment not found"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
+	let targetMsg = null;
+	for (let i = 0; i < messages.length; i++) {
+		if (String(messages[i].id()) === '%s') {
+			targetMsg = messages[i];
+			break;
+		}
+	}
+
+	if (!targetMsg) {
+		'Error: Message not found';
+	} else {
+		const attachments = targetMsg.mailAttachments();
+		let found = false;
+		for (let a = 0; a < attachments.length; a++) {
+			if (attachments[a].name() === '%s') {
+				const pathObj = Path('%s');
+				attachments[a].save({ in: pathObj });
+				found = true;
+				break;
+			}
+		}
+		if (found) {
+			'Success';
+		} else {
+			'Error: Attachment not found';
+		}
+	}
+} catch (e) {
+	'Error: ' + e;
+}
 `, accountName, mailboxName, messageID, attachmentName, savePath)
 
-	output, err := c.runAppleScript(script)
+	output, err := c.runJXA(script)
 	if err != nil {
 		return err
 	}
