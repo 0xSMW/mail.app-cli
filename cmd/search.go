@@ -1,9 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"github.com/robertmeta/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -20,7 +19,8 @@ var searchCmd = &cobra.Command{
 	Short: "Search for messages",
 	Long: `Search for messages across mailboxes.
 The query will search in subject and sender (content search disabled for performance).
-By default searches INBOX of all accounts. Use --account and --mailbox to narrow the search.`,
+By default searches INBOX of all accounts. Use --account and --mailbox to narrow the search.
+Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query" | jq '.[] | select(.read==false)'`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		query := args[0]
@@ -30,23 +30,12 @@ By default searches INBOX of all accounts. Use --account and --mailbox to narrow
 			return fmt.Errorf("failed to search messages: %w", err)
 		}
 
-		if len(messages) == 0 {
-			fmt.Println("No messages found.")
-			return nil
+		output, err := json.MarshalIndent(messages, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal search results: %w", err)
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tACCOUNT\tMAILBOX\tSUBJECT\tFROM\tDATE")
-		fmt.Fprintln(w, "--\t-------\t-------\t-------\t----\t----")
-		for _, msg := range messages {
-			subject := msg.Subject
-			if len(subject) > 40 {
-				subject = subject[:37] + "..."
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", msg.ID, msg.Account, msg.Mailbox, subject, msg.Sender, msg.DateReceived)
-		}
-		w.Flush()
-
+		fmt.Println(string(output))
 		return nil
 	},
 }

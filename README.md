@@ -187,39 +187,125 @@ Save to a specific path:
 mail-app-cli attachments save <message-id> "document.pdf" -a "Gmail" -m "INBOX" -o ~/Downloads/document.pdf
 ```
 
-## Scripting Examples
+## JSON Output and jq
 
-### Check for unread messages
+All commands output JSON format for easy parsing and scripting. The output is formatted with 2-space indentation for human readability while remaining machine-parseable.
+
+### Pretty Printing
+
+For even prettier output, pipe through `jq`:
+
+```bash
+mail-app-cli accounts list | jq
+```
+
+### jq Examples
+
+#### Filter accounts by email domain
+
+```bash
+mail-app-cli accounts list | jq '.[] | select(.emailAddress | endswith("@gmail.com"))'
+```
+
+#### Get only enabled accounts
+
+```bash
+mail-app-cli accounts list | jq '.[] | select(.enabled==true) | .name'
+```
+
+#### Count unread messages across all mailboxes
+
+```bash
+mail-app-cli mailboxes list | jq '[.[].unreadCount] | add'
+```
+
+#### Find mailboxes with unread messages
+
+```bash
+mail-app-cli mailboxes list | jq '.[] | select(.unreadCount > 0) | {account, name, unread: .unreadCount}'
+```
+
+#### Get just the subject lines from messages
+
+```bash
+mail-app-cli messages list -a "Gmail" -m "INBOX" | jq '.[].subject'
+```
+
+#### Filter unread messages from specific sender
+
+```bash
+mail-app-cli messages list -a "Gmail" -m "INBOX" | jq '.[] | select(.read==false and (.sender | contains("boss@company.com")))'
+```
+
+#### Search and format results as CSV
+
+```bash
+mail-app-cli search "important" | jq -r '.[] | [.account, .mailbox, .subject, .sender] | @csv'
+```
+
+#### Count messages by account
+
+```bash
+mail-app-cli search "project" | jq 'group_by(.account) | map({account: .[0].account, count: length})'
+```
+
+#### Get attachment names from a message
+
+```bash
+mail-app-cli attachments list <message-id> -a "Gmail" -m "INBOX" | jq '.[].name'
+```
+
+#### Find large attachments (>1MB)
+
+```bash
+mail-app-cli attachments list <message-id> -a "Gmail" -m "INBOX" | jq '.[] | select(.fileSize > 1048576)'
+```
+
+### Scripting Examples
+
+#### Check for unread messages
 
 ```bash
 #!/bin/bash
-unread=$(mail-app-cli messages list -a "Gmail" -m "INBOX" --unread | wc -l)
-if [ $unread -gt 2 ]; then
-  echo "You have $((unread - 2)) unread messages"
+unread=$(mail-app-cli messages list -a "Gmail" -m "INBOX" --unread | jq 'length')
+if [ $unread -gt 0 ]; then
+  echo "You have $unread unread messages"
 fi
 ```
 
-### Archive all read messages
+#### Archive all read messages
 
 ```bash
 #!/bin/bash
-# This is a conceptual example - you'd need to parse the output
-mail-app-cli messages list -a "Gmail" -m "INBOX" | while read -r line; do
-  # Parse message ID and read status
-  # If read, archive it
+mail-app-cli messages list -a "Gmail" -m "INBOX" | jq -r '.[] | select(.read==true) | .id' | while read -r msg_id; do
   mail-app-cli messages archive "$msg_id" -a "Gmail" -m "INBOX"
 done
 ```
 
-### Daily digest
+#### Daily unread summary
 
 ```bash
 #!/bin/bash
-echo "Today's Email Summary"
-echo "===================="
-mail-app-cli mailboxes list | while read -r line; do
-  # Print mailbox stats
-  echo "$line"
+echo "Today's Unread Email Summary"
+echo "============================"
+mail-app-cli mailboxes list | jq -r '.[] | select(.unreadCount > 0) | "\(.account)/\(.name): \(.unreadCount) unread"'
+```
+
+#### Save all attachments from a sender
+
+```bash
+#!/bin/bash
+SENDER="colleague@company.com"
+ACCOUNT="Gmail"
+MAILBOX="INBOX"
+
+# Find all messages from sender
+mail-app-cli messages list -a "$ACCOUNT" -m "$MAILBOX" | jq -r ".[] | select(.sender | contains(\"$SENDER\")) | .id" | while read -r msg_id; do
+  # Get attachments for each message
+  mail-app-cli attachments list "$msg_id" -a "$ACCOUNT" -m "$MAILBOX" | jq -r '.[].name' | while read -r att_name; do
+    echo "Saving: $att_name from message $msg_id"
+    mail-app-cli attachments save "$msg_id" "$att_name" -a "$ACCOUNT" -m "$MAILBOX" -o "~/Downloads/$att_name"
+  done
 done
 ```
 
@@ -291,7 +377,6 @@ Future enhancements:
 - Signatures management
 - VIP contacts
 - Export/import functionality
-- JSON output format option
 - Batch operations
 - IMAP folder synchronization
 - Message threading support

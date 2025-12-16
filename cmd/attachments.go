@@ -1,9 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"github.com/robertmeta/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -25,7 +24,7 @@ var attachmentsCmd = &cobra.Command{
 var attachmentsListCmd = &cobra.Command{
 	Use:   "list [message-id]",
 	Short: "List attachments in a message",
-	Long:  `List all attachments for a specific message.`,
+	Long:  `List all attachments for a specific message. Output is JSON format.`,
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
@@ -39,19 +38,12 @@ var attachmentsListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get attachments: %w", err)
 		}
 
-		if len(attachments) == 0 {
-			fmt.Println("No attachments found.")
-			return nil
+		output, err := json.MarshalIndent(attachments, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal attachments: %w", err)
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "NAME\tSIZE\tTYPE")
-		fmt.Fprintln(w, "----\t----\t----")
-		for _, att := range attachments {
-			fmt.Fprintf(w, "%s\t%d\t%s\n", att.Name, att.FileSize, att.MimeType)
-		}
-		w.Flush()
-
+		fmt.Println(string(output))
 		return nil
 	},
 }

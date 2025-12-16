@@ -1,9 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"github.com/robertmeta/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -31,7 +30,7 @@ var messagesCmd = &cobra.Command{
 var messagesListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List messages",
-	Long:  `List messages from a specific mailbox.`,
+	Long:  `List messages from a specific mailbox. Output is JSON format. Use jq for pretty printing: mail-app-cli messages list -a Account -m INBOX | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if msgAccount == "" || msgMailbox == "" {
 			return fmt.Errorf("both --account and --mailbox are required")
@@ -43,32 +42,12 @@ var messagesListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get messages: %w", err)
 		}
 
-		if len(messages) == 0 {
-			fmt.Println("No messages found.")
-			return nil
+		output, err := json.MarshalIndent(messages, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal messages: %w", err)
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tSUBJECT\tFROM\tDATE\tREAD\tFLAGGED")
-		fmt.Fprintln(w, "--\t-------\t----\t----\t----\t-------")
-		for _, msg := range messages {
-			read := " "
-			if msg.Read {
-				read = "✓"
-			}
-			flagged := " "
-			if msg.Flagged {
-				flagged = "⚑"
-			}
-			// Truncate subject if too long
-			subject := msg.Subject
-			if len(subject) > 50 {
-				subject = subject[:47] + "..."
-			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", msg.ID, subject, msg.Sender, msg.DateReceived, read, flagged)
-		}
-		w.Flush()
-
+		fmt.Println(string(output))
 		return nil
 	},
 }
@@ -76,7 +55,7 @@ var messagesListCmd = &cobra.Command{
 var messagesShowCmd = &cobra.Command{
 	Use:   "show [message-id]",
 	Short: "Show message details",
-	Long:  `Show full details of a specific message.`,
+	Long:  `Show full details of a specific message. Output is JSON format.`,
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
@@ -90,23 +69,12 @@ var messagesShowCmd = &cobra.Command{
 			return fmt.Errorf("failed to get message: %w", err)
 		}
 
-		fmt.Printf("ID:          %s\n", message.ID)
-		fmt.Printf("Subject:     %s\n", message.Subject)
-		fmt.Printf("From:        %s\n", message.Sender)
-		fmt.Printf("To:          %v\n", message.ToRecipients)
-		if len(message.CcRecipients) > 0 {
-			fmt.Printf("Cc:          %v\n", message.CcRecipients)
+		output, err := json.MarshalIndent(message, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal message: %w", err)
 		}
-		if len(message.BccRecipients) > 0 {
-			fmt.Printf("Bcc:         %v\n", message.BccRecipients)
-		}
-		fmt.Printf("Date Sent:   %s\n", message.DateSent)
-		fmt.Printf("Date Recv:   %s\n", message.DateReceived)
-		fmt.Printf("Read:        %t\n", message.Read)
-		fmt.Printf("Flagged:     %t\n", message.Flagged)
-		fmt.Printf("Size:        %d bytes\n", message.MessageSize)
-		fmt.Printf("\n--- Content ---\n%s\n", message.Content)
 
+		fmt.Println(string(output))
 		return nil
 	},
 }

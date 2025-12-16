@@ -1,9 +1,8 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
-	"os"
-	"text/tabwriter"
 
 	"github.com/robertmeta/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -22,7 +21,7 @@ var mailboxesCmd = &cobra.Command{
 var mailboxesListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all mailboxes",
-	Long:  `List all mailboxes across all accounts or for a specific account.`,
+	Long:  `List all mailboxes across all accounts or for a specific account. Output is JSON format. Use jq for pretty printing: mail-app-cli mailboxes list | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := mail.NewClient()
 		mailboxes, err := client.GetMailboxesJSON(mailboxAccount)
@@ -30,19 +29,12 @@ var mailboxesListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get mailboxes: %w", err)
 		}
 
-		if len(mailboxes) == 0 {
-			fmt.Println("No mailboxes found.")
-			return nil
+		output, err := json.MarshalIndent(mailboxes, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal mailboxes: %w", err)
 		}
 
-		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ACCOUNT\tMAILBOX\tUNREAD\tTOTAL")
-		fmt.Fprintln(w, "-------\t-------\t------\t-----")
-		for _, mbox := range mailboxes {
-			fmt.Fprintf(w, "%s\t%s\t%d\t%d\n", mbox.Account, mbox.Name, mbox.UnreadCount, mbox.TotalCount)
-		}
-		w.Flush()
-
+		fmt.Println(string(output))
 		return nil
 	},
 }
