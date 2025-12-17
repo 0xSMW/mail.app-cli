@@ -615,10 +615,8 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 	}
 
 	limitClause := ""
-	limitCheck := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(0, %d);", limit, limit)
-		limitCheck = fmt.Sprintf("if (result.length >= %d) break;", limit)
 	}
 
 	unreadFilter := ""
@@ -659,19 +657,19 @@ try {
 				const mbox = mailboxes[j];
 				if (mbox.name() === '%s') {
 					let messages = mbox.messages();
-					// Filter out deleted messages for performance
-					messages = messages.filter(m => {
-						try { return !m.deletedStatus(); } catch(e) { return true; }
-					});
+					// Apply filters BEFORE iterating for performance
 					%s
 					%s
 					%s
 					%s
 					%s
 
-					for (let k = 0; k < messages.length; k++) {
-						%s
+					// Only iterate through limited set for performance on large mailboxes
+					const maxToProcess = %d > 0 ? Math.min(%d * 3, messages.length) : Math.min(1000, messages.length);
+					for (let k = 0; k < maxToProcess && result.length < %d; k++) {
 						const msg = messages[k];
+						// Skip deleted messages inline for performance
+						try { if (msg.deletedStatus()) continue; } catch(e) {}
 						try {
 							result.push({
 								id: String(msg.id()),
@@ -701,7 +699,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limitCheck, contentField)
+`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, limit, limit, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
