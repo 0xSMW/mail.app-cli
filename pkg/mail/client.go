@@ -615,8 +615,10 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 	}
 
 	limitClause := ""
+	limitCheck := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(0, %d);", limit, limit)
+		limitCheck = fmt.Sprintf("if (result.length >= %d) break;", limit)
 	}
 
 	unreadFilter := ""
@@ -657,6 +659,10 @@ try {
 				const mbox = mailboxes[j];
 				if (mbox.name() === '%s') {
 					let messages = mbox.messages();
+					// Filter out deleted messages for performance
+					messages = messages.filter(m => {
+						try { return !m.deletedStatus(); } catch(e) { return true; }
+					});
 					%s
 					%s
 					%s
@@ -664,6 +670,7 @@ try {
 					%s
 
 					for (let k = 0; k < messages.length; k++) {
+						%s
 						const msg = messages[k];
 						try {
 							result.push({
@@ -674,7 +681,7 @@ try {
 								dateSent: (msg.dateSent() || new Date()).toString(),
 								read: msg.readStatus(),
 								flagged: msg.flaggedStatus(),
-								messageSize: msg.messageSize(),
+								messageSize: 0,
 								%s
 								mailbox: mbox.name(),
 								account: acc.name()
@@ -694,7 +701,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
+`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limitCheck, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
