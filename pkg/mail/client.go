@@ -375,10 +375,25 @@ try {
 }
 
 // SendMessage sends a new email message
-func (c *Client) SendMessage(accountName, subject, body string, to, cc, bcc []string) error {
+func (c *Client) SendMessage(accountName, subject, body string, to, cc, bcc, attachments []string) error {
 	toList := strings.Join(to, `", "`)
 	ccList := strings.Join(cc, `", "`)
 	bccList := strings.Join(bcc, `", "`)
+
+	// Build attachment code
+	attachCode := ""
+	if len(attachments) > 0 {
+		for _, attPath := range attachments {
+			escapedPath := escapeJSString(attPath)
+			attachCode += fmt.Sprintf(`
+			try {
+				make new attachment with properties {file name:"%s"} at after the last paragraph
+			} catch (e) {
+				// Skip files that can't be attached
+			}
+`, escapedPath)
+		}
+	}
 
 	script := fmt.Sprintf(`
 tell application "Mail"
@@ -404,7 +419,7 @@ tell application "Mail"
 					make new bcc recipient at end of bcc recipients with properties {address:addr}
 				end repeat
 			end if
-
+%s
 			send
 		end tell
 		return "Success"
@@ -412,7 +427,7 @@ tell application "Mail"
 		return "Error: " & errMsg
 	end try
 end tell
-`, accountName, subject, body, toList, ccList, ccList, bccList, bccList)
+`, accountName, subject, body, toList, ccList, ccList, bccList, bccList, attachCode)
 
 	_, err := c.runAppleScript(script)
 	return err
@@ -509,6 +524,41 @@ JSON.stringify(result);
 	return accounts, nil
 }
 
+// SyncAccount forces Mail.app to check for new mail (syncs all accounts)
+// Note: Mail.app's AppleScript doesn't support per-account sync, so this syncs all accounts
+func (c *Client) SyncAccount(accountName string) error {
+	// Verify account exists
+	script := fmt.Sprintf(`
+tell application "Mail"
+	set accountFound to false
+	repeat with acc in accounts
+		if name of acc is "%s" then
+			set accountFound to true
+			exit repeat
+		end if
+	end repeat
+	if not accountFound then
+		error "Account not found: %s"
+	end if
+end tell
+`, accountName, accountName)
+
+	_, err := c.runAppleScript(script)
+	if err != nil {
+		return err
+	}
+
+	// Check for new mail (syncs all accounts)
+	return c.SyncAllAccounts()
+}
+
+// SyncAllAccounts forces Mail.app to check for new mail across all accounts
+func (c *Client) SyncAllAccounts() error {
+	script := `tell application "Mail" to check for new mail`
+	_, err := c.runAppleScript(script)
+	return err
+}
+
 // GetMailboxesJSON retrieves mailboxes as JSON using JXA
 func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 	script := fmt.Sprintf(`
@@ -558,7 +608,7 @@ JSON.stringify(result);
 }
 
 // GetMessagesJSON retrieves messages from a mailbox using JXA
-func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
 	offsetClause := ""
 	if offset > 0 {
 		offsetClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(%d);", offset, offset)
@@ -584,6 +634,13 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 		// Parse the since date and create a filter
 		// JXA can parse date strings in various formats
 		sinceFilter = fmt.Sprintf("const sinceDate = new Date('%s'); messages = messages.filter(m => { const msgDate = m.dateReceived(); return msgDate && msgDate >= sinceDate; });", since)
+	}
+
+	contentField := ""
+	if withContent {
+		contentField = "content: msg.content() || '',"
+	} else {
+		contentField = "content: '',"
 	}
 
 	script := fmt.Sprintf(`
@@ -618,6 +675,7 @@ try {
 								read: msg.readStatus(),
 								flagged: msg.flaggedStatus(),
 								messageSize: msg.messageSize(),
+								%s
 								mailbox: mbox.name(),
 								account: acc.name()
 							});
@@ -636,7 +694,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause)
+`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {

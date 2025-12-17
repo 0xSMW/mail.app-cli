@@ -29,4 +29,5 @@ func init() {
 	rootCmd.AddCommand(sendCmd)
 	rootCmd.AddCommand(attachmentsCmd)
 	rootCmd.AddCommand(searchCmd)
+	rootCmd.AddCommand(syncCmd)
 }
