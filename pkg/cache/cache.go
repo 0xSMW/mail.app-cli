@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	// DefaultTTL is the default cache time-to-live (5 minutes)
-	DefaultTTL = 5 * time.Minute
+	// DefaultTTL is the default cache time-to-live (24 hours)
+	DefaultTTL = 24 * time.Hour
 	// CacheDir is the cache directory name
 	CacheDir = ".cache/mail-app-cli"
 )
