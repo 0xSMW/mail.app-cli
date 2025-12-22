@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"fmt"
 	"strings"
 
@@ -44,9 +45,9 @@ Examples:
 		}
 
 		if len(sendAttachments) > 0 {
-			fmt.Printf("Message sent to %s with %d attachment(s)\n", strings.Join(sendTo, ", "), len(sendAttachments))
+			fmt.Fprintf(os.Stderr, "Message sent to %s with %d attachment(s)\n", strings.Join(sendTo, ", "), len(sendAttachments))
 		} else {
-			fmt.Printf("Message sent to: %s\n", strings.Join(sendTo, ", "))
+			fmt.Fprintf(os.Stderr, "Message sent to: %s\n", strings.Join(sendTo, ", "))
 		}
 		return nil
 	},
