@@ -26,6 +26,13 @@ func escapeJSString(s string) string {
 	return s
 }
 
+// escapeAppleScriptString escapes a string for use in AppleScript double-quoted strings
+func escapeAppleScriptString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
+	s = strings.ReplaceAll(s, "\"", "\\\"") // Escape double quotes
+	return s
+}
+
 // runAppleScript executes an AppleScript and returns the output
 func (c *Client) runAppleScript(script string) (string, error) {
 	cmd := exec.Command("osascript", "-e", script)
@@ -70,10 +77,10 @@ type Account struct {
 
 // Mailbox represents a Mail.app mailbox
 type Mailbox struct {
-	Name      string
+	Name        string
 	UnreadCount int
 	TotalCount  int
-	Account   string
+	Account     string
 }
 
 // Message represents an email message
@@ -105,22 +112,22 @@ type Attachment struct {
 // GetAccounts retrieves all Mail.app accounts
 func (c *Client) GetAccounts() ([]Account, error) {
 	script := `
-tell application "Mail"
-	set accountList to {}
-	repeat with acc in accounts
-		set accountInfo to {id:id of acc, name:name of acc, emailAddress:(try
-			(email addresses of acc)
-		on error
-			""
-		end try), accountType:(try
-			(delivery account of acc) as string
-		on error
-			"unknown"
-		end try), userName:user name of acc, enabled:enabled of acc}
-		set end of accountList to accountInfo
-	end repeat
-	return accountList
-end tell
+	tell application "Mail"
+		set accountList to {}
+		repeat with acc in accounts
+			set accountInfo to {id:id of acc, name:name of acc, emailAddress:(try
+				(email addresses of acc)
+			on error
+				""
+			end try), accountType:(try
+				(delivery account of acc) as string
+			on error
+				"unknown"
+			end try), userName:user name of acc, enabled:enabled of acc}
+			set end of accountList to accountInfo
+		end repeat
+		return accountList
+	end tell
 `
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -135,18 +142,18 @@ end tell
 // GetMailboxes retrieves all mailboxes for a specific account
 func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
 	script := fmt.Sprintf(`
-tell application "Mail"
-	set mailboxList to {}
-	try
-		set targetAccount to account "%s"
-		repeat with mbox in mailboxes of targetAccount
-			set mailboxInfo to {name:(name of mbox), unreadCount:(unread count of mbox), totalCount:(count of messages in mbox), account:(name of targetAccount)}
-			set end of mailboxList to mailboxInfo
-		end repeat
-	end try
-	return mailboxList
-end tell
-`, accountName)
+	tell application "Mail"
+		set mailboxList to {}
+		try
+			set targetAccount to account "%s"
+			repeat with mbox in mailboxes of targetAccount
+				set mailboxInfo to {name:(name of mbox), unreadCount:(unread count of mbox), totalCount:(count of messages in mbox), account:(name of targetAccount)}
+				set end of mailboxList to mailboxInfo
+			end repeat
+		end try
+		return mailboxList
+	end tell
+`, escapeAppleScriptString(accountName))
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -160,16 +167,16 @@ end tell
 // GetAllMailboxes retrieves all mailboxes across all accounts
 func (c *Client) GetAllMailboxes() ([]Mailbox, error) {
 	script := `
-tell application "Mail"
-	set mailboxList to {}
-	repeat with acc in accounts
-		repeat with mbox in mailboxes of acc
-			set mailboxInfo to {name:(name of mbox), unreadCount:(unread count of mbox), totalCount:(count of messages in mbox), account:(name of acc)}
-			set end of mailboxList to mailboxInfo
+	tell application "Mail"
+		set mailboxList to {}
+		repeat with acc in accounts
+			repeat with mbox in mailboxes of acc
+				set mailboxInfo to {name:(name of mbox), unreadCount:(unread count of mbox), totalCount:(count of messages in mbox), account:(name of acc)}
+				set end of mailboxList to mailboxInfo
+			end repeat
 		end repeat
-	end repeat
-	return mailboxList
-end tell
+		return mailboxList
+	end tell
 `
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -188,23 +195,23 @@ func (c *Client) GetMessages(accountName, mailboxName string, limit int) ([]Mess
 	}
 
 	script := fmt.Sprintf(`
-tell application "Mail"
-	set messageList to {}
-	try
-		set targetAccount to account "%s"
-		set targetMailbox to mailbox "%s" of targetAccount
-		set msgCount to count of messages in targetMailbox
-		%s
+	tell application "Mail"
+		set messageList to {}
+		try
+			set targetAccount to account "%s"
+			set targetMailbox to mailbox "%s" of targetAccount
+			set msgCount to count of messages in targetMailbox
+			%s
 
-		repeat with i from 1 to msgCount
-			set msg to message i of targetMailbox
-			set msgInfo to {subject:(subject of msg), sender:(sender of msg), dateSent:(date sent of msg as string), dateReceived:(date received of msg as string), isRead:(read status of msg), isFlagged:(flagged status of msg), messageSize:(message size of msg)}
-			set end of messageList to msgInfo
-		end repeat
-	end try
-	return messageList
-end tell
-`, accountName, mailboxName, limitClause)
+			repeat with i from 1 to msgCount
+				set msg to message i of targetMailbox
+				set msgInfo to {subject:(subject of msg), sender:(sender of msg), dateSent:(date sent of msg as string), dateReceived:(date received of msg as string), isRead:(read status of msg), isFlagged:(flagged status of msg), messageSize:(message size of msg)}
+				set end of messageList to msgInfo
+			end repeat
+		end try
+		return messageList
+	end tell
+`, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), limitClause)
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -222,23 +229,24 @@ func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
 		limitClause = fmt.Sprintf("if msgCount > %d then set msgCount to %d", limit, limit)
 	}
 
+	// query is injected into AppleScript double quotes, needs escaping
 	script := fmt.Sprintf(`
-tell application "Mail"
-	set messageList to {}
-	set foundMessages to (every message whose subject contains "%s" or sender contains "%s" or content contains "%s")
-	set msgCount to count of foundMessages
-	%s
+	tell application "Mail"
+		set messageList to {}
+		set foundMessages to (every message whose subject contains "%s" or sender contains "%s" or content contains "%s")
+		set msgCount to count of foundMessages
+		%s
 
-	repeat with i from 1 to msgCount
-		set msg to item i of foundMessages
-		try
-			set msgInfo to {subject:(subject of msg), sender:(sender of msg), dateSent:(date sent of msg as string), dateReceived:(date received of msg as string), isRead:(read status of msg), isFlagged:(flagged status of msg), messageSize:(message size of msg)}
-			set end of messageList to msgInfo
-		end try
-	end repeat
-	return messageList
-end tell
-`, query, query, query, limitClause)
+		repeat with i from 1 to msgCount
+			set msg to item i of foundMessages
+			try
+				set msgInfo to {subject:(subject of msg), sender:(sender of msg), dateSent:(date sent of msg as string), dateReceived:(date received of msg as string), isRead:(read status of msg), isFlagged:(flagged status of msg), messageSize:(message size of msg)}
+				set end of messageList to msgInfo
+			end try
+		end repeat
+		return messageList
+	end tell
+`, escapeAppleScriptString(query), escapeAppleScriptString(query), escapeAppleScriptString(query), limitClause)
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -248,7 +256,6 @@ end tell
 	messages, err := c.parseMessages(output)
 	return messages, err
 }
-
 
 // MarkMessageAsRead marks a message as read
 func (c *Client) MarkMessageAsRead(accountName, mailboxName, messageID string, read bool) error {
@@ -281,7 +288,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, mailboxName, messageID, readStatus)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), readStatus)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -324,7 +331,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, mailboxName, messageID, flagStatus)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), flagStatus)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -362,7 +369,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, mailboxName, messageID)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -376,58 +383,80 @@ try {
 
 // SendMessage sends a new email message
 func (c *Client) SendMessage(accountName, subject, body string, to, cc, bcc, attachments []string) error {
-	toList := strings.Join(to, `", "`)
-	ccList := strings.Join(cc, `", "`)
-	bccList := strings.Join(bcc, `", "`)
+	// Escape all recipients
+	var toList, ccList, bccList string
+	var escapedTo, escapedCc, escapedBcc []string
+
+	for _, addr := range to {
+		escapedTo = append(escapedTo, escapeAppleScriptString(addr))
+	}
+	toList = strings.Join(escapedTo, `", "`)
+
+	for _, addr := range cc {
+		escapedCc = append(escapedCc, escapeAppleScriptString(addr))
+	}
+	ccList = strings.Join(escapedCc, `", "`)
+
+	for _, addr := range bcc {
+		escapedBcc = append(escapedBcc, escapeAppleScriptString(addr))
+	}
+	bccList = strings.Join(escapedBcc, `", "`)
 
 	// Build attachment code
 	attachCode := ""
 	if len(attachments) > 0 {
 		for _, attPath := range attachments {
-			escapedPath := escapeJSString(attPath)
+			// Attachments use JXA-like escaping in our helper? No, this is AppleScript block.
+			// "make new attachment with properties {file name:"%s"}..."
+			escapedPath := escapeAppleScriptString(attPath)
 			attachCode += fmt.Sprintf(`
-			try {
+			try
 				make new attachment with properties {file name:"%s"} at after the last paragraph
-			} catch (e) {
-				// Skip files that can't be attached
-			}
+			on error
+				-- Skip files that can't be attached
+			end try
 `, escapedPath)
 		}
 	}
 
+	// AppleScript block
 	script := fmt.Sprintf(`
-tell application "Mail"
-	try
-		set targetAccount to account "%s"
-		set newMessage to make new outgoing message with properties {subject:"%s", content:"%s", visible:false}
+	tell application "Mail"
+		try
+			set targetAccount to account "%s"
+			set newMessage to make new outgoing message with properties {subject:"%s", content:"%s", visible:false}
 
-		tell newMessage
-			set sender to (item 1 of (email addresses of targetAccount as list))
+			tell newMessage
+				set sender to (item 1 of (email addresses of targetAccount as list))
 
-			repeat with addr in {"%s"}
-				make new to recipient at end of to recipients with properties {address:addr}
-			end repeat
-
-			if "%s" is not "" then
 				repeat with addr in {"%s"}
-					make new cc recipient at end of cc recipients with properties {address:addr}
+					make new to recipient at end of to recipients with properties {address:addr}
 				end repeat
-			end if
 
-			if "%s" is not "" then
-				repeat with addr in {"%s"}
-					make new bcc recipient at end of bcc recipients with properties {address:addr}
-				end repeat
-			end if
+				if "%s" is not "" then
+					repeat with addr in {"%s"}
+						make new cc recipient at end of cc recipients with properties {address:addr}
+					end repeat
+				end if
+
+				if "%s" is not "" then
+					repeat with addr in {"%s"}
+						make new bcc recipient at end of bcc recipients with properties {address:addr}
+					end repeat
+				end if
 %s
 			send
-		end tell
-		return "Success"
-	on error errMsg
-		return "Error: " & errMsg
-	end try
-end tell
-`, accountName, subject, body, toList, ccList, ccList, bccList, bccList, attachCode)
+			end tell
+			return "Success"
+		on error errMsg
+			return "Error: " & errMsg
+		end try
+	end tell
+`, escapeAppleScriptString(accountName), escapeAppleScriptString(subject), escapeAppleScriptString(body),
+		toList,
+		ccList, ccList,
+		bccList, bccList,
+		attachCode)
 
 	_, err := c.runAppleScript(script)
 	return err
@@ -462,15 +491,15 @@ func (c *Client) parseMessages(output string) ([]Message, error) {
 // GetUnreadCount gets the total unread message count
 func (c *Client) GetUnreadCount() (int, error) {
 	script := `
-tell application "Mail"
-	set totalUnread to 0
-	repeat with acc in accounts
-		repeat with mbox in mailboxes of acc
-			set totalUnread to totalUnread + (unread count of mbox)
+	tell application "Mail"
+		set totalUnread to 0
+		repeat with acc in accounts
+			repeat with mbox in mailboxes of acc
+				set totalUnread to totalUnread + (unread count of mbox)
+			end repeat
 		end repeat
-	end repeat
-	return totalUnread
-end tell
+		return totalUnread
+	end tell
 `
 	output, err := c.runAppleScript(script)
 	if err != nil {
@@ -529,19 +558,19 @@ JSON.stringify(result);
 func (c *Client) SyncAccount(accountName string) error {
 	// Verify account exists
 	script := fmt.Sprintf(`
-tell application "Mail"
-	set accountFound to false
-	repeat with acc in accounts
-		if name of acc is "%s" then
-			set accountFound to true
-			exit repeat
+	tell application "Mail"
+		set accountFound to false
+		repeat with acc in accounts
+			if name of acc is "%s" then
+				set accountFound to true
+				exit repeat
+			end if
+		end repeat
+		if not accountFound then
+			error "Account not found: %s"
 		end if
-	end repeat
-	if not accountFound then
-		error "Account not found: %s"
-	end if
-end tell
-`, accountName, accountName)
+	end tell
+`, escapeAppleScriptString(accountName), escapeAppleScriptString(accountName))
 
 	_, err := c.runAppleScript(script)
 	if err != nil {
@@ -592,7 +621,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, accountName)
+`, escapeJSString(accountName), escapeJSString(accountName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -633,7 +662,7 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 	if since != "" {
 		// Parse the since date and create a filter
 		// JXA can parse date strings in various formats
-		sinceFilter = fmt.Sprintf("const sinceDate = new Date('%s'); messages = messages.filter(m => { const msgDate = m.dateReceived(); return msgDate && msgDate >= sinceDate; });", since)
+		sinceFilter = fmt.Sprintf("const sinceDate = new Date('%s'); messages = messages.filter(m => { const msgDate = m.dateReceived(); return msgDate && msgDate >= sinceDate; });", escapeJSString(since))
 	}
 
 	contentField := ""
@@ -681,7 +710,7 @@ try {
 								flagged: msg.flaggedStatus(),
 								messageSize: 0,
 								%s
-								mailbox: mbox.name(),
+							mailbox: mbox.name(),
 								account: acc.name()
 							});
 						} catch (e) {
@@ -699,7 +728,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, limit, limit, contentField)
+`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, limit, limit, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -781,7 +810,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, messageID)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -836,7 +865,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, mailboxName, messageID)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -875,7 +904,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, accountName, sourceMailbox, messageID, targetMailbox)
+`, escapeJSString(accountName), escapeJSString(sourceMailbox), escapeJSString(messageID), escapeJSString(targetMailbox))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -918,7 +947,7 @@ try {
 								result.push({
 									name: att.name(),
 									fileSize: att.fileSize(),
-									mimeType: mimeType
+								mimeType: mimeType
 								});
 							}
 							break;
@@ -935,7 +964,7 @@ try {
 }
 
 JSON.stringify(result);
-`, accountName, mailboxName, messageID)
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1007,10 +1036,10 @@ try {
 // SearchMessagesJSON searches for messages across mailboxes
 // Note: By default only searches INBOX mailboxes for performance reasons
 func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxName string, limit int) ([]Message, error) {
-	// Escape single quotes in query
-	escapedQuery := strings.ReplaceAll(query, "'", "\\'")
-	escapedAccount := strings.ReplaceAll(accountName, "'", "\\'")
-	escapedMailbox := strings.ReplaceAll(mailboxName, "'", "\\'")
+	// Use helper for escaping
+	escapedQuery := escapeJSString(query)
+	escapedAccount := escapeJSString(accountName)
+	escapedMailbox := escapeJSString(mailboxName)
 
 	// Set a reasonable default limit if none specified
 	if limit == 0 {
