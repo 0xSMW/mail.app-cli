@@ -1,5 +1,9 @@
 # mail-app-cli
 
+<p align="center">
+  <img src="logo.png" alt="mail-app-cli logo" width="200">
+</p>
+
 A command-line interface for controlling macOS Mail.app. Provides complete scriptable access to accounts, mailboxes, messages, and attachments.
 
 ## Features
