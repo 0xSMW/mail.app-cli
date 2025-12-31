@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -590,6 +591,63 @@ func (c *Client) SyncAllAccounts() error {
 
 // GetMailboxesJSON retrieves mailboxes as JSON using JXA
 func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
+	// If specific account requested, use single JXA call
+	if accountName != "" {
+		return c.getMailboxesForSingleAccount(accountName)
+	}
+
+	// For all accounts, fetch in parallel for better performance
+	accounts, err := c.GetAccountsJSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get accounts: %w", err)
+	}
+
+	if len(accounts) == 0 {
+		return []Mailbox{}, nil
+	}
+
+	// If only one account total, no need for parallelization
+	if len(accounts) == 1 {
+		return c.getMailboxesForSingleAccount(accounts[0].Name)
+	}
+
+	// Use channel to collect results from goroutines
+	type result struct {
+		mailboxes []Mailbox
+		err       error
+	}
+	results := make(chan result, len(accounts))
+
+	// Launch goroutine for each account
+	for _, account := range accounts {
+		go func(accName string) {
+			mailboxes, err := c.getMailboxesForSingleAccount(accName)
+			results <- result{mailboxes: mailboxes, err: err}
+		}(account.Name)
+	}
+
+	// Collect results
+	var allMailboxes []Mailbox
+	var errors []error
+	for i := 0; i < len(accounts); i++ {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+		} else {
+			allMailboxes = append(allMailboxes, res.mailboxes...)
+		}
+	}
+
+	// Return partial results even if some accounts failed
+	if len(errors) > 0 && len(allMailboxes) == 0 {
+		return nil, fmt.Errorf("failed to get mailboxes from all accounts: %v", errors)
+	}
+
+	return allMailboxes, nil
+}
+
+// getMailboxesForSingleAccount retrieves mailboxes for a specific account
+func (c *Client) getMailboxesForSingleAccount(accountName string) ([]Mailbox, error) {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -598,7 +656,7 @@ try {
 	const accounts = mail.accounts();
 	for (let i = 0; i < accounts.length; i++) {
 		const acc = accounts[i];
-		if (acc.name() === '%s' || '%s' === '') {
+		if (acc.name() === '%s') {
 			const mailboxes = acc.mailboxes();
 			for (let j = 0; j < mailboxes.length; j++) {
 				const mbox = mailboxes[j];
@@ -621,7 +679,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(accountName))
+`, escapeJSString(accountName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1036,15 +1094,89 @@ try {
 // SearchMessagesJSON searches for messages across mailboxes
 // Note: By default only searches INBOX mailboxes for performance reasons
 func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxName string, limit int) ([]Message, error) {
-	// Use helper for escaping
-	escapedQuery := escapeJSString(query)
-	escapedAccount := escapeJSString(accountName)
-	escapedMailbox := escapeJSString(mailboxName)
-
 	// Set a reasonable default limit if none specified
 	if limit == 0 {
 		limit = 50
 	}
+
+	// If specific mailbox requested, use single JXA call for simplicity
+	if mailboxName != "" {
+		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit)
+	}
+
+	// Get list of mailboxes to search
+	mailboxes, err := c.GetMailboxesJSON(accountName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mailboxes: %w", err)
+	}
+
+	// Filter to only INBOX mailboxes for performance (unless specific account given)
+	var mailboxesToSearch []Mailbox
+	for _, mbox := range mailboxes {
+		if mbox.Name == "INBOX" || mbox.Name == "Inbox" {
+			mailboxesToSearch = append(mailboxesToSearch, mbox)
+		}
+	}
+
+	if len(mailboxesToSearch) == 0 {
+		return []Message{}, nil
+	}
+
+	// If only one mailbox, no need for parallelization
+	if len(mailboxesToSearch) == 1 {
+		return c.searchMessagesInSingleMailbox(query, mailboxesToSearch[0].Account, mailboxesToSearch[0].Name, limit)
+	}
+
+	// Search mailboxes in parallel
+	type result struct {
+		messages []Message
+		err      error
+	}
+	results := make(chan result, len(mailboxesToSearch))
+
+	// Launch goroutine for each mailbox
+	for _, mbox := range mailboxesToSearch {
+		go func(accName, mboxName string) {
+			messages, err := c.searchMessagesInSingleMailbox(query, accName, mboxName, limit)
+			results <- result{messages: messages, err: err}
+		}(mbox.Account, mbox.Name)
+	}
+
+	// Collect results
+	var allMessages []Message
+	var errors []error
+	for i := 0; i < len(mailboxesToSearch); i++ {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+		} else {
+			allMessages = append(allMessages, res.messages...)
+		}
+	}
+
+	// Return partial results even if some mailboxes failed
+	if len(errors) > 0 && len(allMessages) == 0 {
+		return nil, fmt.Errorf("failed to search all mailboxes: %v", errors)
+	}
+
+	// Sort by date received (newest first) and apply limit
+	sort.Slice(allMessages, func(i, j int) bool {
+		return allMessages[i].DateReceived > allMessages[j].DateReceived
+	})
+
+	if len(allMessages) > limit {
+		allMessages = allMessages[:limit]
+	}
+
+	return allMessages, nil
+}
+
+// searchMessagesInSingleMailbox searches for messages in a specific mailbox
+func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName string, limit int) ([]Message, error) {
+	// Use helper for escaping
+	escapedQuery := escapeJSString(query)
+	escapedAccount := escapeJSString(accountName)
+	escapedMailbox := escapeJSString(mailboxName)
 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
@@ -1070,16 +1202,9 @@ try {
 			const mbox = mailboxes[j];
 			const mboxName = mbox.name();
 
-			// If mailbox specified, only search that one
-			if (targetMailbox !== '') {
-				if (mboxName !== targetMailbox) {
-					continue;
-				}
-			} else {
-				// Otherwise only search INBOX for performance
-				if (mboxName !== 'INBOX' && mboxName !== 'Inbox') {
-					continue;
-				}
+			// Only search specified mailbox
+			if (mboxName !== targetMailbox) {
+				continue;
 			}
 
 			const messages = mbox.messages();
@@ -1136,4 +1261,364 @@ JSON.stringify(result);
 	}
 
 	return messages, nil
+}
+
+// GetMessagesFromMultipleMailboxes loads messages from multiple mailboxes concurrently
+func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
+	AccountName  string
+	MailboxName  string
+	Limit        int
+	Offset       int
+	UnreadOnly   bool
+	FlaggedOnly  bool
+	WithContent  bool
+	Since        string
+}) ([]Message, error) {
+	if len(requests) == 0 {
+		return []Message{}, nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.GetMessagesJSON(req.AccountName, req.MailboxName, req.Limit, req.Offset, req.UnreadOnly, req.FlaggedOnly, req.WithContent, req.Since)
+	}
+
+	// Load messages from multiple mailboxes in parallel
+	type result struct {
+		messages []Message
+		err      error
+	}
+	results := make(chan result, len(requests))
+
+	// Launch goroutine for each mailbox
+	for _, req := range requests {
+		go func(r struct {
+			AccountName  string
+			MailboxName  string
+			Limit        int
+			Offset       int
+			UnreadOnly   bool
+			FlaggedOnly  bool
+			WithContent  bool
+			Since        string
+		}) {
+			messages, err := c.GetMessagesJSON(r.AccountName, r.MailboxName, r.Limit, r.Offset, r.UnreadOnly, r.FlaggedOnly, r.WithContent, r.Since)
+			results <- result{messages: messages, err: err}
+		}(req)
+	}
+
+	// Collect results
+	var allMessages []Message
+	var errors []error
+	for i := 0; i < len(requests); i++ {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+		} else {
+			allMessages = append(allMessages, res.messages...)
+		}
+	}
+
+	// Return partial results even if some mailboxes failed
+	if len(errors) > 0 && len(allMessages) == 0 {
+		return nil, fmt.Errorf("failed to get messages from all mailboxes: %v", errors)
+	}
+
+	return allMessages, nil
+}
+
+// GetMultipleMessageDetails loads full details for multiple messages concurrently
+func (c *Client) GetMultipleMessageDetails(requests []struct {
+	AccountName  string
+	MailboxName  string
+	MessageID    string
+}) ([]*Message, error) {
+	if len(requests) == 0 {
+		return []*Message{}, nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		msg, err := c.GetMessageDetailsJSON(req.AccountName, req.MailboxName, req.MessageID)
+		if err != nil {
+			return nil, err
+		}
+		return []*Message{msg}, nil
+	}
+
+	// Load message details in parallel
+	type result struct {
+		message *Message
+		err     error
+		index   int
+	}
+	results := make(chan result, len(requests))
+
+	// Launch goroutine for each message
+	for i, req := range requests {
+		go func(idx int, r struct {
+			AccountName  string
+			MailboxName  string
+			MessageID    string
+		}) {
+			message, err := c.GetMessageDetailsJSON(r.AccountName, r.MailboxName, r.MessageID)
+			results <- result{message: message, err: err, index: idx}
+		}(i, req)
+	}
+
+	// Collect results in original order
+	messages := make([]*Message, len(requests))
+	var errors []error
+	successCount := 0
+
+	for i := 0; i < len(requests); i++ {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+			messages[res.index] = nil
+		} else {
+			messages[res.index] = res.message
+			successCount++
+		}
+	}
+
+	// Return error if all requests failed
+	if successCount == 0 {
+		return nil, fmt.Errorf("failed to get all message details: %v", errors)
+	}
+
+	return messages, nil
+}
+
+// BulkMarkMessages marks multiple messages as read/unread concurrently
+func (c *Client) BulkMarkMessages(requests []struct {
+	AccountName string
+	MailboxName string
+	MessageID   string
+	Read        bool
+}) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.MarkMessageAsRead(req.AccountName, req.MailboxName, req.MessageID, req.Read)
+	}
+
+	// Process marks in parallel
+	errors := make(chan error, len(requests))
+
+	// Launch goroutine for each mark operation
+	for _, req := range requests {
+		go func(r struct {
+			AccountName string
+			MailboxName string
+			MessageID   string
+			Read        bool
+		}) {
+			errors <- c.MarkMessageAsRead(r.AccountName, r.MailboxName, r.MessageID, r.Read)
+		}(req)
+	}
+
+	// Collect results
+	var errorList []error
+	for i := 0; i < len(requests); i++ {
+		if err := <-errors; err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("failed to mark some messages: %v", errorList)
+	}
+
+	return nil
+}
+
+// BulkFlagMessages flags/unflags multiple messages concurrently
+func (c *Client) BulkFlagMessages(requests []struct {
+	AccountName string
+	MailboxName string
+	MessageID   string
+	Flagged     bool
+}) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.FlagMessage(req.AccountName, req.MailboxName, req.MessageID, req.Flagged)
+	}
+
+	// Process flags in parallel
+	errors := make(chan error, len(requests))
+
+	// Launch goroutine for each flag operation
+	for _, req := range requests {
+		go func(r struct {
+			AccountName string
+			MailboxName string
+			MessageID   string
+			Flagged     bool
+		}) {
+			errors <- c.FlagMessage(r.AccountName, r.MailboxName, r.MessageID, r.Flagged)
+		}(req)
+	}
+
+	// Collect results
+	var errorList []error
+	for i := 0; i < len(requests); i++ {
+		if err := <-errors; err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("failed to flag some messages: %v", errorList)
+	}
+
+	return nil
+}
+
+// BulkDeleteMessages deletes multiple messages concurrently
+func (c *Client) BulkDeleteMessages(requests []struct {
+	AccountName string
+	MailboxName string
+	MessageID   string
+}) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.DeleteMessage(req.AccountName, req.MailboxName, req.MessageID)
+	}
+
+	// Process deletes in parallel
+	errors := make(chan error, len(requests))
+
+	// Launch goroutine for each delete operation
+	for _, req := range requests {
+		go func(r struct {
+			AccountName string
+			MailboxName string
+			MessageID   string
+		}) {
+			errors <- c.DeleteMessage(r.AccountName, r.MailboxName, r.MessageID)
+		}(req)
+	}
+
+	// Collect results
+	var errorList []error
+	for i := 0; i < len(requests); i++ {
+		if err := <-errors; err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("failed to delete some messages: %v", errorList)
+	}
+
+	return nil
+}
+
+// BulkArchiveMessages archives multiple messages concurrently
+func (c *Client) BulkArchiveMessages(requests []struct {
+	AccountName string
+	MailboxName string
+	MessageID   string
+}) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.ArchiveMessage(req.AccountName, req.MailboxName, req.MessageID)
+	}
+
+	// Process archives in parallel
+	errors := make(chan error, len(requests))
+
+	// Launch goroutine for each archive operation
+	for _, req := range requests {
+		go func(r struct {
+			AccountName string
+			MailboxName string
+			MessageID   string
+		}) {
+			errors <- c.ArchiveMessage(r.AccountName, r.MailboxName, r.MessageID)
+		}(req)
+	}
+
+	// Collect results
+	var errorList []error
+	for i := 0; i < len(requests); i++ {
+		if err := <-errors; err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("failed to archive some messages: %v", errorList)
+	}
+
+	return nil
+}
+
+// BulkMoveMessages moves multiple messages concurrently
+func (c *Client) BulkMoveMessages(requests []struct {
+	AccountName    string
+	SourceMailbox  string
+	MessageID      string
+	TargetMailbox  string
+}) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	// If only one request, no need for parallelization
+	if len(requests) == 1 {
+		req := requests[0]
+		return c.MoveMessage(req.AccountName, req.SourceMailbox, req.MessageID, req.TargetMailbox)
+	}
+
+	// Process moves in parallel
+	errors := make(chan error, len(requests))
+
+	// Launch goroutine for each move operation
+	for _, req := range requests {
+		go func(r struct {
+			AccountName    string
+			SourceMailbox  string
+			MessageID      string
+			TargetMailbox  string
+		}) {
+			errors <- c.MoveMessage(r.AccountName, r.SourceMailbox, r.MessageID, r.TargetMailbox)
+		}(req)
+	}
+
+	// Collect results
+	var errorList []error
+	for i := 0; i < len(requests); i++ {
+		if err := <-errors; err != nil {
+			errorList = append(errorList, err)
+		}
+	}
+
+	if len(errorList) > 0 {
+		return fmt.Errorf("failed to move some messages: %v", errorList)
+	}
+
+	return nil
 }
