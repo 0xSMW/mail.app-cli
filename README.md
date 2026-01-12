@@ -1,5 +1,7 @@
 # mail-app-cli
 
+**An [Intelligrit Labs](https://intelligrit.com#labs) Project**
+
 <p align="center">
   <img src="logo.png" alt="mail-app-cli logo" width="200">
 </p>
@@ -21,13 +23,13 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 ### From Source
 
 ```bash
-go install github.com/robertmeta/mail-app-cli@latest
+go install github.com/intelligrit/mail-app-cli@latest
 ```
 
 ### Build Locally
 
 ```bash
-git clone https://github.com/robertmeta/mail-app-cli.git
+git clone https://github.com/intelligrit/mail-app-cli.git
 cd mail-app-cli
 go build -o mail-app-cli
 ```
@@ -400,6 +402,10 @@ Contributions are welcome! This project follows standard Go conventions.
 6. Commit your changes
 7. Push to the branch
 8. Open a Pull Request
+
+## About Intelligrit Labs
+
+mail-app-cli is developed by [Intelligrit Labs](https://intelligrit.com#labs), the R&D arm of Intelligrit LLC. We build tools for ourselves and release them for everyone. Intelligrit delivers AI-driven IT modernization for federal agencies.
 
 ## License
 
