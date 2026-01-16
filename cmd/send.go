@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/robertmeta/mail-app-cli/pkg/mail"
+	"github.com/intelligrit/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 

@@ -1,4 +1,4 @@
-module github.com/robertmeta/mail-app-cli
+module github.com/intelligrit/mail-app-cli
 
 go 1.21
 

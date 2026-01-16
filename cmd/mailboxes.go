@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/robertmeta/mail-app-cli/pkg/cache"
-	"github.com/robertmeta/mail-app-cli/pkg/mail"
+	"github.com/intelligrit/mail-app-cli/pkg/cache"
+	"github.com/intelligrit/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
