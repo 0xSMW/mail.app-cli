@@ -404,21 +404,18 @@ func (c *Client) SendMessage(accountName, subject, body string, to, cc, bcc, att
 	bccList = strings.Join(escapedBcc, `", "`)
 
 	// Build attachment code
-	attachCode := ""
-	if len(attachments) > 0 {
-		for _, attPath := range attachments {
-			// Attachments use JXA-like escaping in our helper? No, this is AppleScript block.
-			// "make new attachment with properties {file name:"%s"}..."
-			escapedPath := escapeAppleScriptString(attPath)
-			attachCode += fmt.Sprintf(`
+	var attachCodeBuilder strings.Builder
+	for _, attPath := range attachments {
+		escapedPath := escapeAppleScriptString(attPath)
+		fmt.Fprintf(&attachCodeBuilder, `
 			try
 				make new attachment with properties {file name:"%s"} at after the last paragraph
 			on error
 				-- Skip files that can't be attached
 			end try
 `, escapedPath)
-		}
 	}
+	attachCode := attachCodeBuilder.String()
 
 	// AppleScript block
 	script := fmt.Sprintf(`
@@ -464,29 +461,21 @@ func (c *Client) SendMessage(accountName, subject, body string, to, cc, bcc, att
 }
 
 // Helper function to parse accounts from AppleScript output
-func (c *Client) parseAccounts(output string) ([]Account, error) {
-	// AppleScript returns records as comma-separated values
-	// This is a simplified parser - may need enhancement based on actual output format
-	accounts := []Account{}
-
-	// For now, return empty list - need to see actual output format to implement properly
+func (c *Client) parseAccounts(_ string) ([]Account, error) {
 	// TODO: Implement proper parsing based on AppleScript record format
-
-	return accounts, nil
+	return []Account{}, nil
 }
 
 // Helper function to parse mailboxes from AppleScript output
-func (c *Client) parseMailboxes(output string) ([]Mailbox, error) {
-	mailboxes := []Mailbox{}
+func (c *Client) parseMailboxes(_ string) ([]Mailbox, error) {
 	// TODO: Implement proper parsing based on AppleScript record format
-	return mailboxes, nil
+	return []Mailbox{}, nil
 }
 
 // Helper function to parse messages from AppleScript output
-func (c *Client) parseMessages(output string) ([]Message, error) {
-	messages := []Message{}
+func (c *Client) parseMessages(_ string) ([]Message, error) {
 	// TODO: Implement proper parsing based on AppleScript record format
-	return messages, nil
+	return []Message{}, nil
 }
 
 // GetUnreadCount gets the total unread message count
@@ -510,15 +499,6 @@ func (c *Client) GetUnreadCount() (int, error) {
 	var count int
 	fmt.Sscanf(output, "%d", &count)
 	return count, nil
-}
-
-// Helper to convert AppleScript output to JSON for easier parsing
-func (c *Client) executeJXAForJSON(jxaScript string) (string, error) {
-	script := fmt.Sprintf(`
-%s
-JSON.stringify(result)
-`, jxaScript)
-	return c.runJXA(script)
 }
 
 // GetAccountsJSON retrieves accounts as JSON using JXA
@@ -653,25 +633,20 @@ const mail = Application('Mail');
 const result = [];
 
 try {
-	const accounts = mail.accounts();
-	for (let i = 0; i < accounts.length; i++) {
-		const acc = accounts[i];
-		if (acc.name() === '%s') {
-			const mailboxes = acc.mailboxes();
-			for (let j = 0; j < mailboxes.length; j++) {
-				const mbox = mailboxes[j];
-				try {
-					const msgs = mbox.messages();
-					result.push({
-						name: mbox.name(),
-						unreadCount: mbox.unreadCount(),
-						totalCount: msgs ? msgs.length : 0,
-						account: acc.name()
-					});
-				} catch (e) {
-					// Skip mailboxes that can't be queried
-				}
-			}
+	const acc = mail.accounts.byName('%s');
+	const accName = acc.name();
+	const mailboxes = acc.mailboxes();
+	for (let j = 0; j < mailboxes.length; j++) {
+		const mbox = mailboxes[j];
+		try {
+			result.push({
+				name: mbox.name(),
+				unreadCount: mbox.unreadCount(),
+				totalCount: mbox.messages.count(),
+				account: accName
+			});
+		} catch (e) {
+			// Skip mailboxes that can't be queried
 		}
 	}
 } catch (e) {
@@ -735,50 +710,37 @@ const mail = Application('Mail');
 const result = [];
 
 try {
-	const accounts = mail.accounts();
-	for (let i = 0; i < accounts.length; i++) {
-		const acc = accounts[i];
-		if (acc.name() === '%s') {
-			const mailboxes = acc.mailboxes();
-			for (let j = 0; j < mailboxes.length; j++) {
-				const mbox = mailboxes[j];
-				if (mbox.name() === '%s') {
-					let messages = mbox.messages();
-					// Apply filters BEFORE iterating for performance
-					%s
-					%s
-					%s
-					%s
-					%s
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	let messages = mbox.messages();
+	// Apply filters BEFORE iterating for performance
+	%s
+	%s
+	%s
+	%s
+	%s
 
-					// Only iterate through limited set for performance on large mailboxes
-					const maxToProcess = %d > 0 ? Math.min(%d * 3, messages.length) : Math.min(1000, messages.length);
-					for (let k = 0; k < maxToProcess && result.length < %d; k++) {
-						const msg = messages[k];
-						// Skip deleted messages inline for performance
-						try { if (msg.deletedStatus()) continue; } catch(e) {}
-						try {
-							result.push({
-								id: String(msg.id()),
-								subject: msg.subject() || '',
-								sender: msg.sender() || '',
-								dateReceived: (msg.dateReceived() || new Date()).toString(),
-								dateSent: (msg.dateSent() || new Date()).toString(),
-								read: msg.readStatus(),
-								flagged: msg.flaggedStatus(),
-								messageSize: 0,
-								%s
-							mailbox: mbox.name(),
-								account: acc.name()
-							});
-						} catch (e) {
-							// Skip messages that cause errors
-						}
-					}
-					break;
-				}
-			}
-			break;
+	const msgCount = messages.length;
+	for (let k = 0; k < msgCount && result.length < %d; k++) {
+		const msg = messages[k];
+		// Skip deleted messages inline for performance
+		try { if (msg.deletedStatus()) continue; } catch(e) {}
+		try {
+			result.push({
+				id: String(msg.id()),
+				subject: msg.subject() || '',
+				sender: msg.sender() || '',
+				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+				dateSent: (msg.dateSent() || new Date()).toISOString(),
+				read: msg.readStatus(),
+				flagged: msg.flaggedStatus(),
+				messageSize: 0,
+				%s
+			mailbox: mbox.name(),
+				account: acc.name()
+			});
+		} catch (e) {
+			// Skip messages that cause errors
 		}
 	}
 } catch (e) {
@@ -786,7 +748,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, limit, limit, contentField)
+`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -808,58 +770,46 @@ const mail = Application('Mail');
 let result = null;
 
 try {
-	const accounts = mail.accounts();
-	for (let i = 0; i < accounts.length; i++) {
-		const acc = accounts[i];
-		if (acc.name() === '%s') {
-			const mailboxes = acc.mailboxes();
-			for (let j = 0; j < mailboxes.length; j++) {
-				const mbox = mailboxes[j];
-				if (mbox.name() === '%s') {
-					const messages = mbox.messages();
-					for (let k = 0; k < messages.length; k++) {
-						const msg = messages[k];
-						if (String(msg.id()) === '%s') {
-							const toRecipients = [];
-							const toRecs = msg.toRecipients();
-							for (let t = 0; t < toRecs.length; t++) {
-								toRecipients.push(toRecs[t].address());
-							}
-
-							const ccRecipients = [];
-							const ccRecs = msg.ccRecipients();
-							for (let c = 0; c < ccRecs.length; c++) {
-								ccRecipients.push(ccRecs[c].address());
-							}
-
-							const bccRecipients = [];
-							const bccRecs = msg.bccRecipients();
-							for (let b = 0; b < bccRecs.length; b++) {
-								bccRecipients.push(bccRecs[b].address());
-							}
-
-							result = {
-								id: String(msg.id()),
-								subject: msg.subject() || '',
-								sender: msg.sender() || '',
-								dateReceived: (msg.dateReceived() || new Date()).toString(),
-								dateSent: (msg.dateSent() || new Date()).toString(),
-								read: msg.readStatus(),
-								flagged: msg.flaggedStatus(),
-								messageSize: msg.messageSize(),
-								content: msg.content() || '',
-								mailbox: mbox.name(),
-								account: acc.name(),
-								toRecipients: toRecipients,
-								ccRecipients: ccRecipients,
-								bccRecipients: bccRecipients
-							};
-							break;
-						}
-					}
-					break;
-				}
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
+	for (let k = 0; k < messages.length; k++) {
+		const msg = messages[k];
+		if (String(msg.id()) === '%s') {
+			const toRecipients = [];
+			const toRecs = msg.toRecipients();
+			for (let t = 0; t < toRecs.length; t++) {
+				toRecipients.push(toRecs[t].address());
 			}
+
+			const ccRecipients = [];
+			const ccRecs = msg.ccRecipients();
+			for (let c = 0; c < ccRecs.length; c++) {
+				ccRecipients.push(ccRecs[c].address());
+			}
+
+			const bccRecipients = [];
+			const bccRecs = msg.bccRecipients();
+			for (let b = 0; b < bccRecs.length; b++) {
+				bccRecipients.push(bccRecs[b].address());
+			}
+
+			result = {
+				id: String(msg.id()),
+				subject: msg.subject() || '',
+				sender: msg.sender() || '',
+				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+				dateSent: (msg.dateSent() || new Date()).toISOString(),
+				read: msg.readStatus(),
+				flagged: msg.flaggedStatus(),
+				messageSize: msg.messageSize(),
+				content: msg.content() || '',
+				mailbox: mbox.name(),
+				account: acc.name(),
+				toRecipients: toRecipients,
+				ccRecipients: ccRecipients,
+				bccRecipients: bccRecipients
+			};
 			break;
 		}
 	}
@@ -981,38 +931,26 @@ const mail = Application('Mail');
 const result = [];
 
 try {
-	const accounts = mail.accounts();
-	for (let i = 0; i < accounts.length; i++) {
-		const acc = accounts[i];
-		if (acc.name() === '%s') {
-			const mailboxes = acc.mailboxes();
-			for (let j = 0; j < mailboxes.length; j++) {
-				const mbox = mailboxes[j];
-				if (mbox.name() === '%s') {
-					const messages = mbox.messages();
-					for (let k = 0; k < messages.length; k++) {
-						const msg = messages[k];
-						if (String(msg.id()) === '%s') {
-							const attachments = msg.mailAttachments();
-							for (let a = 0; a < attachments.length; a++) {
-								const att = attachments[a];
-								let mimeType = 'unknown';
-								try {
-									mimeType = att.mimeType() || 'unknown';
-								} catch (e) {
-									// mimeType() sometimes fails in Mail.app
-								}
-								result.push({
-									name: att.name(),
-									fileSize: att.fileSize(),
-								mimeType: mimeType
-								});
-							}
-							break;
-						}
-					}
-					break;
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const messages = mbox.messages();
+	for (let k = 0; k < messages.length; k++) {
+		const msg = messages[k];
+		if (String(msg.id()) === '%s') {
+			const attachments = msg.mailAttachments();
+			for (let a = 0; a < attachments.length; a++) {
+				const att = attachments[a];
+				let mimeType = 'unknown';
+				try {
+					mimeType = att.mimeType() || 'unknown';
+				} catch (e) {
+					// mimeType() sometimes fails in Mail.app
 				}
+				result.push({
+					name: att.name(),
+					fileSize: att.fileSize(),
+					mimeType: mimeType
+				});
 			}
 			break;
 		}
@@ -1182,65 +1120,41 @@ func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName s
 const mail = Application('Mail');
 const result = [];
 const searchTerm = '%s'.toLowerCase();
-const targetAccount = '%s';
-const targetMailbox = '%s';
 const maxResults = %d;
 
 try {
-	const accounts = mail.accounts();
-	outerLoop: for (let i = 0; i < accounts.length; i++) {
-		const acc = accounts[i];
+	const acc = mail.accounts.byName('%s');
+	const mbox = acc.mailboxes.byName('%s');
+	const accName = acc.name();
+	const mboxName = mbox.name();
+	const messages = mbox.messages();
+	// Limit how many messages to check per mailbox for performance
+	// Messages are typically sorted newest first, so this checks recent messages
+	const maxToCheck = Math.min(messages.length, 500);
 
-		// Skip if account specified and this isn't it
-		if (targetAccount !== '' && acc.name() !== targetAccount) {
-			continue;
-		}
+	for (let k = 0; k < maxToCheck && result.length < maxResults; k++) {
+		const msg = messages[k];
+		try {
+			const subject = (msg.subject() || '').toLowerCase();
+			const sender = (msg.sender() || '').toLowerCase();
 
-		const mailboxes = acc.mailboxes();
-
-		for (let j = 0; j < mailboxes.length; j++) {
-			const mbox = mailboxes[j];
-			const mboxName = mbox.name();
-
-			// Only search specified mailbox
-			if (mboxName !== targetMailbox) {
-				continue;
+			// Only search subject and sender
+			if (subject.includes(searchTerm) || sender.includes(searchTerm)) {
+				result.push({
+					id: String(msg.id()),
+					subject: msg.subject() || '',
+					sender: msg.sender() || '',
+					dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+					dateSent: (msg.dateSent() || new Date()).toISOString(),
+					read: msg.readStatus(),
+					flagged: msg.flaggedStatus(),
+					messageSize: msg.messageSize(),
+					mailbox: mboxName,
+					account: accName
+				});
 			}
-
-			const messages = mbox.messages();
-			// Limit how many messages to check per mailbox for performance
-			// Messages are typically sorted newest first, so this checks recent messages
-			const maxToCheck = Math.min(messages.length, 500);
-
-			for (let k = 0; k < maxToCheck; k++) {
-				if (result.length >= maxResults) {
-					break outerLoop;
-				}
-
-				const msg = messages[k];
-				try {
-					const subject = (msg.subject() || '').toLowerCase();
-					const sender = (msg.sender() || '').toLowerCase();
-
-					// Only search subject and sender
-					if (subject.includes(searchTerm) || sender.includes(searchTerm)) {
-						result.push({
-							id: String(msg.id()),
-							subject: msg.subject() || '',
-							sender: msg.sender() || '',
-							dateReceived: (msg.dateReceived() || new Date()).toString(),
-							dateSent: (msg.dateSent() || new Date()).toString(),
-							read: msg.readStatus(),
-							flagged: msg.flaggedStatus(),
-							messageSize: msg.messageSize(),
-							mailbox: mbox.name(),
-							account: acc.name()
-						});
-					}
-				} catch (e) {
-					// Skip messages that cause errors
-				}
-			}
+		} catch (e) {
+			// Skip messages that cause errors
 		}
 	}
 } catch (e) {
@@ -1248,7 +1162,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapedQuery, escapedAccount, escapedMailbox, limit)
+`, escapedQuery, limit, escapedAccount, escapedMailbox)
 
 	output, err := c.runJXA(script)
 	if err != nil {

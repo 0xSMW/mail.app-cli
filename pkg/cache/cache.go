@@ -81,7 +81,7 @@ func (c *Cache) Get(key string, v interface{}) (bool, error) {
 func (c *Cache) Set(key string, v interface{}) error {
 	path := filepath.Join(c.dir, key+".json")
 
-	data, err := json.MarshalIndent(v, "", "  ")
+	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("failed to marshal cache data: %w", err)
 	}

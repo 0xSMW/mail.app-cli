@@ -3,24 +3,44 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
+	"time"
 
+	"github.com/intelligrit/mail-app-cli/pkg/cache"
 	"github.com/intelligrit/mail-app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
+const messageCacheTTL = 5 * time.Minute
+
 var (
-	msgAccount      string
-	msgMailbox      string
-	msgLimit        int
-	msgOffset       int
-	msgUnread       bool
+	msgAccount       string
+	msgMailbox       string
+	msgLimit         int
+	msgOffset        int
+	msgUnread        bool
 	msgFlaggedFilter bool
-	msgWithContent  bool
-	msgRead         bool
-	msgFlaggedSet   bool
-	msgMessageID    string
-	msgSince        string
+	msgWithContent   bool
+	msgRead          bool
+	msgFlaggedSet    bool
+	msgMessageID     string
+	msgSince         string
+	msgNoCache       bool
+	msgForceRefresh  bool
 )
+
+// sanitizeCacheKey replaces non-alphanumeric chars so the key is safe as a filename component.
+func sanitizeCacheKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('-')
+		}
+	}
+	return b.String()
+}
 
 var messagesCmd = &cobra.Command{
 	Use:   "messages",
@@ -37,10 +57,47 @@ var messagesListCmd = &cobra.Command{
 			return fmt.Errorf("both --account and --mailbox are required")
 		}
 
+		// Build a cache key that encodes all query parameters so different queries
+		// get separate cache entries.
+		cacheKey := fmt.Sprintf("msgs-%s-%s-%d-%d-%v-%v-%s-%v",
+			sanitizeCacheKey(msgAccount),
+			sanitizeCacheKey(msgMailbox),
+			msgLimit, msgOffset,
+			msgUnread, msgFlaggedFilter,
+			sanitizeCacheKey(msgSince),
+			msgWithContent,
+		)
+
+		// Try cache first (skip if content requested — content is per-user and typically large)
+		if !msgNoCache && !msgForceRefresh {
+			c, err := cache.New()
+			if err == nil {
+				c.SetTTL(messageCacheTTL)
+				var cached []mail.Message
+				found, err := c.Get(cacheKey, &cached)
+				if err == nil && found {
+					output, err := json.MarshalIndent(cached, "", "  ")
+					if err != nil {
+						return fmt.Errorf("failed to marshal messages: %w", err)
+					}
+					fmt.Println(string(output))
+					return nil
+				}
+			}
+		}
+
 		client := mail.NewClient()
 		messages, err := client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, msgUnread, msgFlaggedFilter, msgWithContent, msgSince)
 		if err != nil {
 			return fmt.Errorf("failed to get messages: %w", err)
+		}
+
+		// Populate cache (always write unless --no-cache)
+		if !msgNoCache {
+			if c, err := cache.New(); err == nil {
+				c.SetTTL(messageCacheTTL)
+				c.Set(cacheKey, messages)
+			}
 		}
 
 		output, err := json.MarshalIndent(messages, "", "  ")
@@ -219,6 +276,8 @@ func init() {
 	messagesListCmd.Flags().BoolVarP(&msgFlaggedFilter, "flagged", "f", false, "Show only flagged messages")
 	messagesListCmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include message content (slower but better for accessibility)")
 	messagesListCmd.Flags().StringVarP(&msgSince, "since", "s", "", "Show messages since date (format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
+	messagesListCmd.Flags().BoolVar(&msgNoCache, "no-cache", false, "Bypass cache and fetch fresh data")
+	messagesListCmd.Flags().BoolVar(&msgForceRefresh, "force-refresh", false, "Force refresh cache with fresh data")
 
 	// Mark-specific flags
 	messagesMarkCmd.Flags().BoolVarP(&msgRead, "read", "r", true, "Mark as read (default) or use --read=false for unread")
