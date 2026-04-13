@@ -270,20 +270,12 @@ const mail = Application('Mail');
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		targetMsg.readStatus = %s;
+		mbox.messages.at(targetIdx).readStatus = %s;
 		'Success';
 	}
 } catch (e) {
@@ -313,20 +305,12 @@ const mail = Application('Mail');
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		targetMsg.flaggedStatus = %s;
+		mbox.messages.at(targetIdx).flaggedStatus = %s;
 		'Success';
 	}
 } catch (e) {
@@ -351,20 +335,12 @@ const mail = Application('Mail');
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		targetMsg.delete();
+		mbox.messages.at(targetIdx).delete();
 		'Success';
 	}
 } catch (e) {
@@ -686,7 +662,8 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 
 	sinceFilter := ""
 	if since != "" {
-		sinceFilter = fmt.Sprintf("{ const sd = new Date('%s'); indices = indices.filter(i => { const d = messages[i].dateReceived(); return d && d >= sd; }); }", escapeJSString(since))
+		// Bulk-fetch all received dates in one IPC call, then filter by index
+		sinceFilter = fmt.Sprintf("{ const sd = new Date('%s'); const allDates = mbox.messages.dateReceived(); indices = indices.filter(i => { const d = allDates[i]; return d && d >= sd; }); }", escapeJSString(since))
 	}
 
 	offsetClause := ""
@@ -776,46 +753,44 @@ let result = null;
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-	for (let k = 0; k < messages.length; k++) {
-		const msg = messages[k];
-		if (String(msg.id()) === '%s') {
-			const toRecipients = [];
-			const toRecs = msg.toRecipients();
-			for (let t = 0; t < toRecs.length; t++) {
-				toRecipients.push(toRecs[t].address());
-			}
-
-			const ccRecipients = [];
-			const ccRecs = msg.ccRecipients();
-			for (let c = 0; c < ccRecs.length; c++) {
-				ccRecipients.push(ccRecs[c].address());
-			}
-
-			const bccRecipients = [];
-			const bccRecs = msg.bccRecipients();
-			for (let b = 0; b < bccRecs.length; b++) {
-				bccRecipients.push(bccRecs[b].address());
-			}
-
-			result = {
-				id: String(msg.id()),
-				subject: msg.subject() || '',
-				sender: msg.sender() || '',
-				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-				dateSent: (msg.dateSent() || new Date()).toISOString(),
-				read: msg.readStatus(),
-				flagged: msg.flaggedStatus(),
-				messageSize: msg.messageSize(),
-				content: msg.content() || '',
-				mailbox: mbox.name(),
-				account: acc.name(),
-				toRecipients: toRecipients,
-				ccRecipients: ccRecipients,
-				bccRecipients: bccRecipients
-			};
-			break;
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx >= 0) {
+		const msg = mbox.messages.at(targetIdx);
+		const toRecipients = [];
+		const toRecs = msg.toRecipients();
+		for (let t = 0; t < toRecs.length; t++) {
+			toRecipients.push(toRecs[t].address());
 		}
+
+		const ccRecipients = [];
+		const ccRecs = msg.ccRecipients();
+		for (let c = 0; c < ccRecs.length; c++) {
+			ccRecipients.push(ccRecs[c].address());
+		}
+
+		const bccRecipients = [];
+		const bccRecs = msg.bccRecipients();
+		for (let b = 0; b < bccRecs.length; b++) {
+			bccRecipients.push(bccRecs[b].address());
+		}
+
+		result = {
+			id: String(msg.id()),
+			subject: msg.subject() || '',
+			sender: msg.sender() || '',
+			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+			dateSent: (msg.dateSent() || new Date()).toISOString(),
+			read: msg.readStatus(),
+			flagged: msg.flaggedStatus(),
+			messageSize: msg.messageSize(),
+			content: msg.content() || '',
+			mailbox: mbox.name(),
+			account: acc.name(),
+			toRecipients: toRecipients,
+			ccRecipients: ccRecipients,
+			bccRecipients: bccRecipients
+		};
 	}
 } catch (e) {
 	// Handle errors gracefully
@@ -844,17 +819,9 @@ const mail = Application('Mail');
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
 		const allMailboxes = acc.mailboxes();
@@ -868,7 +835,7 @@ try {
 		}
 
 		if (archiveBox) {
-			targetMsg.mailbox = archiveBox;
+			mbox.messages.at(targetIdx).mailbox = archiveBox;
 			'Success';
 		} else {
 			'Error: Archive mailbox not found';
@@ -896,21 +863,13 @@ const mail = Application('Mail');
 try {
 	const acc = mail.accounts.byName('%s');
 	const sourceMbox = acc.mailboxes.byName('%s');
-	const messages = sourceMbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = sourceMbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
 		const destMbox = acc.mailboxes.byName('%s');
-		targetMsg.mailbox = destMbox;
+		sourceMbox.messages.at(targetIdx).mailbox = destMbox;
 		'Success';
 	}
 } catch (e) {
@@ -937,26 +896,23 @@ const result = [];
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-	for (let k = 0; k < messages.length; k++) {
-		const msg = messages[k];
-		if (String(msg.id()) === '%s') {
-			const attachments = msg.mailAttachments();
-			for (let a = 0; a < attachments.length; a++) {
-				const att = attachments[a];
-				let mimeType = 'unknown';
-				try {
-					mimeType = att.mimeType() || 'unknown';
-				} catch (e) {
-					// mimeType() sometimes fails in Mail.app
-				}
-				result.push({
-					name: att.name(),
-					fileSize: att.fileSize(),
-					mimeType: mimeType
-				});
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx >= 0) {
+		const attachments = mbox.messages.at(targetIdx).mailAttachments();
+		for (let a = 0; a < attachments.length; a++) {
+			const att = attachments[a];
+			let mimeType = 'unknown';
+			try {
+				mimeType = att.mimeType() || 'unknown';
+			} catch (e) {
+				// mimeType() sometimes fails in Mail.app
 			}
-			break;
+			result.push({
+				name: att.name(),
+				fileSize: att.fileSize(),
+				mimeType: mimeType
+			});
 		}
 	}
 } catch (e) {
@@ -989,20 +945,12 @@ app.includeStandardAdditions = true;
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const messages = mbox.messages();
-
-	let targetMsg = null;
-	for (let i = 0; i < messages.length; i++) {
-		if (String(messages[i].id()) === '%s') {
-			targetMsg = messages[i];
-			break;
-		}
-	}
-
-	if (!targetMsg) {
+	const allIds = mbox.messages.id();
+	const targetIdx = allIds.findIndex(id => String(id) === '%s');
+	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		const attachments = targetMsg.mailAttachments();
+		const attachments = mbox.messages.at(targetIdx).mailAttachments();
 		let found = false;
 		for (let a = 0; a < attachments.length; a++) {
 			if (attachments[a].name() === '%s') {

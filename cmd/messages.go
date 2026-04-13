@@ -41,6 +41,15 @@ func sanitizeCacheKey(s string) string {
 	return b.String()
 }
 
+// invalidateMailboxCache removes all message-list cache entries for the given mailbox.
+// Call this after any mutation so subsequent list commands see fresh data.
+func invalidateMailboxCache(account, mailbox string) {
+	if c, err := cache.New(); err == nil {
+		prefix := fmt.Sprintf("msgs-%s-%s-", sanitizeCacheKey(account), sanitizeCacheKey(mailbox))
+		c.DeletePrefix(prefix)
+	}
+}
+
 var messagesCmd = &cobra.Command{
 	Use:   "messages",
 	Short: "Manage Mail.app messages",
@@ -152,6 +161,7 @@ var messagesMarkCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to mark message: %w", err)
 		}
+		invalidateMailboxCache(msgAccount, msgMailbox)
 
 		status := "unread"
 		if msgRead {
@@ -178,6 +188,7 @@ var messagesFlagCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to flag message: %w", err)
 		}
+		invalidateMailboxCache(msgAccount, msgMailbox)
 
 		status := "unflagged"
 		if msgFlaggedSet {
@@ -204,6 +215,7 @@ var messagesDeleteCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to delete message: %w", err)
 		}
+		invalidateMailboxCache(msgAccount, msgMailbox)
 
 		fmt.Println("Message deleted")
 		return nil
@@ -226,6 +238,10 @@ var messagesArchiveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to archive message: %w", err)
 		}
+		invalidateMailboxCache(msgAccount, msgMailbox)
+		// Also invalidate the archive mailbox (provider-dependent name)
+		invalidateMailboxCache(msgAccount, "Archive")
+		invalidateMailboxCache(msgAccount, "All Mail")
 
 		fmt.Println("Message archived")
 		return nil
@@ -249,6 +265,8 @@ var messagesMoveCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to move message: %w", err)
 		}
+		invalidateMailboxCache(msgAccount, msgMailbox)
+		invalidateMailboxCache(msgAccount, targetMailbox)
 
 		fmt.Printf("Message moved to %s\n", targetMailbox)
 		return nil

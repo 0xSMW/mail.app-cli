@@ -117,3 +117,20 @@ func (c *Cache) Clear() error {
 
 	return nil
 }
+
+// DeletePrefix removes all cached items whose key starts with the given prefix.
+// Use this to invalidate all query variants for a specific mailbox after a mutation.
+func (c *Cache) DeletePrefix(prefix string) error {
+	files, err := filepath.Glob(filepath.Join(c.dir, prefix+"*.json"))
+	if err != nil {
+		return fmt.Errorf("failed to list cache files: %w", err)
+	}
+
+	for _, file := range files {
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to delete cache file %s: %w", file, err)
+		}
+	}
+
+	return nil
+}
