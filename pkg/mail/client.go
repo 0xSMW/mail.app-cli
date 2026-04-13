@@ -671,38 +671,37 @@ JSON.stringify(result);
 
 // GetMessagesJSON retrieves messages from a mailbox using JXA
 func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
-	offsetClause := ""
-	if offset > 0 {
-		offsetClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(%d);", offset, offset)
-	}
-
-	limitClause := ""
-	if limit > 0 {
-		limitClause = fmt.Sprintf("if (messages.length > %d) messages = messages.slice(0, %d);", limit, limit)
-	}
-
+	// Build filter/offset/limit clauses using index-based approach.
+	// Bulk property accessors (mbox.messages.readStatus()) fetch all values in a
+	// single IPC call rather than one round-trip per message.
 	unreadFilter := ""
 	if unreadOnly {
-		unreadFilter = "messages = messages.filter(m => !m.readStatus());"
+		unreadFilter = "{ const rs = mbox.messages.readStatus(); indices = indices.filter(i => !rs[i]); }"
 	}
 
 	flaggedFilter := ""
 	if flaggedOnly {
-		flaggedFilter = "messages = messages.filter(m => m.flaggedStatus());"
+		flaggedFilter = "{ const fs = mbox.messages.flaggedStatus(); indices = indices.filter(i => fs[i]); }"
 	}
 
 	sinceFilter := ""
 	if since != "" {
-		// Parse the since date and create a filter
-		// JXA can parse date strings in various formats
-		sinceFilter = fmt.Sprintf("const sinceDate = new Date('%s'); messages = messages.filter(m => { const msgDate = m.dateReceived(); return msgDate && msgDate >= sinceDate; });", escapeJSString(since))
+		sinceFilter = fmt.Sprintf("{ const sd = new Date('%s'); indices = indices.filter(i => { const d = messages[i].dateReceived(); return d && d >= sd; }); }", escapeJSString(since))
 	}
 
-	contentField := ""
+	offsetClause := ""
+	if offset > 0 {
+		offsetClause = fmt.Sprintf("if (indices.length > %d) indices = indices.slice(%d);", offset, offset)
+	}
+
+	limitClause := ""
+	if limit > 0 {
+		limitClause = fmt.Sprintf("if (indices.length > %d) indices = indices.slice(0, %d);", limit, limit)
+	}
+
+	contentField := "content: '',"
 	if withContent {
 		contentField = "content: msg.content() || '',"
-	} else {
-		contentField = "content: '',"
 	}
 
 	script := fmt.Sprintf(`
@@ -712,18 +711,23 @@ const result = [];
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	let messages = mbox.messages();
-	// Apply filters BEFORE iterating for performance
+	const accName = acc.name();
+	const mboxName = mbox.name();
+	const messages = mbox.messages();
+
+	// Index array; all filtering operates on indices so property access is bulk/deferred
+	let indices = Array.from({length: messages.length}, (_, i) => i);
+
+	// Bulk property filters (1 IPC call each instead of N)
 	%s
 	%s
 	%s
 	%s
 	%s
 
-	const msgCount = messages.length;
-	for (let k = 0; k < msgCount && result.length < %d; k++) {
-		const msg = messages[k];
-		// Skip deleted messages inline for performance
+	for (let k = 0; k < indices.length; k++) {
+		const i = indices[k];
+		const msg = messages[i];
 		try { if (msg.deletedStatus()) continue; } catch(e) {}
 		try {
 			result.push({
@@ -736,8 +740,8 @@ try {
 				flagged: msg.flaggedStatus(),
 				messageSize: 0,
 				%s
-			mailbox: mbox.name(),
-				account: acc.name()
+				mailbox: mboxName,
+				account: accName
 			});
 		} catch (e) {
 			// Skip messages that cause errors
@@ -748,7 +752,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, limit, contentField)
+`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {

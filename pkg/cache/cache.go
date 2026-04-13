@@ -45,7 +45,7 @@ func (c *Cache) SetTTL(ttl time.Duration) {
 }
 
 // Get retrieves data from cache if it exists and is not stale
-func (c *Cache) Get(key string, v interface{}) (bool, error) {
+func (c *Cache) Get(key string, v any) (bool, error) {
 	path := filepath.Join(c.dir, key+".json")
 
 	// Check if file exists and is not stale
@@ -78,7 +78,7 @@ func (c *Cache) Get(key string, v interface{}) (bool, error) {
 }
 
 // Set stores data in the cache
-func (c *Cache) Set(key string, v interface{}) error {
+func (c *Cache) Set(key string, v any) error {
 	path := filepath.Join(c.dir, key+".json")
 
 	data, err := json.Marshal(v)

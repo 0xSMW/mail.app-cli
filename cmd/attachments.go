@@ -9,10 +9,9 @@ import (
 )
 
 var (
-	attAccount   string
-	attMailbox   string
-	attMessageID string
-	attSavePath  string
+	attAccount  string
+	attMailbox  string
+	attSavePath string
 )
 
 var attachmentsCmd = &cobra.Command{

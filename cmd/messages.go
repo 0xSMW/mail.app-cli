@@ -21,10 +21,9 @@ var (
 	msgUnread        bool
 	msgFlaggedFilter bool
 	msgWithContent   bool
-	msgRead          bool
-	msgFlaggedSet    bool
-	msgMessageID     string
-	msgSince         string
+	msgRead         bool
+	msgFlaggedSet   bool
+	msgSince        string
 	msgNoCache       bool
 	msgForceRefresh  bool
 )
