@@ -273,6 +273,72 @@ var messagesMoveCmd = &cobra.Command{
 	},
 }
 
+// newUnifiedCmd returns a cobra.Command for a unified mailbox view.
+// mailboxType must match one of the types understood by GetUnifiedMessagesJSON.
+func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
+	return &cobra.Command{
+		Use:   use,
+		Short: short,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := mail.NewClient()
+			messages, err := client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
+			if err != nil {
+				return fmt.Errorf("failed to get %s messages: %w", mailboxType, err)
+			}
+
+			output, err := json.MarshalIndent(messages, "", "  ")
+			if err != nil {
+				return fmt.Errorf("failed to marshal messages: %w", err)
+			}
+
+			fmt.Println(string(output))
+			return nil
+		},
+	}
+}
+
+var messagesInboxCmd = newUnifiedCmd(
+	"inbox",
+	"List inbox messages across all accounts",
+	"inbox",
+)
+
+var messagesUnreadCmd = newUnifiedCmd(
+	"unread",
+	"List unread messages across all accounts",
+	"unread",
+)
+
+var messagesSentCmd = newUnifiedCmd(
+	"sent",
+	"List sent messages across all accounts",
+	"sent",
+)
+
+var messagesDraftsCmd = newUnifiedCmd(
+	"drafts",
+	"List draft messages across all accounts",
+	"drafts",
+)
+
+var messagesFlaggedCmd = newUnifiedCmd(
+	"flagged",
+	"List flagged messages across all accounts",
+	"flagged",
+)
+
+var messagesTrashCmd = newUnifiedCmd(
+	"trash",
+	"List trash messages across all accounts",
+	"trash",
+)
+
+var messagesJunkCmd = newUnifiedCmd(
+	"junk",
+	"List junk/spam messages across all accounts",
+	"junk",
+)
+
 func init() {
 	messagesCmd.AddCommand(messagesListCmd)
 	messagesCmd.AddCommand(messagesShowCmd)
@@ -281,6 +347,14 @@ func init() {
 	messagesCmd.AddCommand(messagesDeleteCmd)
 	messagesCmd.AddCommand(messagesArchiveCmd)
 	messagesCmd.AddCommand(messagesMoveCmd)
+	// Unified view subcommands
+	messagesCmd.AddCommand(messagesInboxCmd)
+	messagesCmd.AddCommand(messagesUnreadCmd)
+	messagesCmd.AddCommand(messagesSentCmd)
+	messagesCmd.AddCommand(messagesDraftsCmd)
+	messagesCmd.AddCommand(messagesFlaggedCmd)
+	messagesCmd.AddCommand(messagesTrashCmd)
+	messagesCmd.AddCommand(messagesJunkCmd)
 
 	// Common flags for all message commands
 	messagesCmd.PersistentFlags().StringVarP(&msgAccount, "account", "a", "", "Account name (required)")
@@ -301,4 +375,14 @@ func init() {
 
 	// Flag-specific flags
 	messagesFlagCmd.Flags().BoolVarP(&msgFlaggedSet, "flagged", "f", true, "Flag message (default) or use --flagged=false to unflag")
+
+	// Unified view flags (shared across all unified subcommands)
+	for _, cmd := range []*cobra.Command{
+		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd,
+		messagesDraftsCmd, messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd,
+	} {
+		cmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum number of messages to return")
+		cmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Number of messages to skip (pagination)")
+		cmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include message content")
+	}
 }

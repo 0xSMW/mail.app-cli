@@ -1443,6 +1443,132 @@ func (c *Client) BulkArchiveMessages(requests []struct {
 }
 
 // BulkMoveMessages moves multiple messages concurrently
+// GetUnifiedMessagesJSON retrieves messages from Mail.app's special unified
+// mailboxes (inboxes, sentMailboxes, draftMailboxes, trashMailboxes,
+// junkMailboxes) across all accounts in a single JXA call.
+//
+// mailboxType must be one of: "inbox", "unread", "sent", "drafts",
+// "trash", "junk", "flagged".
+//
+// "unread" and "flagged" are treated as inbox views with the appropriate
+// filter applied.
+func (c *Client) GetUnifiedMessagesJSON(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
+	// Map view type → JXA accessor on the Application object
+	accessor := map[string]string{
+		"inbox":   "inboxes",
+		"unread":  "inboxes",
+		"flagged": "inboxes",
+		"sent":    "sentMailboxes",
+		"drafts":  "draftMailboxes",
+		"trash":   "trashMailboxes",
+		"junk":    "junkMailboxes",
+	}[mailboxType]
+	if accessor == "" {
+		return nil, fmt.Errorf("unknown unified mailbox type: %s", mailboxType)
+	}
+
+	// Per-mailbox fetch cap: pull enough to fill the requested window after
+	// merging across accounts.  We over-fetch per mailbox so that the global
+	// sort+slice produces correct results without a second round-trip.
+	perLimit := limit + offset
+	if perLimit < 50 {
+		perLimit = 50
+	}
+
+	// Build optional filter clauses
+	unreadFilter := ""
+	if mailboxType == "unread" {
+		unreadFilter = `{ const rs = mbox.messages.readStatus(); indices = indices.filter(i => !rs[i]); }`
+	}
+	flaggedFilter := ""
+	if mailboxType == "flagged" {
+		flaggedFilter = `{ const fs = mbox.messages.flaggedStatus(); indices = indices.filter(i => fs[i]); }`
+	}
+
+	contentField := "content: '',"
+	if withContent {
+		contentField = "content: msg.content() || '',"
+	}
+
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const result = [];
+const mailboxes = mail.%s();
+
+for (let m = 0; m < mailboxes.length; m++) {
+	const mbox = mailboxes[m];
+	let accName = '';
+	let mboxName = '';
+	try { accName = mbox.account().name(); } catch(e) { accName = ''; }
+	try { mboxName = mbox.name(); } catch(e) { mboxName = '%s'; }
+
+	let messages;
+	try { messages = mbox.messages(); } catch(e) { continue; }
+
+	let indices = Array.from({length: messages.length}, (_, i) => i);
+
+	// Apply type-specific filters using bulk property reads (1 IPC call each)
+	%s
+	%s
+
+	// Cap per-mailbox to avoid over-fetching
+	if (indices.length > %d) indices = indices.slice(0, %d);
+
+	for (let k = 0; k < indices.length; k++) {
+		const i = indices[k];
+		const msg = messages[i];
+		try { if (msg.deletedStatus()) continue; } catch(e) {}
+		try {
+			result.push({
+				id: String(msg.id()),
+				subject: msg.subject() || '',
+				sender: msg.sender() || '',
+				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+				dateSent: (msg.dateSent() || new Date()).toISOString(),
+				read: msg.readStatus(),
+				flagged: msg.flaggedStatus(),
+				messageSize: 0,
+				%s
+				mailbox: mboxName,
+				account: accName
+			});
+		} catch(e) {}
+	}
+}
+
+JSON.stringify(result);
+`, accessor, mailboxType, unreadFilter, flaggedFilter, perLimit, perLimit, contentField)
+
+	output, err := c.runJXA(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var messages []Message
+	if err := json.Unmarshal([]byte(output), &messages); err != nil {
+		return nil, fmt.Errorf("failed to parse unified messages JSON: %w", err)
+	}
+
+	// Sort all results by date descending (most recent first) so the
+	// global offset/limit slice is meaningful across accounts.
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].DateReceived > messages[j].DateReceived
+	})
+
+	// Apply global offset then limit
+	if offset > 0 {
+		if offset >= len(messages) {
+			return []Message{}, nil
+		}
+		messages = messages[offset:]
+	}
+	if limit > 0 && len(messages) > limit {
+		messages = messages[:limit]
+	}
+
+	return messages, nil
+}
+
 func (c *Client) BulkMoveMessages(requests []struct {
 	AccountName    string
 	SourceMailbox  string
