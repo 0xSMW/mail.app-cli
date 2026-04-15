@@ -1464,57 +1464,97 @@ func (c *Client) BulkArchiveMessages(requests []struct {
 //
 // "unread" and "flagged" are treated as inbox views with the appropriate
 // filter applied.
+// GetUnifiedMessagesJSON retrieves messages from unified views across all accounts.
+//
+// mailboxType must be one of: "inbox", "unread", "flagged", "sent", "drafts",
+// "trash", "junk".
+//
+// inbox/unread/flagged use the accounts-based path (GetMessagesFromMultipleMailboxes
+// → GetMessagesJSON per account INBOX) because mailbox objects from
+// mail.inboxes() don't support the same bulk property operations as those
+// obtained via acc.mailboxes.byName(), causing unreliable filtering.
+//
+// sent/drafts/trash/junk use Mail.app's JXA special-mailbox accessors
+// (mail.sentMailboxes() etc.) which don't require per-message filtering.
 func (c *Client) GetUnifiedMessagesJSON(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
-	// Map view type → JXA accessor on the Application object
-	accessor := map[string]string{
-		"inbox":   "inboxes",
-		"unread":  "inboxes",
-		"flagged": "inboxes",
-		"sent":    "sentMailboxes",
-		"drafts":  "draftMailboxes",
-		"trash":   "trashMailboxes",
-		"junk":    "junkMailboxes",
-	}[mailboxType]
-	if accessor == "" {
+	switch mailboxType {
+	case "inbox", "unread", "flagged":
+		return c.getInboxBasedUnified(mailboxType, limit, offset, withContent)
+	case "sent", "drafts", "trash", "junk":
+		return c.getSpecialMailboxUnified(mailboxType, limit, offset, withContent)
+	default:
 		return nil, fmt.Errorf("unknown unified mailbox type: %s", mailboxType)
 	}
+}
 
-	// Per-mailbox fetch cap: pull enough to fill the requested window after
-	// merging across accounts.  We over-fetch per mailbox so that the global
-	// sort+slice produces correct results without a second round-trip.
+// getInboxBasedUnified fetches messages from each account's INBOX using the
+// proven GetMessagesJSON path, then merges, sorts, and slices globally.
+func (c *Client) getInboxBasedUnified(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
+	accounts, err := c.GetAccountsJSON()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list accounts: %w", err)
+	}
+
+	// Over-fetch per account so the global sort+slice is accurate.
 	perLimit := limit + offset
 	if perLimit < 50 {
 		perLimit = 50
 	}
 
-	// Build optional filter clauses.
-	// Each clause is wrapped in its own try-catch: if the bulk property read
-	// fails for a particular mailbox (e.g. some account types don't support it
-	// via the mail.inboxes() path), we fall back to per-message checking so
-	// that one bad mailbox doesn't abort the entire script.
-	unreadFilter := ""
-	if mailboxType == "unread" {
-		unreadFilter = `
-try {
-	const rs = mbox.messages.readStatus();
-	indices = indices.filter(i => !rs[i]);
-} catch(e) {
-	indices = indices.filter(i => {
-		try { return !messages[i].readStatus(); } catch(e2) { return false; }
-	});
-}`
+	type req = struct {
+		AccountName string
+		MailboxName string
+		Limit       int
+		Offset      int
+		UnreadOnly  bool
+		FlaggedOnly bool
+		WithContent bool
+		Since       string
 	}
-	flaggedFilter := ""
-	if mailboxType == "flagged" {
-		flaggedFilter = `
-try {
-	const fs = mbox.messages.flaggedStatus();
-	indices = indices.filter(i => fs[i]);
-} catch(e) {
-	indices = indices.filter(i => {
-		try { return messages[i].flaggedStatus(); } catch(e2) { return false; }
-	});
-}`
+
+	var requests []req
+	for _, acc := range accounts {
+		if !acc.Enabled {
+			continue
+		}
+		requests = append(requests, req{
+			AccountName: acc.Name,
+			MailboxName: "INBOX",
+			Limit:       perLimit,
+			Offset:      0,
+			UnreadOnly:  mailboxType == "unread",
+			FlaggedOnly: mailboxType == "flagged",
+			WithContent: withContent,
+		})
+	}
+
+	if len(requests) == 0 {
+		return []Message{}, nil
+	}
+
+	messages, err := c.GetMessagesFromMultipleMailboxes(requests)
+	if err != nil {
+		return nil, err
+	}
+
+	return sortAndSlice(messages, offset, limit), nil
+}
+
+// getSpecialMailboxUnified fetches messages from Mail.app's built-in special
+// mailbox collections (sentMailboxes, draftMailboxes, trashMailboxes,
+// junkMailboxes) via a single JXA call.  No per-message filtering is applied
+// since these views don't need unread/flagged filtering.
+func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
+	accessor := map[string]string{
+		"sent":   "sentMailboxes",
+		"drafts": "draftMailboxes",
+		"trash":  "trashMailboxes",
+		"junk":   "junkMailboxes",
+	}[mailboxType]
+
+	perLimit := limit + offset
+	if perLimit < 50 {
+		perLimit = 50
 	}
 
 	contentField := "content: '',"
@@ -1531,8 +1571,6 @@ for (let m = 0; m < mailboxes.length; m++) {
 	const mbox = mailboxes[m];
 	let accName = '';
 	let mboxName = '';
-	// account() may or may not need parens depending on the JXA bridge version;
-	// try both forms so we get a name rather than silently leaving it blank.
 	try { accName = mbox.account().name(); } catch(e) {
 		try { accName = mbox.account.name(); } catch(e2) { accName = ''; }
 	}
@@ -1541,18 +1579,11 @@ for (let m = 0; m < mailboxes.length; m++) {
 	let messages;
 	try { messages = mbox.messages(); } catch(e) { continue; }
 
-	let indices = Array.from({length: messages.length}, (_, i) => i);
+	// Cap per-mailbox before iterating
+	const cap = Math.min(messages.length, %d);
 
-	// Apply type-specific filters using bulk property reads (1 IPC call each)
-	%s
-	%s
-
-	// Cap per-mailbox to avoid over-fetching
-	if (indices.length > %d) indices = indices.slice(0, %d);
-
-	for (let k = 0; k < indices.length; k++) {
-		const i = indices[k];
-		const msg = messages[i];
+	for (let k = 0; k < cap; k++) {
+		const msg = messages[k];
 		try { if (msg.deletedStatus()) continue; } catch(e) {}
 		try {
 			result.push({
@@ -1573,7 +1604,7 @@ for (let m = 0; m < mailboxes.length; m++) {
 }
 
 JSON.stringify(result);
-`, accessor, mailboxType, unreadFilter, flaggedFilter, perLimit, perLimit, contentField)
+`, accessor, mailboxType, perLimit, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1582,27 +1613,27 @@ JSON.stringify(result);
 
 	var messages []Message
 	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse unified messages JSON: %w", err)
+		return nil, fmt.Errorf("failed to parse %s messages JSON: %w", mailboxType, err)
 	}
 
-	// Sort all results by date descending (most recent first) so the
-	// global offset/limit slice is meaningful across accounts.
+	return sortAndSlice(messages, offset, limit), nil
+}
+
+// sortAndSlice sorts messages by date descending then applies offset and limit.
+func sortAndSlice(messages []Message, offset, limit int) []Message {
 	sort.Slice(messages, func(i, j int) bool {
 		return messages[i].DateReceived > messages[j].DateReceived
 	})
-
-	// Apply global offset then limit
 	if offset > 0 {
 		if offset >= len(messages) {
-			return []Message{}, nil
+			return []Message{}
 		}
 		messages = messages[offset:]
 	}
 	if limit > 0 && len(messages) > limit {
 		messages = messages[:limit]
 	}
-
-	return messages, nil
+	return messages
 }
 
 func (c *Client) BulkMoveMessages(requests []struct {
