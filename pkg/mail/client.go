@@ -615,14 +615,16 @@ try {
 	for (let j = 0; j < mailboxes.length; j++) {
 		const mbox = mailboxes[j];
 		try {
+			let totalCount = 0;
+			try { totalCount = mbox.messages.count(); } catch (e) {}
 			result.push({
 				name: mbox.name(),
 				unreadCount: mbox.unreadCount(),
-				totalCount: mbox.messages.count(),
+				totalCount: totalCount,
 				account: accName
 			});
 		} catch (e) {
-			// Skip mailboxes that can't be queried
+			// Skip mailboxes that can't be queried at all
 		}
 	}
 } catch (e) {
@@ -812,7 +814,10 @@ JSON.stringify(result);
 	return &message, nil
 }
 
-// ArchiveMessage moves a message to the Archive mailbox
+// ArchiveMessage moves a message to the Archive mailbox.
+// For Gmail accounts the archive folder ("All Mail") is nested inside a
+// "[Gmail]" sub-folder, so we search recursively rather than only looking at
+// top-level mailboxes.
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
@@ -824,16 +829,23 @@ try {
 	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		const allMailboxes = acc.mailboxes();
-		let archiveBox = null;
-		for (let j = 0; j < allMailboxes.length; j++) {
-			const name = allMailboxes[j].name();
-			if (name === 'Archive' || name === 'All Mail') {
-				archiveBox = allMailboxes[j];
-				break;
+		// Recursive search: Gmail nests "All Mail" inside "[Gmail]".
+		function findArchive(mailboxes) {
+			for (let j = 0; j < mailboxes.length; j++) {
+				const name = mailboxes[j].name();
+				if (name === 'Archive' || name === 'All Mail') return mailboxes[j];
+				try {
+					const sub = mailboxes[j].mailboxes();
+					if (sub.length > 0) {
+						const found = findArchive(sub);
+						if (found) return found;
+					}
+				} catch(e) {}
 			}
+			return null;
 		}
 
+		const archiveBox = findArchive(acc.mailboxes());
 		if (archiveBox) {
 			mbox.messages.at(targetIdx).mailbox = archiveBox;
 			'Success';
@@ -1475,14 +1487,34 @@ func (c *Client) GetUnifiedMessagesJSON(mailboxType string, limit, offset int, w
 		perLimit = 50
 	}
 
-	// Build optional filter clauses
+	// Build optional filter clauses.
+	// Each clause is wrapped in its own try-catch: if the bulk property read
+	// fails for a particular mailbox (e.g. some account types don't support it
+	// via the mail.inboxes() path), we fall back to per-message checking so
+	// that one bad mailbox doesn't abort the entire script.
 	unreadFilter := ""
 	if mailboxType == "unread" {
-		unreadFilter = `{ const rs = mbox.messages.readStatus(); indices = indices.filter(i => !rs[i]); }`
+		unreadFilter = `
+try {
+	const rs = mbox.messages.readStatus();
+	indices = indices.filter(i => !rs[i]);
+} catch(e) {
+	indices = indices.filter(i => {
+		try { return !messages[i].readStatus(); } catch(e2) { return false; }
+	});
+}`
 	}
 	flaggedFilter := ""
 	if mailboxType == "flagged" {
-		flaggedFilter = `{ const fs = mbox.messages.flaggedStatus(); indices = indices.filter(i => fs[i]); }`
+		flaggedFilter = `
+try {
+	const fs = mbox.messages.flaggedStatus();
+	indices = indices.filter(i => fs[i]);
+} catch(e) {
+	indices = indices.filter(i => {
+		try { return messages[i].flaggedStatus(); } catch(e2) { return false; }
+	});
+}`
 	}
 
 	contentField := "content: '',"
@@ -1499,7 +1531,11 @@ for (let m = 0; m < mailboxes.length; m++) {
 	const mbox = mailboxes[m];
 	let accName = '';
 	let mboxName = '';
-	try { accName = mbox.account().name(); } catch(e) { accName = ''; }
+	// account() may or may not need parens depending on the JXA bridge version;
+	// try both forms so we get a name rather than silently leaving it blank.
+	try { accName = mbox.account().name(); } catch(e) {
+		try { accName = mbox.account.name(); } catch(e2) { accName = ''; }
+	}
 	try { mboxName = mbox.name(); } catch(e) { mboxName = '%s'; }
 
 	let messages;
