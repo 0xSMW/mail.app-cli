@@ -814,10 +814,11 @@ JSON.stringify(result);
 	return &message, nil
 }
 
-// ArchiveMessage moves a message to the Archive mailbox.
-// For Gmail accounts the archive folder ("All Mail") is nested inside a
-// "[Gmail]" sub-folder, so we search recursively rather than only looking at
-// top-level mailboxes.
+// ArchiveMessage moves a message to the provider's archive mailbox.
+// Gmail exposes archived mail as "All Mail", and some Gmail accounts can also
+// have a user-created "Archive" label. Prefer "All Mail" when present, then
+// fall back to "Archive" for providers that expose a conventional archive
+// mailbox. Search recursively because some providers nest special mailboxes.
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
@@ -829,23 +830,38 @@ try {
 	if (targetIdx < 0) {
 		'Error: Message not found';
 	} else {
-		// Recursive search: Gmail nests "All Mail" inside "[Gmail]".
-		function findArchive(mailboxes) {
+		function findArchiveCandidates(mailboxes, candidates) {
 			for (let j = 0; j < mailboxes.length; j++) {
 				const name = mailboxes[j].name();
-				if (name === 'Archive' || name === 'All Mail') return mailboxes[j];
+				if (name === 'All Mail' || name === 'Archive') {
+					candidates.push({ name: name, mailbox: mailboxes[j] });
+				}
 				try {
 					const sub = mailboxes[j].mailboxes();
 					if (sub.length > 0) {
-						const found = findArchive(sub);
-						if (found) return found;
+						findArchiveCandidates(sub, candidates);
 					}
 				} catch(e) {}
 			}
-			return null;
 		}
 
-		const archiveBox = findArchive(acc.mailboxes());
+		const archiveCandidates = [];
+		findArchiveCandidates(acc.mailboxes(), archiveCandidates);
+		let archiveBox = null;
+		for (let i = 0; i < archiveCandidates.length; i++) {
+			if (archiveCandidates[i].name === 'All Mail') {
+				archiveBox = archiveCandidates[i].mailbox;
+				break;
+			}
+		}
+		if (!archiveBox) {
+			for (let i = 0; i < archiveCandidates.length; i++) {
+				if (archiveCandidates[i].name === 'Archive') {
+					archiveBox = archiveCandidates[i].mailbox;
+					break;
+				}
+			}
+		}
 		if (archiveBox) {
 			mbox.messages.at(targetIdx).mailbox = archiveBox;
 			'Success';
