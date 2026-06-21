@@ -112,3 +112,21 @@ func TestRunBulkOperations(t *testing.T) {
 		}
 	})
 }
+
+func TestSortAndSliceUsesGlobalDateOrder(t *testing.T) {
+	messages := []Message{
+		{ID: "1", DateReceived: "2026-06-20T10:00:00Z"},
+		{ID: "2", DateReceived: "2026-06-22T10:00:00Z"},
+		{ID: "3", DateReceived: "2026-06-21T10:00:00Z"},
+		{ID: "4", DateReceived: "2026-06-19T10:00:00Z"},
+	}
+
+	got := sortAndSlice(messages, 1, 2)
+	gotIDs := []string{got[0].ID, got[1].ID}
+	wantIDs := []string{"3", "1"}
+	for i := range wantIDs {
+		if gotIDs[i] != wantIDs[i] {
+			t.Fatalf("sortAndSlice ids = %v, want %v", gotIDs, wantIDs)
+		}
+	}
+}

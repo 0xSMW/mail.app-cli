@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"container/heap"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,11 +11,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Client provides an interface to interact with Mail.app via AppleScript
-type Client struct{}
+type Client struct {
+	accountsMu     sync.Mutex
+	accounts       []Account
+	accountsLoaded bool
+}
 
 // NewClient creates a new Mail.app client
 func NewClient() *Client {
@@ -114,6 +120,8 @@ type Attachment struct {
 	MimeType string
 }
 
+const maxConcurrentMailCommands = 4
+
 type indexMailbox struct {
 	ID          int
 	URL         string
@@ -138,6 +146,30 @@ type indexMessage struct {
 	ToRecipients  string `json:"ToRecipients"`
 	CcRecipients  string `json:"CcRecipients"`
 	BccRecipients string `json:"BccRecipients"`
+}
+
+type messageDateMinHeap []Message
+
+func (h messageDateMinHeap) Len() int { return len(h) }
+
+func (h messageDateMinHeap) Less(i, j int) bool {
+	return h[i].DateReceived < h[j].DateReceived
+}
+
+func (h messageDateMinHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+}
+
+func (h *messageDateMinHeap) Push(x any) {
+	*h = append(*h, x.(Message))
+}
+
+func (h *messageDateMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	item := old[n-1]
+	*h = old[:n-1]
+	return item
 }
 
 func mailEnvelopeIndexPath() (string, error) {
@@ -191,6 +223,25 @@ func looksLikeSQLiteMissing(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "executable file not found") || strings.Contains(msg, "no such file")
+}
+
+func runWithMailCommandLimit[T any](items []T, run func(T)) {
+	limit := maxConcurrentMailCommands
+	if len(items) < limit {
+		limit = len(items)
+	}
+	if limit <= 0 {
+		return
+	}
+
+	sem := make(chan struct{}, limit)
+	for _, item := range items {
+		sem <- struct{}{}
+		go func(v T) {
+			defer func() { <-sem }()
+			run(v)
+		}(item)
+	}
 }
 
 func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
@@ -305,6 +356,45 @@ limit 1;
 	return mbox, true, nil
 }
 
+func (c *Client) getMailboxesFromIndex(account Account) ([]Mailbox, bool, error) {
+	query := fmt.Sprintf(`
+select
+	ROWID as ID,
+	url as URL,
+	total_count as TotalCount,
+	unread_count as UnreadCount
+from mailboxes
+where url like %s
+order by url;
+`, sqlQuote("imap://"+account.ID+"/%"))
+
+	var rows []indexMailbox
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		if looksLikeSQLiteMissing(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if len(rows) == 0 {
+		return nil, false, nil
+	}
+
+	mailboxes := make([]Mailbox, 0, len(rows))
+	for _, row := range rows {
+		name := mailboxLeafFromURL(row.URL)
+		if strings.HasSuffix(row.URL, "/%5BGmail%5D/All%20Mail") {
+			name = "All Mail"
+		}
+		mailboxes = append(mailboxes, Mailbox{
+			Name:        name,
+			UnreadCount: row.UnreadCount,
+			TotalCount:  row.TotalCount,
+			Account:     account.Name,
+		})
+	}
+	return mailboxes, true, nil
+}
+
 func indexMessagesToMessages(rows []indexMessage) []Message {
 	messages := make([]Message, 0, len(rows))
 	for _, row := range rows {
@@ -372,13 +462,20 @@ join mailboxes mb on mb.ROWID = m.mailbox
 `, sqlQuote(mailboxName), sqlQuote(accountName))
 }
 
+func indexMailboxMembershipCondition(mbox *indexMailbox) string {
+	if isArchiveAlias(mbox.Name) {
+		return "m.mailbox = " + strconv.Itoa(mbox.ID)
+	}
+	return "exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + strconv.Itoa(mbox.ID) + ")"
+}
+
 func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
 	sinceUnix, hasSince, err := parseSinceUnix(since)
 	if err != nil {
 		return nil, err
 	}
 	var where []string
-	where = append(where, "mb.ROWID = "+strconv.Itoa(mbox.ID), "m.deleted = 0")
+	where = append(where, "m.deleted = 0", indexMailboxMembershipCondition(mbox))
 	if unreadOnly {
 		where = append(where, "m.read = 0")
 	}
@@ -411,8 +508,9 @@ func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *in
 		limit = 50
 	}
 	needle := sqlQuote(strings.ToLower(queryText))
+	membership := indexMailboxMembershipCondition(mbox)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
-where mb.ROWID = %d
+where %s
 	and m.deleted = 0
 	and (
 		lower(coalesce(s.subject, '')) like '%%' || %s || '%%'
@@ -421,7 +519,7 @@ where mb.ROWID = %d
 	)
 order by m.date_received desc
 limit %d;
-`, mbox.ID, needle, needle, needle, limit)
+`, membership, needle, needle, needle, limit)
 
 	var rows []indexMessage
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
@@ -760,6 +858,14 @@ func (c *Client) GetUnreadCount() (int, error) {
 
 // GetAccountsJSON retrieves accounts as JSON using JXA
 func (c *Client) GetAccountsJSON() ([]Account, error) {
+	c.accountsMu.Lock()
+	if c.accountsLoaded {
+		accounts := append([]Account(nil), c.accounts...)
+		c.accountsMu.Unlock()
+		return accounts, nil
+	}
+	c.accountsMu.Unlock()
+
 	script := `
 const mail = Application('Mail');
 const accounts = mail.accounts();
@@ -788,7 +894,12 @@ JSON.stringify(result);
 		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
 	}
 
-	return accounts, nil
+	c.accountsMu.Lock()
+	c.accounts = append([]Account(nil), accounts...)
+	c.accountsLoaded = true
+	c.accountsMu.Unlock()
+
+	return append([]Account(nil), accounts...), nil
 }
 
 // SyncAccount forces Mail.app to check for new mail (syncs all accounts)
@@ -828,8 +939,18 @@ func (c *Client) SyncAllAccounts() error {
 
 // GetMailboxesJSON retrieves mailboxes as JSON using JXA
 func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
-	// If specific account requested, use single JXA call
 	if accountName != "" {
+		account, err := c.accountByName(accountName)
+		if err != nil {
+			return nil, err
+		}
+		if mailboxes, ok, err := c.getMailboxesFromIndex(*account); err != nil {
+			return nil, err
+		} else if ok {
+			return mailboxes, nil
+		}
+
+		// If the Envelope Index cannot provide mailbox rows, use a single JXA call.
 		mailboxes, err := c.getMailboxesForSingleAccount(accountName)
 		if err != nil {
 			return nil, err
@@ -837,7 +958,6 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 		return c.enrichArchiveMailboxes(accountName, mailboxes), nil
 	}
 
-	// For all accounts, fetch in parallel for better performance
 	accounts, err := c.GetAccountsJSON()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get accounts: %w", err)
@@ -849,6 +969,11 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 
 	// If only one account total, no need for parallelization
 	if len(accounts) == 1 {
+		if mailboxes, ok, err := c.getMailboxesFromIndex(accounts[0]); err != nil {
+			return nil, err
+		} else if ok {
+			return mailboxes, nil
+		}
 		mailboxes, err := c.getMailboxesForSingleAccount(accounts[0].Name)
 		if err != nil {
 			return nil, err
@@ -863,16 +988,21 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 	}
 	results := make(chan result, len(accounts))
 
-	// Launch goroutine for each account
-	for _, account := range accounts {
-		go func(accName string) {
-			mailboxes, err := c.getMailboxesForSingleAccount(accName)
+	// Launch bounded goroutines for account mailbox retrieval.
+	runWithMailCommandLimit(accounts, func(account Account) {
+		mailboxes, ok, err := c.getMailboxesFromIndex(account)
+		if err != nil {
+			results <- result{err: err}
+			return
+		}
+		if !ok {
+			mailboxes, err = c.getMailboxesForSingleAccount(account.Name)
 			if err == nil {
-				mailboxes = c.enrichArchiveMailboxes(accName, mailboxes)
+				mailboxes = c.enrichArchiveMailboxes(account.Name, mailboxes)
 			}
-			results <- result{mailboxes: mailboxes, err: err}
-		}(account.Name)
-	}
+		}
+		results <- result{mailboxes: mailboxes, err: err}
+	})
 
 	// Collect results
 	var allMailboxes []Mailbox
@@ -966,11 +1096,17 @@ JSON.stringify(result);
 
 // GetMessagesJSON retrieves messages from a mailbox using JXA
 func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
-	if isArchiveAlias(mailboxName) && !withContent {
+	if !withContent {
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
 		} else if ok {
-			return c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
+			messages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
+			if err != nil {
+				return nil, err
+			}
+			if len(messages) > 0 || mbox.TotalCount == 0 || unreadOnly || flaggedOnly || strings.TrimSpace(since) != "" {
+				return messages, nil
+			}
 		}
 	}
 
@@ -1087,10 +1223,18 @@ let result = null;
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = acc.mailboxes.byName('%s');
-	const allIds = mbox.messages.id();
-	const targetIdx = allIds.findIndex(id => String(id) === '%s');
-	if (targetIdx >= 0) {
-		const msg = mbox.messages.at(targetIdx);
+	let msg = null;
+	try {
+		msg = mbox.messages.byId(Number('%s'));
+	} catch (e) {}
+	if (msg === null) {
+		const allIds = mbox.messages.id();
+		const targetIdx = allIds.findIndex(id => String(id) === '%s');
+		if (targetIdx >= 0) {
+			msg = mbox.messages.at(targetIdx);
+		}
+	}
+	if (msg !== null) {
 		const toRecipients = [];
 		const toRecs = msg.toRecipients();
 		for (let t = 0; t < toRecs.length; t++) {
@@ -1131,7 +1275,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
+`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1349,39 +1493,44 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 		limit = 50
 	}
 
-	// If specific mailbox requested, use single JXA call for simplicity
+	// If specific mailbox requested, use a single mailbox search.
 	if mailboxName != "" {
-		if isArchiveAlias(mailboxName) {
-			if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
-				return nil, err
-			} else if ok {
-				return c.searchMessagesFromIndex(query, accountName, mbox, limit)
-			}
+		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
+			return nil, err
+		} else if ok {
+			return c.searchMessagesFromIndex(query, accountName, mbox, limit)
 		}
 		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit)
 	}
 
-	// Get list of mailboxes to search
-	mailboxes, err := c.GetMailboxesJSON(accountName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get mailboxes: %w", err)
+	type searchTarget struct {
+		AccountName string
+		MailboxName string
 	}
 
-	// Filter to only INBOX mailboxes for performance (unless specific account given)
-	var mailboxesToSearch []Mailbox
-	for _, mbox := range mailboxes {
-		if mbox.Name == "INBOX" || mbox.Name == "Inbox" {
-			mailboxesToSearch = append(mailboxesToSearch, mbox)
+	var targets []searchTarget
+	if accountName != "" {
+		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "INBOX"})
+	} else {
+		accounts, err := c.GetAccountsJSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get accounts: %w", err)
+		}
+		for _, account := range accounts {
+			if account.Enabled {
+				targets = append(targets, searchTarget{AccountName: account.Name, MailboxName: "INBOX"})
+			}
 		}
 	}
 
-	if len(mailboxesToSearch) == 0 {
+	if len(targets) == 0 {
 		return []Message{}, nil
 	}
 
 	// If only one mailbox, no need for parallelization
-	if len(mailboxesToSearch) == 1 {
-		return c.searchMessagesInSingleMailbox(query, mailboxesToSearch[0].Account, mailboxesToSearch[0].Name, limit)
+	if len(targets) == 1 {
+		target := targets[0]
+		return c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit)
 	}
 
 	// Search mailboxes in parallel
@@ -1389,20 +1538,18 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 		messages []Message
 		err      error
 	}
-	results := make(chan result, len(mailboxesToSearch))
+	results := make(chan result, len(targets))
 
 	// Launch goroutine for each mailbox
-	for _, mbox := range mailboxesToSearch {
-		go func(accName, mboxName string) {
-			messages, err := c.searchMessagesInSingleMailbox(query, accName, mboxName, limit)
-			results <- result{messages: messages, err: err}
-		}(mbox.Account, mbox.Name)
-	}
+	runWithMailCommandLimit(targets, func(target searchTarget) {
+		messages, err := c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit)
+		results <- result{messages: messages, err: err}
+	})
 
 	// Collect results
 	var allMessages []Message
 	var errors []error
-	for i := 0; i < len(mailboxesToSearch); i++ {
+	for i := 0; i < len(targets); i++ {
 		res := <-results
 		if res.err != nil {
 			errors = append(errors, res.err)
@@ -1430,12 +1577,10 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 
 // searchMessagesInSingleMailbox searches for messages in a specific mailbox
 func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName string, limit int) ([]Message, error) {
-	if isArchiveAlias(mailboxName) {
-		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
-			return nil, err
-		} else if ok {
-			return c.searchMessagesFromIndex(query, accountName, mbox, limit)
-		}
+	if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
+		return nil, err
+	} else if ok {
+		return c.searchMessagesFromIndex(query, accountName, mbox, limit)
 	}
 
 	// Use helper for escaping
@@ -1532,22 +1677,20 @@ func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
 	}
 	results := make(chan result, len(requests))
 
-	// Launch goroutine for each mailbox
-	for _, req := range requests {
-		go func(r struct {
-			AccountName string
-			MailboxName string
-			Limit       int
-			Offset      int
-			UnreadOnly  bool
-			FlaggedOnly bool
-			WithContent bool
-			Since       string
-		}) {
-			messages, err := c.GetMessagesJSON(r.AccountName, r.MailboxName, r.Limit, r.Offset, r.UnreadOnly, r.FlaggedOnly, r.WithContent, r.Since)
-			results <- result{messages: messages, err: err}
-		}(req)
-	}
+	// Launch bounded goroutines for mailbox retrieval.
+	runWithMailCommandLimit(requests, func(r struct {
+		AccountName string
+		MailboxName string
+		Limit       int
+		Offset      int
+		UnreadOnly  bool
+		FlaggedOnly bool
+		WithContent bool
+		Since       string
+	}) {
+		messages, err := c.GetMessagesJSON(r.AccountName, r.MailboxName, r.Limit, r.Offset, r.UnreadOnly, r.FlaggedOnly, r.WithContent, r.Since)
+		results <- result{messages: messages, err: err}
+	})
 
 	// Collect results
 	var allMessages []Message
@@ -1597,17 +1740,22 @@ func (c *Client) GetMultipleMessageDetails(requests []struct {
 	}
 	results := make(chan result, len(requests))
 
-	// Launch goroutine for each message
-	for i, req := range requests {
-		go func(idx int, r struct {
+	type indexedRequest struct {
+		index int
+		req   struct {
 			AccountName string
 			MailboxName string
 			MessageID   string
-		}) {
-			message, err := c.GetMessageDetailsJSON(r.AccountName, r.MailboxName, r.MessageID)
-			results <- result{message: message, err: err, index: idx}
-		}(i, req)
+		}
 	}
+	indexedRequests := make([]indexedRequest, 0, len(requests))
+	for i, req := range requests {
+		indexedRequests = append(indexedRequests, indexedRequest{index: i, req: req})
+	}
+	runWithMailCommandLimit(indexedRequests, func(item indexedRequest) {
+		message, err := c.GetMessageDetailsJSON(item.req.AccountName, item.req.MailboxName, item.req.MessageID)
+		results <- result{message: message, err: err, index: item.index}
+	})
 
 	// Collect results in original order
 	messages := make([]*Message, len(requests))
@@ -1708,11 +1856,9 @@ func runBulkOperations[T any](requests []T, failureMessage string, run func(T) e
 
 	errors := make(chan error, len(requests))
 
-	for _, req := range requests {
-		go func(r T) {
-			errors <- run(r)
-		}(req)
-	}
+	runWithMailCommandLimit(requests, func(r T) {
+		errors <- run(r)
+	})
 
 	var errorList []error
 	for i := 0; i < len(requests); i++ {
@@ -1885,6 +2031,24 @@ JSON.stringify(result);
 
 // sortAndSlice sorts messages by date descending then applies offset and limit.
 func sortAndSlice(messages []Message, offset, limit int) []Message {
+	if limit > 0 {
+		keep := offset + limit
+		if keep > 0 && keep < len(messages) {
+			h := make(messageDateMinHeap, 0, keep)
+			for _, message := range messages {
+				if len(h) < keep {
+					heap.Push(&h, message)
+					continue
+				}
+				if message.DateReceived > h[0].DateReceived {
+					h[0] = message
+					heap.Fix(&h, 0)
+				}
+			}
+			messages = h
+		}
+	}
+
 	sort.Slice(messages, func(i, j int) bool {
 		return messages[i].DateReceived > messages[j].DateReceived
 	})

@@ -25,15 +25,17 @@ var accountsListCmd = &cobra.Command{
 	Long:  `List all Mail.app accounts. Output is JSON format. Use jq for pretty printing: mail-app-cli accounts list | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var accounts []mail.Account
+		var c *cache.Cache
+		var cacheErr error
+		if !accountsNoCache {
+			c, cacheErr = cache.New()
+		}
 
 		// Try to get from cache if not disabled
-		if !accountsNoCache && !accountsForceRefresh {
-			c, err := cache.New()
-			if err == nil {
-				found, err := c.Get("accounts", &accounts)
-				if err == nil && found {
-					return printJSON(accounts, "accounts")
-				}
+		if !accountsNoCache && !accountsForceRefresh && cacheErr == nil {
+			found, err := c.Get("accounts", &accounts)
+			if err == nil && found {
+				return printJSON(accounts, "accounts")
 			}
 		}
 
@@ -45,11 +47,8 @@ var accountsListCmd = &cobra.Command{
 		}
 
 		// Save to cache if not disabled
-		if !accountsNoCache {
-			c, err := cache.New()
-			if err == nil {
-				c.Set("accounts", accounts)
-			}
+		if !accountsNoCache && cacheErr == nil {
+			c.Set("accounts", accounts)
 		}
 
 		return printJSON(accounts, "accounts")

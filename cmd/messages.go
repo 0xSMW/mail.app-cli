@@ -63,6 +63,11 @@ var messagesListCmd = &cobra.Command{
 		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
 			return err
 		}
+		var c *cache.Cache
+		var cacheErr error
+		if !msgNoCache {
+			c, cacheErr = cache.New()
+		}
 
 		// Build a cache key that encodes all query parameters so different queries
 		// get separate cache entries.
@@ -76,15 +81,12 @@ var messagesListCmd = &cobra.Command{
 		)
 
 		// Try cache first (skip if content requested — content is per-user and typically large)
-		if !msgNoCache && !msgForceRefresh {
-			c, err := cache.New()
-			if err == nil {
-				c.SetTTL(messageCacheTTL)
-				var cached []mail.Message
-				found, err := c.Get(cacheKey, &cached)
-				if err == nil && found {
-					return printJSON(cached, "messages")
-				}
+		if !msgNoCache && !msgForceRefresh && cacheErr == nil {
+			c.SetTTL(messageCacheTTL)
+			var cached []mail.Message
+			found, err := c.Get(cacheKey, &cached)
+			if err == nil && found {
+				return printJSON(cached, "messages")
 			}
 		}
 
@@ -95,11 +97,9 @@ var messagesListCmd = &cobra.Command{
 		}
 
 		// Populate cache (always write unless --no-cache)
-		if !msgNoCache {
-			if c, err := cache.New(); err == nil {
-				c.SetTTL(messageCacheTTL)
-				c.Set(cacheKey, messages)
-			}
+		if !msgNoCache && cacheErr == nil {
+			c.SetTTL(messageCacheTTL)
+			c.Set(cacheKey, messages)
 		}
 
 		return printJSON(messages, "messages")
