@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/intelligrit/mail-app-cli/pkg/cache"
@@ -40,12 +39,7 @@ var mailboxesListCmd = &cobra.Command{
 			if err == nil {
 				found, err := c.Get(cacheKey, &mailboxes)
 				if err == nil && found {
-					output, err := json.MarshalIndent(mailboxes, "", "  ")
-					if err != nil {
-						return fmt.Errorf("failed to marshal mailboxes: %w", err)
-					}
-					fmt.Println(string(output))
-					return nil
+					return printJSON(mailboxes, "mailboxes")
 				}
 			}
 		}
@@ -65,13 +59,7 @@ var mailboxesListCmd = &cobra.Command{
 			}
 		}
 
-		output, err := json.MarshalIndent(mailboxes, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal mailboxes: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(mailboxes, "mailboxes")
 	},
 }
 

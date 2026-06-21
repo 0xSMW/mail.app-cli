@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/intelligrit/mail-app-cli/pkg/mail"
@@ -27,8 +26,8 @@ var attachmentsListCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if attAccount == "" || attMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(attAccount, attMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -37,13 +36,7 @@ var attachmentsListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get attachments: %w", err)
 		}
 
-		output, err := json.MarshalIndent(attachments, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal attachments: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(attachments, "attachments")
 	},
 }
 
@@ -55,8 +48,8 @@ var attachmentsSaveCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
 		attachmentName := args[1]
-		if attAccount == "" || attMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(attAccount, attMailbox); err != nil {
+			return err
 		}
 
 		if attSavePath == "" {
