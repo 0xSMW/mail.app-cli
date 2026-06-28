@@ -876,7 +876,18 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 
 // DeleteMessage moves a message to trash
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
-	return c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();")
+	id, err := strconv.Atoi(messageID)
+	if err != nil {
+		return err
+	}
+	script := fmt.Sprintf(`
+tell application "Mail"
+	delete (first message of mailbox "%s" of account "%s" whose id is %d)
+	return "ok"
+end tell
+`, escapeAppleScriptString(mailboxName), escapeAppleScriptString(accountName), id)
+	_, err = c.runAppleScript(script)
+	return err
 }
 
 // SendMessage sends a new email message

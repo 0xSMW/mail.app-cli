@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/intelligrit/mail-app-cli/pkg/cache"
-	"github.com/intelligrit/mail-app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 

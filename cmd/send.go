@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/intelligrit/mail-app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -16,6 +16,8 @@ var (
 	sendBcc         []string
 	sendSubject     string
 	sendBody        string
+	sendBodyFile    string
+	sendSignature   string
 	sendAttachments []string
 )
 
@@ -37,9 +39,23 @@ Examples:
 		if sendSubject == "" {
 			return fmt.Errorf("--subject is required")
 		}
+		body, err := readBodyValue(sendBody, sendBodyFile)
+		if err != nil {
+			return err
+		}
 
 		client := mail.NewClient()
-		err := client.SendMessage(sendAccount, sendSubject, sendBody, sendTo, sendCc, sendBcc, sendAttachments)
+		if sendSignature != "" {
+			signature, err := client.SignatureByName(sendSignature)
+			if err != nil {
+				return err
+			}
+			if signature.Content == "" {
+				return fmt.Errorf("signature %q has no readable content", sendSignature)
+			}
+			body = strings.TrimRight(body, "\r\n") + "\n\n" + signature.Content
+		}
+		err = client.SendMessage(sendAccount, sendSubject, body, sendTo, sendCc, sendBcc, sendAttachments)
 		if err != nil {
 			return fmt.Errorf("failed to send message: %w", err)
 		}
@@ -60,6 +76,8 @@ func init() {
 	sendCmd.Flags().StringSliceVarP(&sendBcc, "bcc", "b", []string{}, "Bcc recipients (can be specified multiple times)")
 	sendCmd.Flags().StringVarP(&sendSubject, "subject", "s", "", "Email subject (required)")
 	sendCmd.Flags().StringVarP(&sendBody, "body", "", "", "Email body content")
+	sendCmd.Flags().StringVar(&sendBodyFile, "body-file", "", "Read email body content from file")
+	sendCmd.Flags().StringVar(&sendSignature, "signature", "", "Append a Mail.app signature by name")
 	sendCmd.Flags().StringSliceVar(&sendAttachments, "attach", []string{}, "File paths to attach (can be specified multiple times)")
 
 	sendCmd.MarkFlagRequired("account")

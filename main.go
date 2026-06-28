@@ -1,6 +1,6 @@
 package main
 
-import "github.com/intelligrit/mail-app-cli/cmd"
+import "github.com/0xSMW/mail.app-cli/cmd"
 
 func main() {
 	cmd.Execute()

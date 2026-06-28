@@ -8,6 +8,10 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Browse and manage mailboxes
 - List, read, search, and manage messages
 - Archive, move, delete, flag, and mark messages
+- Batch message operations with dry-run and stdin ID support
+- Export messages and attachments
+- Create, update, send, and delete drafts
+- List rules, smart mailboxes, signatures, and thread views
 - Send emails
 - Manage attachments
 - Fully scriptable - perfect for automation and building GUIs
@@ -24,7 +28,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 ### From Source
 
 ```bash
-go install github.com/intelligrit/mail-app-cli@latest
+go install github.com/0xSMW/mail.app-cli@latest
 ```
 
 ### Build Locally
@@ -148,6 +152,17 @@ mail-app-cli send \
   --body "Message content here"
 ```
 
+Send from a file and append a Mail.app signature:
+
+```bash
+mail-app-cli send \
+  --account "Gmail" \
+  --to user@example.com \
+  --subject "Hello" \
+  --body-file body.md \
+  --signature "Work"
+```
+
 Send to multiple recipients:
 
 ```bash
@@ -192,6 +207,122 @@ Save to a specific path:
 
 ```bash
 mail-app-cli attachments save <message-id> "document.pdf" -a "Gmail" -m "INBOX" -o ~/Downloads/document.pdf
+```
+
+### Batch Operations
+
+Preview a bulk archive:
+
+```bash
+mail-app-cli messages batch archive -a "Gmail" -m "INBOX" --query "receipt" --dry-run
+```
+
+Archive message IDs from stdin:
+
+```bash
+jq -r '.[].id' messages.json | mail-app-cli messages batch archive -a "Gmail" -m "INBOX" --stdin --yes
+```
+
+Move selected messages:
+
+```bash
+mail-app-cli messages batch move "Receipts" -a "Gmail" -m "INBOX" --query "invoice" --yes
+```
+
+Mark, flag, or delete selected messages:
+
+```bash
+mail-app-cli messages batch mark -a "Gmail" -m "INBOX" --read=false 123 456
+mail-app-cli messages batch flag -a "Gmail" -m "INBOX" --flagged=false --stdin < ids.txt
+mail-app-cli messages batch delete -a "Gmail" -m "INBOX" --query "old alert" --dry-run
+```
+
+### Export and Import Validation
+
+Export messages as JSON:
+
+```bash
+mail-app-cli export messages -a "Gmail" -m "INBOX" --format json --output inbox.json
+```
+
+Export attachments:
+
+```bash
+mail-app-cli export attachments -a "Gmail" -m "INBOX" --output ./attachments
+```
+
+Validate an exported message file before import:
+
+```bash
+mail-app-cli import messages -a "Gmail" -m "Archive" --format json --file inbox.json --dry-run
+```
+
+### Drafts
+
+Create and review a draft:
+
+```bash
+mail-app-cli drafts create -a "Gmail" --to user@example.com --subject "Review" --body-file body.md
+mail-app-cli drafts list -a "Gmail"
+mail-app-cli drafts show <draft-id> -a "Gmail"
+```
+
+Send or delete a draft:
+
+```bash
+mail-app-cli drafts update <draft-id> -a "Gmail" --subject "Updated" --body-file revised.md
+mail-app-cli drafts send <draft-id> -a "Gmail"
+mail-app-cli drafts delete <draft-id> -a "Gmail" --dry-run
+```
+
+### Rules, Smart Mailboxes, Threads, Signatures, and VIP
+
+Inspect higher-level Mail.app surfaces:
+
+```bash
+mail-app-cli rules list
+mail-app-cli smart list
+mail-app-cli signatures list
+mail-app-cli threads list -a "Gmail" -m "INBOX"
+mail-app-cli messages vip --limit 25
+```
+
+Manage supported rule actions:
+
+```bash
+mail-app-cli rules show "Receipts"
+mail-app-cli rules create "Receipts" -a "Gmail" --from-domain stripe.com --move-to Receipts --dry-run
+mail-app-cli rules enable "Receipts"
+mail-app-cli rules disable "Receipts"
+mail-app-cli rules delete "Receipts" --dry-run
+```
+
+Preview rule application with normal selectors:
+
+```bash
+mail-app-cli rules apply "Receipts" -a "Gmail" -m "INBOX" --query "stripe" --dry-run
+```
+
+Inspect smart mailbox, signature, and thread details:
+
+```bash
+mail-app-cli smart show "Unread Receipts"
+mail-app-cli smart query "receipt" --limit 20
+mail-app-cli smart create "Unread Receipts" --query "receipt" --dry-run
+mail-app-cli smart delete "Unread Receipts" --dry-run
+mail-app-cli signatures show "Work"
+mail-app-cli signatures apply "Work" -a "Gmail" --dry-run
+mail-app-cli threads show <thread-id> -a "Gmail" -m "INBOX"
+mail-app-cli threads archive <thread-id> -a "Gmail" -m "INBOX" --dry-run
+```
+
+### Sync
+
+Trigger sync and get structured status:
+
+```bash
+mail-app-cli sync --account "Gmail" --mailbox "INBOX" --wait --json
+mail-app-cli sync status --account "Gmail"
 ```
 
 ## JSON Output and jq
@@ -323,14 +454,24 @@ mail-app-cli/
 ├── cmd/              # Cobra command definitions
 │   ├── root.go
 │   ├── accounts.go
+│   ├── batch.go
+│   ├── drafts.go
+│   ├── export.go
+│   ├── import.go
 │   ├── mailboxes.go
 │   ├── messages.go
+│   ├── rules.go
 │   ├── send.go
 │   ├── search.go
+│   ├── signatures.go
+│   ├── smart.go
+│   ├── threads.go
+│   ├── vip.go
 │   └── attachments.go
 ├── pkg/
 │   └── mail/        # Mail.app AppleScript/JXA client
-│       └── client.go
+│       ├── client.go
+│       └── enhancements.go
 └── main.go
 ```
 
@@ -375,16 +516,6 @@ go build -o mail-app-cli
 ./mail-app-cli messages list -a "Your Account" -m "INBOX" --limit 5
 ```
 
-## Roadmap
+## Enhancement Status
 
-Future enhancements:
-
-- Rules management
-- Smart mailbox operations
-- Signatures management
-- VIP contacts
-- Export/import functionality
-- Batch operations
-- IMAP folder synchronization
-- Message threading support
-- Draft management
+Implemented command surfaces now include batch operations, JSON export, import validation, draft management, rules listing/toggling/creation, smart mailbox inspection, thread grouping, sync metadata, signatures, and VIP capability checks. Some Mail.app mutation surfaces return explicit unsupported errors when local scriptability does not expose a dependable API.
