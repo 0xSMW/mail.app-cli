@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -128,5 +129,24 @@ func TestSortAndSliceUsesGlobalDateOrder(t *testing.T) {
 		if gotIDs[i] != wantIDs[i] {
 			t.Fatalf("sortAndSlice ids = %v, want %v", gotIDs, wantIDs)
 		}
+	}
+}
+
+func TestIsEnvelopeIndexUnavailable(t *testing.T) {
+	unavailableErrors := []error{
+		errors.New(`sqlite3 envelope index query failed: exit status 1 - Error: unable to open database "/Users/example/Library/Mail/V10/MailData/Envelope Index": authorization denied`),
+		errors.New("ls: MailData: Operation not permitted"),
+		errors.New("sqlite3: executable file not found"),
+		errors.New("no such file"),
+	}
+
+	for _, err := range unavailableErrors {
+		if !isEnvelopeIndexUnavailable(err) {
+			t.Fatalf("isEnvelopeIndexUnavailable(%q) = false, want true", err)
+		}
+	}
+
+	if isEnvelopeIndexUnavailable(errors.New("failed to parse envelope index JSON")) {
+		t.Fatal("parse errors should not be treated as unavailable index")
 	}
 }

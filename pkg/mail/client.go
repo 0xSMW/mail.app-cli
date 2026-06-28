@@ -217,12 +217,16 @@ func isArchiveAlias(mailboxName string) bool {
 	}
 }
 
-func looksLikeSQLiteMissing(err error) bool {
+func isEnvelopeIndexUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	return strings.Contains(msg, "executable file not found") || strings.Contains(msg, "no such file")
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "executable file not found") ||
+		strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "unable to open database") ||
+		strings.Contains(msg, "authorization denied") ||
+		strings.Contains(msg, "operation not permitted")
 }
 
 func runWithMailCommandLimit[T any](items []T, run func(T)) {
@@ -289,6 +293,33 @@ func indexMailboxURLPattern(accountID, mailboxName string) string {
 	return fmt.Sprintf("imap://%s/%s", accountID, escapedName)
 }
 
+func jxaMailboxLookupExpression(mailboxName string) string {
+	if isArchiveAlias(mailboxName) {
+		return "(findMailboxByNames(acc.mailboxes(), ['All Mail', 'Archive']) || acc.mailboxes.byName(requestedMailbox))"
+	}
+	return "acc.mailboxes.byName(requestedMailbox)"
+}
+
+func jxaMailboxLookupHelper() string {
+	return `
+function findMailboxByNames(mailboxes, names) {
+	for (let i = 0; i < mailboxes.length; i++) {
+		const mailbox = mailboxes[i];
+		try {
+			if (names.includes(mailbox.name())) {
+				return mailbox;
+			}
+			const child = findMailboxByNames(mailbox.mailboxes(), names);
+			if (child !== null) {
+				return child;
+			}
+		} catch (e) {}
+	}
+	return null;
+}
+`
+}
+
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
 	if accountName == "" || mailboxName == "" {
 		return nil, false, nil
@@ -318,7 +349,7 @@ limit 1;
 		UnreadCount int
 	}
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if looksLikeSQLiteMissing(err) {
+		if isEnvelopeIndexUnavailable(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -336,6 +367,9 @@ order by case when url like %s then 0 else 1 end, ROWID
 limit 1;
 `, sqlQuote("imap://"+account.ID+"/%[Gmail]%/All%Mail"), sqlQuote("%/%5BGmail%5D/All%20Mail"))
 		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+			if isEnvelopeIndexUnavailable(err) {
+				return nil, false, nil
+			}
 			return nil, false, err
 		}
 	}
@@ -370,7 +404,7 @@ order by url;
 
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if looksLikeSQLiteMissing(err) {
+		if isEnvelopeIndexUnavailable(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -1102,6 +1136,9 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 		} else if ok {
 			messages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
 			if err != nil {
+				if isEnvelopeIndexUnavailable(err) {
+					return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+				}
 				return nil, err
 			}
 			if len(messages) > 0 || mbox.TotalCount == 0 || unreadOnly || flaggedOnly || strings.TrimSpace(since) != "" {
@@ -1110,6 +1147,10 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 		}
 	}
 
+	return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+}
+
+func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
 	// Build filter/offset/limit clauses using index-based approach.
 	// Bulk property accessors (mbox.messages.readStatus()) fetch all values in a
 	// single IPC call rather than one round-trip per message.
@@ -1147,10 +1188,12 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
+const requestedMailbox = '%s';
+%s
 
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
+	const mbox = %s;
 	const accName = acc.name();
 	const mboxName = mbox.name();
 	const messages = mbox.messages();
@@ -1192,7 +1235,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1207,7 +1250,14 @@ JSON.stringify(result);
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
 		} else if ok {
-			return c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
+			indexMessages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
+			if err != nil {
+				if isEnvelopeIndexUnavailable(err) {
+					return messages, nil
+				}
+				return nil, err
+			}
+			return indexMessages, nil
 		}
 	}
 
@@ -1219,10 +1269,12 @@ func (c *Client) GetMessageDetailsJSON(accountName, mailboxName, messageID strin
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 let result = null;
+const requestedMailbox = '%s';
+%s
 
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
+	const mbox = %s;
 	let msg = null;
 	try {
 		msg = mbox.messages.byId(Number('%s'));
@@ -1275,7 +1327,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1498,7 +1550,14 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
 		} else if ok {
-			return c.searchMessagesFromIndex(query, accountName, mbox, limit)
+			messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
+			if err != nil {
+				if isEnvelopeIndexUnavailable(err) {
+					return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+				}
+				return nil, err
+			}
+			return messages, nil
 		}
 		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit)
 	}
@@ -1580,9 +1639,20 @@ func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName s
 	if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 		return nil, err
 	} else if ok {
-		return c.searchMessagesFromIndex(query, accountName, mbox, limit)
+		messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
+		if err != nil {
+			if isEnvelopeIndexUnavailable(err) {
+				return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+			}
+			return nil, err
+		}
+		return messages, nil
 	}
 
+	return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+}
+
+func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
 	// Use helper for escaping
 	escapedQuery := escapeJSString(query)
 	escapedAccount := escapeJSString(accountName)
@@ -1593,10 +1663,12 @@ const mail = Application('Mail');
 const result = [];
 const searchTerm = '%s'.toLowerCase();
 const maxResults = %d;
+const requestedMailbox = '%s';
+%s
 
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
+	const mbox = %s;
 	const accName = acc.name();
 	const mboxName = mbox.name();
 	const messages = mbox.messages();
@@ -1634,7 +1706,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapedQuery, limit, escapedAccount, escapedMailbox)
+`, escapedQuery, limit, escapedMailbox, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
