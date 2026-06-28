@@ -75,7 +75,7 @@ end tell
 		return nil, err
 	}
 	time.Sleep(5 * time.Second)
-	if draft, err := c.findDraftBySubjectSince(input.Account, input.Subject, startedAt); err == nil {
+	if draft, err := c.findDraftBySubjectContentSince(input.Account, input.Subject, input.Body, startedAt); err == nil {
 		return draft, nil
 	}
 	return nil, fmt.Errorf("created draft but could not resolve saved draft metadata")
@@ -104,6 +104,9 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if input.Body != "" {
 		replacement.Body = input.Body
 	}
+	if replacement.Subject == details.Subject && replacement.Body == details.Content {
+		return draft, nil
+	}
 	if len(replacement.To) == 0 {
 		return nil, fmt.Errorf("draft has no to recipients to preserve")
 	}
@@ -114,7 +117,13 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
 		return nil, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
 	}
-	c.cleanupDraftAutosaves(draft.Account, draft.Subject, draft.DateReceived)
+	c.cleanupDraftAutosaves(draftCleanupTarget{
+		Account: draft.Account,
+		Subject: details.Subject,
+		Content: details.Content,
+		Since:   draft.DateReceived,
+		KeepIDs: map[string]bool{updated.ID: true},
+	})
 	return updated, nil
 }
 
@@ -149,7 +158,12 @@ func (c *Client) SendDraft(accountName, draftID string) error {
 	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
 		return err
 	}
-	c.cleanupDraftAutosaves(draft.Account, draft.Subject, draft.DateReceived)
+	c.cleanupDraftAutosaves(draftCleanupTarget{
+		Account: draft.Account,
+		Subject: details.Subject,
+		Content: details.Content,
+		Since:   draft.DateReceived,
+	})
 	return nil
 }
 
@@ -161,23 +175,30 @@ func (c *Client) DeleteDraft(accountName, draftID string) error {
 	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
 		return err
 	}
-	c.cleanupDraftAutosaves(draft.Account, draft.Subject, draft.DateReceived)
+	c.cleanupDraftAutosaves(draftCleanupTarget{
+		Account: draft.Account,
+		Subject: draft.Subject,
+		Content: draft.Content,
+		Since:   draft.DateReceived,
+	})
 	return nil
 }
 
 func (c *Client) findDraftBySubject(accountName, subject string) (*Message, error) {
-	return c.findDraftBySubjectSince(accountName, subject, time.Time{})
+	return c.findDraftBySubjectContentSince(accountName, subject, "", time.Time{})
 }
 
-func (c *Client) findDraftBySubjectSince(accountName, subject string, since time.Time) (*Message, error) {
+func (c *Client) findDraftBySubjectContentSince(accountName, subject, content string, since time.Time) (*Message, error) {
 	messages, err := c.GetUnifiedMessagesJSON("drafts", 50, 0, true)
 	if err != nil {
 		return nil, err
 	}
 	var best *Message
-	var createdMatches []Message
 	for _, message := range messages {
 		if message.Subject != subject || (accountName != "" && message.Account != accountName) {
+			continue
+		}
+		if content != "" && normalizeDraftContent(message.Content) != normalizeDraftContent(content) {
 			continue
 		}
 		if !since.IsZero() {
@@ -186,7 +207,6 @@ func (c *Client) findDraftBySubjectSince(accountName, subject string, since time
 				continue
 			}
 		}
-		createdMatches = append(createdMatches, message)
 		if best == nil || message.DateReceived > best.DateReceived {
 			copy := message
 			best = &copy
@@ -194,12 +214,6 @@ func (c *Client) findDraftBySubjectSince(accountName, subject string, since time
 	}
 	if best == nil {
 		return nil, fmt.Errorf("draft not found by subject: %s", subject)
-	}
-	for _, message := range createdMatches {
-		if message.ID == best.ID {
-			continue
-		}
-		_ = c.deleteDraftByID(message.Account, message.Mailbox, message.ID)
 	}
 	return best, nil
 }
@@ -212,6 +226,12 @@ func parseMessageTimestamp(value string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+func normalizeDraftContent(value string) string {
+	value = strings.ReplaceAll(value, "\r\n", "\n")
+	value = strings.ReplaceAll(value, "\r", "\n")
+	return strings.TrimSpace(value)
 }
 
 func (c *Client) deleteDraftByID(accountName, mailboxName, draftID string) error {
@@ -229,26 +249,43 @@ end tell
 	return err
 }
 
-func (c *Client) cleanupDraftAutosaves(accountName, subject, sinceValue string) {
-	since, ok := parseMessageTimestamp(sinceValue)
+type draftCleanupTarget struct {
+	Account string
+	Subject string
+	Content string
+	Since   string
+	KeepIDs map[string]bool
+}
+
+func (c *Client) cleanupDraftAutosaves(target draftCleanupTarget) {
+	since, ok := parseMessageTimestamp(target.Since)
 	if !ok {
 		since = time.Now().Add(-30 * time.Second)
 	}
 	time.Sleep(8 * time.Second)
-	messages, err := c.GetUnifiedMessagesJSON("drafts", 100, 0, false)
+	messages, err := c.GetUnifiedMessagesJSON("drafts", 100, 0, true)
 	if err != nil {
 		return
 	}
 	for _, message := range messages {
-		if message.Account != accountName || message.Subject != subject {
-			continue
+		if shouldDeleteDraftAutosave(message, target, since) {
+			_ = c.deleteDraftByID(message.Account, message.Mailbox, message.ID)
 		}
-		messageTime, ok := parseMessageTimestamp(message.DateReceived)
-		if ok && messageTime.Before(since.Add(-1*time.Second)) {
-			continue
-		}
-		_ = c.deleteDraftByID(message.Account, message.Mailbox, message.ID)
 	}
+}
+
+func shouldDeleteDraftAutosave(message Message, target draftCleanupTarget, since time.Time) bool {
+	if target.KeepIDs[message.ID] {
+		return false
+	}
+	if message.Account != target.Account || message.Subject != target.Subject {
+		return false
+	}
+	if normalizeDraftContent(message.Content) != normalizeDraftContent(target.Content) {
+		return false
+	}
+	messageTime, ok := parseMessageTimestamp(message.DateReceived)
+	return !ok || !messageTime.Before(since.Add(-1*time.Second))
 }
 
 func (c *Client) ListRules() ([]Rule, error) {

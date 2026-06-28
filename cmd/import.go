@@ -43,24 +43,15 @@ var importMessagesCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		var payload struct {
-			Messages []mail.Message `json:"messages"`
-		}
-		if err := json.Unmarshal(data, &payload); err != nil {
-			return fmt.Errorf("invalid message export JSON: %w", err)
-		}
-		if payload.Messages == nil {
-			var direct []mail.Message
-			if err := json.Unmarshal(data, &direct); err != nil {
-				return fmt.Errorf("message export must contain a messages array")
-			}
-			payload.Messages = direct
+		messages, err := parseImportMessages(data)
+		if err != nil {
+			return err
 		}
 		result := map[string]any{
 			"account":        importAccount,
 			"mailbox":        importMailbox,
 			"format":         importFormat,
-			"validated":      len(payload.Messages),
+			"validated":      len(messages),
 			"wouldImport":    importDryRun,
 			"implementation": "validation-only",
 		}
@@ -69,6 +60,24 @@ var importMessagesCmd = &cobra.Command{
 		}
 		return fmt.Errorf("message import is validation-only because Mail.app does not expose reliable raw-message import through this local scriptability layer; rerun with --dry-run to inspect the validated input")
 	},
+}
+
+func parseImportMessages(data []byte) ([]mail.Message, error) {
+	var direct []mail.Message
+	if err := json.Unmarshal(data, &direct); err == nil {
+		return direct, nil
+	}
+
+	var payload struct {
+		Messages []mail.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, fmt.Errorf("invalid message export JSON: %w", err)
+	}
+	if payload.Messages == nil {
+		return nil, fmt.Errorf("message export must contain a messages array")
+	}
+	return payload.Messages, nil
 }
 
 func init() {

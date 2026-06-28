@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
@@ -64,5 +65,40 @@ func TestDeterministicAttachmentNameHandlesCollisions(t *testing.T) {
 	}
 	if second != "2026-06-28-42-my-file-2.pdf" {
 		t.Fatalf("second attachment name = %q", second)
+	}
+}
+
+func TestParseImportMessagesAcceptsWrapperAndDirectArray(t *testing.T) {
+	direct, err := json.Marshal([]mail.Message{{ID: "1", Subject: "Direct"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := json.Marshal(map[string][]mail.Message{
+		"messages": {{ID: "2", Subject: "Wrapped"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	directMessages, err := parseImportMessages(direct)
+	if err != nil {
+		t.Fatalf("parseImportMessages direct array returned error: %v", err)
+	}
+	if len(directMessages) != 1 || directMessages[0].ID != "1" {
+		t.Fatalf("direct messages = %+v", directMessages)
+	}
+
+	wrappedMessages, err := parseImportMessages(wrapped)
+	if err != nil {
+		t.Fatalf("parseImportMessages wrapper returned error: %v", err)
+	}
+	if len(wrappedMessages) != 1 || wrappedMessages[0].ID != "2" {
+		t.Fatalf("wrapped messages = %+v", wrappedMessages)
+	}
+}
+
+func TestParseImportMessagesRejectsMissingMessages(t *testing.T) {
+	if _, err := parseImportMessages([]byte(`{"items":[]}`)); err == nil {
+		t.Fatal("parseImportMessages accepted object without messages")
 	}
 }
