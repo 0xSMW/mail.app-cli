@@ -138,6 +138,7 @@ func TestIsEnvelopeIndexUnavailable(t *testing.T) {
 		errors.New("ls: MailData: Operation not permitted"),
 		errors.New("sqlite3: executable file not found"),
 		errors.New("no such file"),
+		errors.New("envelope index disabled"),
 	}
 
 	for _, err := range unavailableErrors {

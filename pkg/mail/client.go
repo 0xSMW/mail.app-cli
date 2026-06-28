@@ -224,6 +224,7 @@ func isEnvelopeIndexUnavailable(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "executable file not found") ||
 		strings.Contains(msg, "no such file") ||
+		strings.Contains(msg, "envelope index disabled") ||
 		strings.Contains(msg, "unable to open database") ||
 		strings.Contains(msg, "authorization denied") ||
 		strings.Contains(msg, "operation not permitted")
@@ -249,6 +250,10 @@ func runWithMailCommandLimit[T any](items []T, run func(T)) {
 }
 
 func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
+	if os.Getenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX") != "" {
+		return fmt.Errorf("envelope index disabled")
+	}
+
 	indexPath, err := mailEnvelopeIndexPath()
 	if err != nil {
 		return err
@@ -1166,8 +1171,12 @@ func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, 
 
 	sinceFilter := ""
 	if since != "" {
+		sinceUnix, _, err := parseSinceUnix(since)
+		if err != nil {
+			return nil, err
+		}
 		// Bulk-fetch all received dates in one IPC call, then filter by index
-		sinceFilter = fmt.Sprintf("{ const sd = new Date('%s'); const allDates = mbox.messages.dateReceived(); indices = indices.filter(i => { const d = allDates[i]; return d && d >= sd; }); }", escapeJSString(since))
+		sinceFilter = fmt.Sprintf("{ const sd = new Date(%d); const allDates = mbox.messages.dateReceived(); indices = indices.filter(i => { const d = allDates[i]; return d && d >= sd; }); }", sinceUnix*1000)
 	}
 
 	offsetClause := ""
@@ -1259,6 +1268,97 @@ JSON.stringify(result);
 			}
 			return indexMessages, nil
 		}
+	}
+	if len(messages) == 0 && isArchiveAlias(mailboxName) {
+		return c.getArchiveMessagesWithWhoseJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+	}
+
+	return messages, nil
+}
+
+func (c *Client) getArchiveMessagesWithWhoseJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+	sinceUnix := int64(0)
+	if strings.TrimSpace(since) != "" {
+		parsedSince, _, err := parseSinceUnix(since)
+		if err != nil {
+			return nil, err
+		}
+		sinceUnix = parsedSince
+	}
+
+	contentField := "content: '',"
+	if withContent {
+		contentField = "content: msg.content() || '',"
+	}
+
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const result = [];
+const requestedMailbox = '%s';
+const sinceDate = new Date(%d);
+const offset = %d;
+const maxResults = %d;
+const unreadOnly = %t;
+const flaggedOnly = %t;
+%s
+
+function includeMessage(msg) {
+	try { if (msg.deletedStatus()) return false; } catch(e) {}
+	try { if (unreadOnly && msg.readStatus()) return false; } catch(e) {}
+	try { if (flaggedOnly && !msg.flaggedStatus()) return false; } catch(e) {}
+	return true;
+}
+
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = %s;
+	const accName = acc.name();
+	const mboxName = mbox.name();
+	const matches = mbox.messages.whose({dateReceived: {_greaterThan: sinceDate}})();
+	matches.sort((a, b) => {
+		const bd = b.dateReceived() || new Date(0);
+		const ad = a.dateReceived() || new Date(0);
+		return bd - ad;
+	});
+	let skipped = 0;
+	for (let i = 0; i < matches.length && (maxResults <= 0 || result.length < maxResults); i++) {
+		const msg = matches[i];
+		if (!includeMessage(msg)) continue;
+		if (skipped < offset) {
+			skipped++;
+			continue;
+		}
+		try {
+			result.push({
+				id: String(msg.id()),
+				subject: msg.subject() || '',
+				sender: msg.sender() || '',
+				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+				dateSent: (msg.dateSent() || new Date()).toISOString(),
+				read: msg.readStatus(),
+				flagged: msg.flaggedStatus(),
+				messageSize: msg.messageSize(),
+				%s
+				mailbox: mboxName,
+				account: accName
+			});
+		} catch(e) {}
+	}
+} catch (e) {
+	// Handle errors gracefully
+}
+
+JSON.stringify(result);
+`, escapeJSString(mailboxName), sinceUnix*1000, offset, limit, unreadOnly, flaggedOnly, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), contentField)
+
+	output, err := c.runJXA(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var messages []Message
+	if err := json.Unmarshal([]byte(output), &messages); err != nil {
+		return nil, fmt.Errorf("failed to parse archive messages JSON: %w", err)
 	}
 
 	return messages, nil
@@ -1569,7 +1669,7 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 
 	var targets []searchTarget
 	if accountName != "" {
-		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "INBOX"})
+		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "All Mail"})
 	} else {
 		accounts, err := c.GetAccountsJSON()
 		if err != nil {
@@ -1657,12 +1757,20 @@ func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxNam
 	escapedQuery := escapeJSString(query)
 	escapedAccount := escapeJSString(accountName)
 	escapedMailbox := escapeJSString(mailboxName)
+	maxToCheck := 500
+	if isArchiveAlias(mailboxName) {
+		maxToCheck = 10000
+		if limit > 0 && limit*100 > maxToCheck {
+			maxToCheck = limit * 100
+		}
+	}
 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
 const searchTerm = '%s'.toLowerCase();
 const maxResults = %d;
+const maxMessagesToCheck = %d;
 const requestedMailbox = '%s';
 %s
 
@@ -1674,7 +1782,7 @@ try {
 	const messages = mbox.messages();
 	// Limit how many messages to check per mailbox for performance
 	// Messages are typically sorted newest first, so this checks recent messages
-	const maxToCheck = Math.min(messages.length, 500);
+	const maxToCheck = Math.min(messages.length, maxMessagesToCheck);
 
 	for (let k = 0; k < maxToCheck && result.length < maxResults; k++) {
 		const msg = messages[k];
@@ -1706,7 +1814,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapedQuery, limit, escapedMailbox, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
+`, escapedQuery, limit, maxToCheck, escapedMailbox, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1716,6 +1824,86 @@ JSON.stringify(result);
 	var messages []Message
 	if err := json.Unmarshal([]byte(output), &messages); err != nil {
 		return nil, fmt.Errorf("failed to parse search results JSON: %w", err)
+	}
+
+	if len(messages) == 0 && isArchiveAlias(mailboxName) {
+		return c.searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName, limit)
+	}
+
+	return messages, nil
+}
+
+func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const result = [];
+const seen = {};
+const searchTerm = '%s';
+const maxResults = %d;
+const requestedMailbox = '%s';
+%s
+
+function addMessage(msg, accName, mboxName) {
+	if (result.length >= maxResults) return;
+	try { if (msg.deletedStatus()) return; } catch(e) {}
+	try {
+		const id = String(msg.id());
+		if (seen[id]) return;
+		seen[id] = true;
+		result.push({
+			id: id,
+			subject: msg.subject() || '',
+			sender: msg.sender() || '',
+			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+			dateSent: (msg.dateSent() || new Date()).toISOString(),
+			read: msg.readStatus(),
+			flagged: msg.flaggedStatus(),
+			messageSize: msg.messageSize(),
+			mailbox: mboxName,
+			account: accName
+		});
+	} catch (e) {}
+}
+
+function addMatches(matches, accName, mboxName) {
+	for (let i = 0; i < matches.length && result.length < maxResults; i++) {
+		addMessage(matches[i], accName, mboxName);
+	}
+}
+
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = %s;
+	const accName = acc.name();
+	const mboxName = mbox.name();
+	try {
+		addMatches(mbox.messages.whose({subject: {_contains: searchTerm}})(), accName, mboxName);
+	} catch(e) {}
+	if (result.length < maxResults) {
+		try {
+			addMatches(mbox.messages.whose({sender: {_contains: searchTerm}})(), accName, mboxName);
+		} catch(e) {}
+	}
+	result.sort((a, b) => b.dateReceived.localeCompare(a.dateReceived));
+} catch (e) {
+	// Handle errors gracefully
+}
+
+JSON.stringify(result.slice(0, maxResults));
+`, escapeJSString(query), limit, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+
+	output, err := c.runJXA(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var messages []Message
+	if err := json.Unmarshal([]byte(output), &messages); err != nil {
+		return nil, fmt.Errorf("failed to parse archive search results JSON: %w", err)
 	}
 
 	return messages, nil
