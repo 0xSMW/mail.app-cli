@@ -17,9 +17,10 @@ import (
 
 // Client provides an interface to interact with Mail.app via AppleScript
 type Client struct {
-	accountsMu     sync.Mutex
-	accounts       []Account
-	accountsLoaded bool
+	accountsMu               sync.Mutex
+	accounts                 []Account
+	accountsLoaded           bool
+	indexFallbackWarningOnce sync.Once
 }
 
 // NewClient creates a new Mail.app client
@@ -230,6 +231,16 @@ func isEnvelopeIndexUnavailable(err error) bool {
 		strings.Contains(msg, "operation not permitted")
 }
 
+func (c *Client) warnEnvelopeIndexFallback(err error) {
+	c.indexFallbackWarningOnce.Do(func() {
+		reason := strings.TrimSpace(err.Error())
+		if reason == "" {
+			reason = "unknown error"
+		}
+		fmt.Fprintf(os.Stderr, "mail-app-cli: Mail Envelope Index is unavailable (%s). Falling back to Mail.app automation, which may be much slower. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.\n", reason)
+	})
+}
+
 func runWithMailCommandLimit[T any](items []T, run func(T)) {
 	limit := maxConcurrentMailCommands
 	if len(items) < limit {
@@ -355,6 +366,7 @@ limit 1;
 	}
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		if isEnvelopeIndexUnavailable(err) {
+			c.warnEnvelopeIndexFallback(err)
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -373,6 +385,7 @@ limit 1;
 `, sqlQuote("imap://"+account.ID+"/%[Gmail]%/All%Mail"), sqlQuote("%/%5BGmail%5D/All%20Mail"))
 		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 			if isEnvelopeIndexUnavailable(err) {
+				c.warnEnvelopeIndexFallback(err)
 				return nil, false, nil
 			}
 			return nil, false, err
@@ -410,6 +423,7 @@ order by url;
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		if isEnvelopeIndexUnavailable(err) {
+			c.warnEnvelopeIndexFallback(err)
 			return nil, false, nil
 		}
 		return nil, false, err
@@ -1142,6 +1156,7 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 			messages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
 			if err != nil {
 				if isEnvelopeIndexUnavailable(err) {
+					c.warnEnvelopeIndexFallback(err)
 					return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
 				}
 				return nil, err
@@ -1262,6 +1277,7 @@ JSON.stringify(result);
 			indexMessages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
 			if err != nil {
 				if isEnvelopeIndexUnavailable(err) {
+					c.warnEnvelopeIndexFallback(err)
 					return messages, nil
 				}
 				return nil, err
@@ -1653,6 +1669,7 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 			messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
 			if err != nil {
 				if isEnvelopeIndexUnavailable(err) {
+					c.warnEnvelopeIndexFallback(err)
 					return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
 				}
 				return nil, err
@@ -1742,6 +1759,7 @@ func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName s
 		messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
 		if err != nil {
 			if isEnvelopeIndexUnavailable(err) {
+				c.warnEnvelopeIndexFallback(err)
 				return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
 			}
 			return nil, err
