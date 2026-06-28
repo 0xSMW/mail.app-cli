@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -21,9 +20,9 @@ var (
 	msgUnread        bool
 	msgFlaggedFilter bool
 	msgWithContent   bool
-	msgRead         bool
-	msgFlaggedSet   bool
-	msgSince        string
+	msgRead          bool
+	msgFlaggedSet    bool
+	msgSince         string
 	msgNoCache       bool
 	msgForceRefresh  bool
 )
@@ -61,8 +60,13 @@ var messagesListCmd = &cobra.Command{
 	Short: "List messages",
 	Long:  `List messages from a specific mailbox. Output is JSON format. Use jq for pretty printing: mail-app-cli messages list -a Account -m INBOX | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
+		}
+		var c *cache.Cache
+		var cacheErr error
+		if !msgNoCache {
+			c, cacheErr = cache.New()
 		}
 
 		// Build a cache key that encodes all query parameters so different queries
@@ -77,20 +81,12 @@ var messagesListCmd = &cobra.Command{
 		)
 
 		// Try cache first (skip if content requested — content is per-user and typically large)
-		if !msgNoCache && !msgForceRefresh {
-			c, err := cache.New()
-			if err == nil {
-				c.SetTTL(messageCacheTTL)
-				var cached []mail.Message
-				found, err := c.Get(cacheKey, &cached)
-				if err == nil && found {
-					output, err := json.MarshalIndent(cached, "", "  ")
-					if err != nil {
-						return fmt.Errorf("failed to marshal messages: %w", err)
-					}
-					fmt.Println(string(output))
-					return nil
-				}
+		if !msgNoCache && !msgForceRefresh && !msgWithContent && cacheErr == nil {
+			c.SetTTL(messageCacheTTL)
+			var cached []mail.Message
+			found, err := c.Get(cacheKey, &cached)
+			if err == nil && found {
+				return printJSON(cached, "messages")
 			}
 		}
 
@@ -100,21 +96,13 @@ var messagesListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get messages: %w", err)
 		}
 
-		// Populate cache (always write unless --no-cache)
-		if !msgNoCache {
-			if c, err := cache.New(); err == nil {
-				c.SetTTL(messageCacheTTL)
-				c.Set(cacheKey, messages)
-			}
+		// Populate cache (skip content results because content enrichment can be partial)
+		if !msgNoCache && !msgWithContent && cacheErr == nil {
+			c.SetTTL(messageCacheTTL)
+			c.Set(cacheKey, messages)
 		}
 
-		output, err := json.MarshalIndent(messages, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal messages: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(messages, "messages")
 	},
 }
 
@@ -125,8 +113,8 @@ var messagesShowCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -135,13 +123,7 @@ var messagesShowCmd = &cobra.Command{
 			return fmt.Errorf("failed to get message: %w", err)
 		}
 
-		output, err := json.MarshalIndent(message, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal message: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(message, "message")
 	},
 }
 
@@ -152,8 +134,8 @@ var messagesMarkCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -179,8 +161,8 @@ var messagesFlagCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -206,8 +188,8 @@ var messagesDeleteCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -229,8 +211,8 @@ var messagesArchiveCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -256,8 +238,8 @@ var messagesMoveCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		messageID := args[0]
 		targetMailbox := args[1]
-		if msgAccount == "" || msgMailbox == "" {
-			return fmt.Errorf("both --account and --mailbox are required")
+		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+			return err
 		}
 
 		client := mail.NewClient()
@@ -281,20 +263,28 @@ func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := mail.NewClient()
-			messages, err := client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
+			var messages []mail.Message
+			var err error
+			if msgAccount != "" || msgMailbox != "" {
+				if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+					return err
+				}
+				unreadOnly, flaggedOnly := scopedUnifiedFilters(mailboxType)
+				messages, err = client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, unreadOnly, flaggedOnly, msgWithContent, "")
+			} else {
+				messages, err = client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to get %s messages: %w", mailboxType, err)
 			}
 
-			output, err := json.MarshalIndent(messages, "", "  ")
-			if err != nil {
-				return fmt.Errorf("failed to marshal messages: %w", err)
-			}
-
-			fmt.Println(string(output))
-			return nil
+			return printJSON(messages, "messages")
 		},
 	}
+}
+
+func scopedUnifiedFilters(mailboxType string) (bool, bool) {
+	return mailboxType == "unread", mailboxType == "flagged"
 }
 
 var messagesInboxCmd = newUnifiedCmd(

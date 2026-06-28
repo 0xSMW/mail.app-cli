@@ -2,85 +2,65 @@
 
 ## Mail.app API Limitations
 
-### Message Loading Performance
+Mail.app's AppleScript/JXA bridge is the main performance ceiling. Calling
+`mailbox.messages()` can materialize an entire mailbox before the CLI can slice
+or filter results, and every `osascript` invocation has process-start and Apple
+Events overhead.
 
-When loading messages from a mailbox, performance is **directly proportional to the total number of messages in that mailbox**, even when requesting only a few messages or a single specific message.
+The CLI now avoids that path where it can by reading Mail's local Envelope Index
+for metadata-only operations, then falling back to JXA when full message content
+or unsupported mailbox shapes require it.
 
-**Test Results:**
+## Current Optimizations
 
-| Operation | Mailbox | Total Messages | Load Time |
-|-----------|---------|----------------|-----------|
-| List 5 messages | INBOX (empty) | 0 | 0.4s |
-| List 5 messages | INBOX (small) | 19 | 0.4s |
-| List 5 messages | All Mail (large) | 59,707 | 2.4-3.6s |
-| Get 1 message by ID | INBOX (small) | 19 | 0.4s |
-| Get 1 message by ID | All Mail (large) | 59,707 | 2.5-3.3s |
+- Envelope Index reads for mailbox counts and metadata-only message lists.
+- Label-aware index queries so folder membership is preserved for providers that
+  store messages in an archive-style backing mailbox.
+- Direct `messages.byId(...)` lookup for message details, with fallback to the
+  previous full-ID scan.
+- Default search targets account inboxes directly instead of discovering every
+  mailbox first.
+- Bounded Mail/JXA fan-out to reduce Mail.app and Apple Events contention.
+- Per-command cache setup only when caching is enabled.
+- Per-client account caching within a single CLI invocation.
+- Top-N sorting for paged unified views.
 
-### Why This Happens
+## Before/After Benchmarks
 
-Mail.app's AppleScript/JXA bridge has a fundamental limitation:
+Benchmarks were run against local Mail data with output redirected away from the
+terminal. Labels and account names are intentionally redacted. Values are median
+wall-clock times from three runs.
 
-When you call `mailbox.messages()`, Mail.app **must enumerate ALL messages** in the mailbox before returning, even if you only need a few. The API does not support:
+| Command class | Before | After | Improvement | Speedup |
+|---|---:|---:|---:|---:|
+| Account listing, uncached | 0.113s | 0.106s | 5.4% | 1.1x |
+| Mailbox listing, uncached | 1.265s | 0.119s | 90.6% | 10.6x |
+| Large metadata-only message list | 0.126s | 0.123s | 2.4% | 1.0x |
+| Labeled-folder metadata-only message list | 0.353s | 0.128s | 63.7% | 2.8x |
+| Single message detail lookup | 1.717s | 0.400s | 76.7% | 4.3x |
+| Account-scoped search | 1.872s | 0.149s | 92.0% | 12.6x |
+| Unified inbox-style view | 0.695s | 0.481s | 30.9% | 1.4x |
+| Unified unread view | 0.787s | 0.148s | 81.2% | 5.3x |
 
-- Streaming or lazy evaluation
-- LIMIT clauses
-- Direct index access without full enumeration
+Representative output checks confirmed that mailbox names, message IDs, search
+IDs, and message detail content matched between the old and optimized paths for
+the benchmarked cases.
 
-**Technical Details:**
+## Remaining Constraints
 
-```javascript
-// This takes 2.4 seconds for a mailbox with 59,707 messages
-let allMessages = mbox.messages();
-let first5 = allMessages.slice(0, 5);
+- `--with-content` still requires Mail.app/JXA because the Envelope Index does
+  not contain full message bodies or recipient expansion.
+- Provider-specific mailbox storage can differ from visible folder membership;
+  index-backed reads must preserve label membership rather than relying only on
+  the message storage mailbox.
+- Mail.app and Spotlight indexing can lag briefly behind server state, so index
+  paths should keep JXA fallbacks for unsupported or unresolved cases.
+- First-run timings may be noisier because Mail.app, SQLite pages, and system
+  caches may be cold.
 
-// Mail.app must:
-// 1. Query its SQLite database for all message IDs
-// 2. Create object references for each message
-// 3. Package them into a JavaScript array
-// 4. Return the array (only then can we slice it)
-```
+## Recommendations
 
-### What We Tried
-
-1. **Direct index access** - Not supported by Mail.app API
-2. **`.whose()` filtering for unread** - Reduced initial query time but accessing message properties took 60+ seconds
-3. **`.whose({id: messageID})` for specific message** - Still takes 4+ seconds (slower than iteration!)
-4. **Early slicing optimization** - Already implemented, can't slice before calling `.messages()`
-
-**Why `.whose()` doesn't help:**
-Mail.app's `.whose()` clause still enumerates all messages internally to filter them. It provides no performance benefit for large mailboxes.
-
-### Current Optimizations
-
-The code already implements several optimizations:
-
-1. **Early array slicing** - Limit processing immediately after getting messages
-2. **Smart multiplier** - Only fetch 3x messages when filters are active
-3. **Inline filtering** - Apply filters before iteration to reduce work
-4. **24-hour caching** - Avoid repeated expensive calls
-
-### Recommendations
-
-**For scripting/automation:**
-- Use specific mailboxes (INBOX, Sent) rather than "All Mail" when possible
-- Results are cached for 24 hours, so first call is slow but subsequent calls are instant
-- Consider the 3-6 second load time for large mailboxes as acceptable for batch operations
-
-**For interactive use:**
-- Prefer smaller, focused mailboxes
-- Use the cache warming (first load takes time, rest of day is fast)
-
-### Comparison with Other Accounts
-
-Performance varies by mailbox size, not account:
-
-```
-rmelton@gmail.com / All Mail (59,707 messages): 3.6s
-rmelton@gmail.com / INBOX (0 messages): 0.4s
-rmelton@gmail.com / Spam (850 messages): 0.6s
-robert.melton@gmail.com / INBOX (19 messages): 0.4s
-```
-
-### Not a Bug
-
-This is **expected behavior** given Mail.app's API design. All AppleScript/JXA-based Mail.app tools share this limitation.
+- Prefer metadata-only list/search commands for interactive workflows.
+- Use `--with-content` only when message bodies are needed.
+- Keep cache enabled for repeated automation over the same mailbox/query.
+- Prefer narrow account or mailbox filters when searching large mail stores.

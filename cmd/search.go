@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/intelligrit/mail-app-cli/pkg/mail"
@@ -30,13 +29,7 @@ Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query
 			return fmt.Errorf("failed to search messages: %w", err)
 		}
 
-		output, err := json.MarshalIndent(messages, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal search results: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(messages, "search results")
 	},
 }
 

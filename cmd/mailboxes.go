@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/intelligrit/mail-app-cli/pkg/cache"
@@ -27,6 +26,11 @@ var mailboxesListCmd = &cobra.Command{
 	Long:  `List all mailboxes across all accounts or for a specific account. Output is JSON format. Use jq for pretty printing: mail-app-cli mailboxes list | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var mailboxes []mail.Mailbox
+		var c *cache.Cache
+		var cacheErr error
+		if !mailboxNoCache {
+			c, cacheErr = cache.New()
+		}
 
 		// Determine cache key based on whether account is specified
 		cacheKey := "mailboxes"
@@ -35,18 +39,10 @@ var mailboxesListCmd = &cobra.Command{
 		}
 
 		// Try to get from cache if not disabled
-		if !mailboxNoCache && !mailboxForceRefresh {
-			c, err := cache.New()
-			if err == nil {
-				found, err := c.Get(cacheKey, &mailboxes)
-				if err == nil && found {
-					output, err := json.MarshalIndent(mailboxes, "", "  ")
-					if err != nil {
-						return fmt.Errorf("failed to marshal mailboxes: %w", err)
-					}
-					fmt.Println(string(output))
-					return nil
-				}
+		if !mailboxNoCache && !mailboxForceRefresh && cacheErr == nil {
+			found, err := c.Get(cacheKey, &mailboxes)
+			if err == nil && found {
+				return printJSON(mailboxes, "mailboxes")
 			}
 		}
 
@@ -58,20 +54,11 @@ var mailboxesListCmd = &cobra.Command{
 		}
 
 		// Save to cache if not disabled
-		if !mailboxNoCache {
-			c, err := cache.New()
-			if err == nil {
-				c.Set(cacheKey, mailboxes)
-			}
+		if !mailboxNoCache && cacheErr == nil {
+			c.Set(cacheKey, mailboxes)
 		}
 
-		output, err := json.MarshalIndent(mailboxes, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal mailboxes: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(mailboxes, "mailboxes")
 	},
 }
 

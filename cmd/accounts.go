@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"github.com/intelligrit/mail-app-cli/pkg/cache"
@@ -26,20 +25,17 @@ var accountsListCmd = &cobra.Command{
 	Long:  `List all Mail.app accounts. Output is JSON format. Use jq for pretty printing: mail-app-cli accounts list | jq`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var accounts []mail.Account
+		var c *cache.Cache
+		var cacheErr error
+		if !accountsNoCache {
+			c, cacheErr = cache.New()
+		}
 
 		// Try to get from cache if not disabled
-		if !accountsNoCache && !accountsForceRefresh {
-			c, err := cache.New()
-			if err == nil {
-				found, err := c.Get("accounts", &accounts)
-				if err == nil && found {
-					output, err := json.MarshalIndent(accounts, "", "  ")
-					if err != nil {
-						return fmt.Errorf("failed to marshal accounts: %w", err)
-					}
-					fmt.Println(string(output))
-					return nil
-				}
+		if !accountsNoCache && !accountsForceRefresh && cacheErr == nil {
+			found, err := c.Get("accounts", &accounts)
+			if err == nil && found {
+				return printJSON(accounts, "accounts")
 			}
 		}
 
@@ -51,20 +47,11 @@ var accountsListCmd = &cobra.Command{
 		}
 
 		// Save to cache if not disabled
-		if !accountsNoCache {
-			c, err := cache.New()
-			if err == nil {
-				c.Set("accounts", accounts)
-			}
+		if !accountsNoCache && cacheErr == nil {
+			c.Set("accounts", accounts)
 		}
 
-		output, err := json.MarshalIndent(accounts, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal accounts: %w", err)
-		}
-
-		fmt.Println(string(output))
-		return nil
+		return printJSON(accounts, "accounts")
 	},
 }
 
@@ -83,12 +70,7 @@ var accountsShowCmd = &cobra.Command{
 
 		for _, acc := range accounts {
 			if acc.Name == accountName {
-				output, err := json.MarshalIndent(acc, "", "  ")
-				if err != nil {
-					return fmt.Errorf("failed to marshal account: %w", err)
-				}
-				fmt.Println(string(output))
-				return nil
+				return printJSON(acc, "account")
 			}
 		}
 
