@@ -269,7 +269,8 @@ func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
 				if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
 					return err
 				}
-				messages, err = client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, false, false, msgWithContent, "")
+				unreadOnly, flaggedOnly := scopedUnifiedFilters(mailboxType)
+				messages, err = client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, unreadOnly, flaggedOnly, msgWithContent, "")
 			} else {
 				messages, err = client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
 			}
@@ -280,6 +281,10 @@ func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
 			return printJSON(messages, "messages")
 		},
 	}
+}
+
+func scopedUnifiedFilters(mailboxType string) (bool, bool) {
+	return mailboxType == "unread", mailboxType == "flagged"
 }
 
 var messagesInboxCmd = newUnifiedCmd(
