@@ -61,6 +61,39 @@ func TestSQLQuote(t *testing.T) {
 	}
 }
 
+func TestEscapeSQLLikePattern(t *testing.T) {
+	got := escapeSQLLikePattern(`100%_done\ok`)
+	want := `100\%\_done\\ok`
+	if got != want {
+		t.Fatalf("escapeSQLLikePattern = %q, want %q", got, want)
+	}
+}
+
+func TestIndexMailboxMembershipCondition(t *testing.T) {
+	regular := indexMailbox{ID: 42, Name: "INBOX"}
+	got := indexMailboxMembershipCondition(&regular)
+	for _, want := range []string{
+		"m.mailbox = 42",
+		"labels l",
+		"l.mailbox_id = 42",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("regular membership condition %q does not contain %q", got, want)
+		}
+	}
+
+	archive := indexMailbox{ID: 99, Name: "All Mail"}
+	if got := indexMailboxMembershipCondition(&archive); got != "m.mailbox = 99" {
+		t.Fatalf("archive membership condition = %q, want direct mailbox check", got)
+	}
+}
+
+func TestIsSpecialMailboxNameIncludesSentItems(t *testing.T) {
+	if !isSpecialMailboxName("sent", "Sent Items") {
+		t.Fatal("Sent Items should be treated as a sent mailbox")
+	}
+}
+
 func TestRunBulkOperations(t *testing.T) {
 	t.Run("zero requests", func(t *testing.T) {
 		called := false

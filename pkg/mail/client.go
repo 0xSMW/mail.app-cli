@@ -172,6 +172,11 @@ type indexMessage struct {
 	BccRecipients string `json:"BccRecipients"`
 }
 
+type searchTarget struct {
+	AccountName string
+	MailboxName string
+}
+
 type messageDateMinHeap []Message
 
 func (h messageDateMinHeap) Len() int { return len(h) }
@@ -206,6 +211,13 @@ func mailEnvelopeIndexPath() (string, error) {
 
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+func escapeSQLLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 func mailboxLeafFromURL(rawURL string) string {
@@ -592,7 +604,8 @@ func indexMailboxMembershipCondition(mbox *indexMailbox) string {
 	if isArchiveAlias(mbox.Name) {
 		return "m.mailbox = " + strconv.Itoa(mbox.ID)
 	}
-	return "exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + strconv.Itoa(mbox.ID) + ")"
+	mailboxID := strconv.Itoa(mbox.ID)
+	return "(m.mailbox = " + mailboxID + " or exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + mailboxID + "))"
 }
 
 func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
@@ -633,15 +646,15 @@ func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *in
 	if limit <= 0 {
 		limit = 50
 	}
-	needle := sqlQuote(strings.ToLower(queryText))
+	needle := sqlQuote(escapeSQLLikePattern(strings.ToLower(queryText)))
 	membership := indexMailboxMembershipCondition(mbox)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
 	and m.deleted = 0
 	and (
-		lower(coalesce(s.subject, '')) like '%%' || %s || '%%'
-		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%'
-		or lower(coalesce(a.address, '')) like '%%' || %s || '%%'
+		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
+		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
+		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
 	)
 order by m.date_received desc
 limit %d;
@@ -1572,7 +1585,10 @@ try {
 	let msg = null;
 	try {
 		msg = mbox.messages.byId(Number('%s'));
-	} catch (e) {}
+		msg.id();
+	} catch (e) {
+		msg = null;
+	}
 	if (msg === null) {
 		const allIds = mbox.messages.id();
 		const targetIdx = allIds.findIndex(id => String(id) === '%s');
@@ -1865,24 +1881,9 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit)
 	}
 
-	type searchTarget struct {
-		AccountName string
-		MailboxName string
-	}
-
-	var targets []searchTarget
-	if accountName != "" {
-		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "All Mail"})
-	} else {
-		accounts, err := c.GetAccountsJSON()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get accounts: %w", err)
-		}
-		for _, account := range accounts {
-			if account.Enabled {
-				targets = append(targets, searchTarget{AccountName: account.Name, MailboxName: "INBOX"})
-			}
-		}
+	targets, err := c.defaultSearchTargets(accountName)
+	if err != nil {
+		return nil, err
 	}
 
 	if len(targets) == 0 {
@@ -1954,6 +1955,46 @@ func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName s
 	}
 
 	return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+}
+
+func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error) {
+	mailboxes, err := c.GetMailboxesJSON(accountName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mailboxes: %w", err)
+	}
+	enabledAccounts := make(map[string]bool)
+	if accountName == "" {
+		accounts, err := c.GetAccountsJSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get accounts: %w", err)
+		}
+		for _, account := range accounts {
+			enabledAccounts[account.Name] = account.Enabled
+		}
+	}
+
+	seen := make(map[string]bool)
+	var targets []searchTarget
+	for _, mailbox := range mailboxes {
+		if mailbox.Account == "" || mailbox.Name == "" || !strings.EqualFold(mailbox.Name, "INBOX") {
+			continue
+		}
+		if accountName == "" && !enabledAccounts[mailbox.Account] {
+			continue
+		}
+		key := mailbox.Account + "\x00" + mailbox.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		targets = append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
+	}
+
+	if len(targets) == 0 && accountName != "" {
+		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "INBOX"})
+	}
+
+	return targets, nil
 }
 
 func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
@@ -2473,7 +2514,7 @@ func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int,
 func isSpecialMailboxName(mailboxType, mailboxName string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(mailboxName))
 	candidates := map[string][]string{
-		"sent":   {"sent", "sent messages", "sent mail"},
+		"sent":   {"sent", "sent messages", "sent mail", "sent items"},
 		"drafts": {"drafts", "draft"},
 		"trash":  {"trash", "deleted messages", "deleted items", "bin"},
 		"junk":   {"junk", "spam", "junk e-mail", "junk email", "category_spam"},

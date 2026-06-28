@@ -81,7 +81,7 @@ var messagesListCmd = &cobra.Command{
 		)
 
 		// Try cache first (skip if content requested — content is per-user and typically large)
-		if !msgNoCache && !msgForceRefresh && cacheErr == nil {
+		if !msgNoCache && !msgForceRefresh && !msgWithContent && cacheErr == nil {
 			c.SetTTL(messageCacheTTL)
 			var cached []mail.Message
 			found, err := c.Get(cacheKey, &cached)
@@ -96,8 +96,8 @@ var messagesListCmd = &cobra.Command{
 			return fmt.Errorf("failed to get messages: %w", err)
 		}
 
-		// Populate cache (always write unless --no-cache)
-		if !msgNoCache && cacheErr == nil {
+		// Populate cache (skip content results because content enrichment can be partial)
+		if !msgNoCache && !msgWithContent && cacheErr == nil {
 			c.SetTTL(messageCacheTTL)
 			c.Set(cacheKey, messages)
 		}

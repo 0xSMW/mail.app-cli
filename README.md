@@ -24,7 +24,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 ### From Source
 
 ```bash
-go install github.com/0xSMW/mail.app-cli@latest
+go install github.com/intelligrit/mail-app-cli@latest
 ```
 
 ### Build Locally
