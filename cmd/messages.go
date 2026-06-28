@@ -263,7 +263,16 @@ func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := mail.NewClient()
-			messages, err := client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
+			var messages []mail.Message
+			var err error
+			if msgAccount != "" || msgMailbox != "" {
+				if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+					return err
+				}
+				messages, err = client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, false, false, msgWithContent, "")
+			} else {
+				messages, err = client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
+			}
 			if err != nil {
 				return fmt.Errorf("failed to get %s messages: %w", mailboxType, err)
 			}

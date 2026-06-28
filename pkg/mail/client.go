@@ -3,6 +3,7 @@ package mail
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -21,6 +22,7 @@ type Client struct {
 	accounts                 []Account
 	accountsLoaded           bool
 	indexFallbackWarningOnce sync.Once
+	contentWarningOnce       sync.Once
 }
 
 // NewClient creates a new Mail.app client
@@ -70,6 +72,27 @@ func (c *Client) runJXA(script string) (string, error) {
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("jxa error: %v - %s", err, stderr.String())
+	}
+
+	return strings.TrimSpace(out.String()), nil
+}
+
+func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "osascript", "-l", "JavaScript", "-e", script)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("jxa timed out after %s", timeout)
+	}
 	if err != nil {
 		return "", fmt.Errorf("jxa error: %v - %s", err, stderr.String())
 	}
@@ -241,6 +264,29 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 	})
 }
 
+func (c *Client) warnContentFallback(err error) {
+	c.contentWarningOnce.Do(func() {
+		reason := strings.TrimSpace(err.Error())
+		if reason == "" {
+			reason = "unknown error"
+		}
+		fmt.Fprintf(os.Stderr, "mail-app-cli: message content fetch was limited (%s). Returned message metadata with any content that could be fetched in time. Use a smaller --limit or messages show for full content on specific messages.\n", reason)
+	})
+}
+
+func mailContentFetchBudget() time.Duration {
+	const defaultBudget = 45 * time.Second
+	raw := strings.TrimSpace(os.Getenv("MAIL_APP_CLI_CONTENT_TIMEOUT"))
+	if raw == "" {
+		return defaultBudget
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return defaultBudget
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func runWithMailCommandLimit[T any](items []T, run func(T)) {
 	limit := maxConcurrentMailCommands
 	if len(items) < limit {
@@ -310,10 +356,14 @@ func indexMailboxURLPattern(accountID, mailboxName string) string {
 }
 
 func jxaMailboxLookupExpression(mailboxName string) string {
+	return jxaMailboxLookupExpressionFor(mailboxName, "requestedMailbox")
+}
+
+func jxaMailboxLookupExpressionFor(mailboxName, variableName string) string {
 	if isArchiveAlias(mailboxName) {
-		return "(findMailboxByNames(acc.mailboxes(), ['All Mail', 'Archive']) || acc.mailboxes.byName(requestedMailbox))"
+		return fmt.Sprintf("(findMailboxByNames(acc.mailboxes(), ['All Mail', 'Archive']) || acc.mailboxes.byName(%s))", variableName)
 	}
-	return "acc.mailboxes.byName(requestedMailbox)"
+	return fmt.Sprintf("(findMailboxByNames(acc.mailboxes(), [%s]) || acc.mailboxes.byName(%s))", variableName, variableName)
 }
 
 func jxaMailboxLookupHelper() string {
@@ -331,6 +381,29 @@ function findMailboxByNames(mailboxes, names) {
 			}
 		} catch (e) {}
 	}
+	return null;
+}
+`
+}
+
+func jxaMessageByIdHelper() string {
+	return `
+function messageById(mbox, messageId) {
+	let msg = null;
+	try {
+		msg = mbox.messages.byId(Number(messageId));
+		msg.id();
+		return msg;
+	} catch (e) {
+		msg = null;
+	}
+	try {
+		const allIds = mbox.messages.id();
+		const targetIdx = allIds.findIndex(id => String(id) === messageId);
+		if (targetIdx >= 0) {
+			return mbox.messages.at(targetIdx);
+		}
+	} catch (e) {}
 	return null;
 }
 `
@@ -735,7 +808,7 @@ func (c *Client) MarkMessageAsRead(accountName, mailboxName, messageID string, r
 		accountName,
 		mailboxName,
 		messageID,
-		fmt.Sprintf("mbox.messages.at(targetIdx).readStatus = %s;", jxaBool(read)),
+		fmt.Sprintf("msg.readStatus = %s;", jxaBool(read)),
 	)
 }
 
@@ -749,12 +822,15 @@ func jxaBool(value bool) string {
 func (c *Client) runMessageAction(accountName, mailboxName, messageID, action string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
+const requestedMailbox = '%s';
+%s
+%s
+
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
-	const allIds = mbox.messages.id();
-	const targetIdx = allIds.findIndex(id => String(id) === '%s');
-	if (targetIdx < 0) {
+	const mbox = %s;
+	const msg = messageById(mbox, '%s');
+	if (msg === null) {
 		'Error: Message not found';
 	} else {
 		%s
@@ -763,7 +839,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), action)
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), action)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -781,13 +857,13 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 		accountName,
 		mailboxName,
 		messageID,
-		fmt.Sprintf("mbox.messages.at(targetIdx).flaggedStatus = %s;", jxaBool(flagged)),
+		fmt.Sprintf("msg.flaggedStatus = %s;", jxaBool(flagged)),
 	)
 }
 
 // DeleteMessage moves a message to trash
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
-	return c.runMessageAction(accountName, mailboxName, messageID, "mbox.messages.at(targetIdx).delete();")
+	return c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();")
 }
 
 // SendMessage sends a new email message
@@ -1149,6 +1225,14 @@ JSON.stringify(result);
 
 // GetMessagesJSON retrieves messages from a mailbox using JXA
 func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+	if withContent {
+		messages, err := c.GetMessagesJSON(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, false, since)
+		if err != nil {
+			return nil, err
+		}
+		return c.enrichMessagesWithContent(accountName, mailboxName, messages), nil
+	}
+
 	if !withContent {
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
@@ -1168,6 +1252,96 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 	}
 
 	return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+}
+
+func (c *Client) enrichMessagesWithContent(accountName, mailboxName string, messages []Message) []Message {
+	if len(messages) == 0 {
+		return messages
+	}
+
+	const chunkSize = 10
+	deadline := time.Now().Add(mailContentFetchBudget())
+
+	for start := 0; start < len(messages); start += chunkSize {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			c.warnContentFallback(fmt.Errorf("content fetch budget exhausted"))
+			return messages
+		}
+		chunkTimeout := remaining
+		if chunkTimeout > 10*time.Second {
+			chunkTimeout = 10 * time.Second
+		}
+
+		end := start + chunkSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+
+		ids := make([]string, 0, end-start)
+		for _, message := range messages[start:end] {
+			ids = append(ids, message.ID)
+		}
+		contentByID, err := c.getMessageContentBatch(accountName, mailboxName, ids, chunkTimeout)
+		if err != nil {
+			c.warnContentFallback(err)
+			return messages
+		}
+		for i := start; i < end; i++ {
+			if content, ok := contentByID[messages[i].ID]; ok {
+				messages[i].Content = content
+			}
+		}
+	}
+
+	return messages
+}
+
+func (c *Client) getMessageContentBatch(accountName, mailboxName string, ids []string, timeout time.Duration) (map[string]string, error) {
+	encodedIDs, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const requestedMailbox = '%s';
+const messageIds = %s;
+const result = {};
+%s
+%s
+
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = %s;
+	for (let i = 0; i < messageIds.length; i++) {
+		const id = String(messageIds[i]);
+		const msg = messageById(mbox, id);
+		if (msg === null) {
+			result[id] = '';
+			continue;
+		}
+		try {
+			result[id] = msg.content() || '';
+		} catch(e) {
+			result[id] = '';
+		}
+	}
+} catch(e) {}
+
+JSON.stringify(result);
+`, escapeJSString(mailboxName), string(encodedIDs), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+
+	output, err := c.runJXAWithTimeout(script, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	var contentByID map[string]string
+	if err := json.Unmarshal([]byte(output), &contentByID); err != nil {
+		return nil, fmt.Errorf("failed to parse content JSON: %w", err)
+	}
+	return contentByID, nil
 }
 
 func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
@@ -1204,9 +1378,10 @@ func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, 
 		limitClause = fmt.Sprintf("if (indices.length > %d) indices = indices.slice(0, %d);", limit, limit)
 	}
 
-	contentField := "content: '',"
+	contentFetch := "const content = '';"
+	contentField := "content: content,"
 	if withContent {
-		contentField = "content: msg.content() || '',"
+		contentFetch = "let content = ''; try { content = msg.content() || ''; } catch(e) {}"
 	}
 
 	script := fmt.Sprintf(`
@@ -1237,6 +1412,7 @@ try {
 		const msg = messages[i];
 		try { if (msg.deletedStatus()) continue; } catch(e) {}
 		try {
+			%s
 			result.push({
 				id: String(msg.id()),
 				subject: msg.subject() || '',
@@ -1259,7 +1435,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentField)
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentFetch, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1302,9 +1478,10 @@ func (c *Client) getArchiveMessagesWithWhoseJXA(accountName, mailboxName string,
 		sinceUnix = parsedSince
 	}
 
-	contentField := "content: '',"
+	contentFetch := "const content = '';"
+	contentField := "content: content,"
 	if withContent {
-		contentField = "content: msg.content() || '',"
+		contentFetch = "let content = ''; try { content = msg.content() || ''; } catch(e) {}"
 	}
 
 	script := fmt.Sprintf(`
@@ -1345,6 +1522,7 @@ try {
 			continue;
 		}
 		try {
+			%s
 			result.push({
 				id: String(msg.id()),
 				subject: msg.subject() || '',
@@ -1365,7 +1543,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), sinceUnix*1000, offset, limit, unreadOnly, flaggedOnly, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), contentField)
+`, escapeJSString(mailboxName), sinceUnix*1000, offset, limit, unreadOnly, flaggedOnly, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), contentFetch, contentField)
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1403,6 +1581,9 @@ try {
 		}
 	}
 	if (msg !== null) {
+		let content = '';
+		try { content = msg.content() || ''; } catch(e) {}
+
 		const toRecipients = [];
 		const toRecs = msg.toRecipients();
 		for (let t = 0; t < toRecs.length; t++) {
@@ -1430,7 +1611,7 @@ try {
 			read: msg.readStatus(),
 			flagged: msg.flaggedStatus(),
 			messageSize: msg.messageSize(),
-			content: msg.content() || '',
+			content: content,
 			mailbox: mbox.name(),
 			account: acc.name(),
 			toRecipients: toRecipients,
@@ -1466,12 +1647,14 @@ JSON.stringify(result);
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
+const requestedMailbox = '%s';
+%s
+%s
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
-	const allIds = mbox.messages.id();
-	const targetIdx = allIds.findIndex(id => String(id) === '%s');
-	if (targetIdx < 0) {
+	const mbox = %s;
+	const msg = messageById(mbox, '%s');
+	if (msg === null) {
 		'Error: Message not found';
 	} else {
 		function findArchiveCandidates(mailboxes, candidates) {
@@ -1507,7 +1690,7 @@ try {
 			}
 		}
 		if (archiveBox) {
-			mbox.messages.at(targetIdx).mailbox = archiveBox;
+			msg.mailbox = archiveBox;
 			'Success';
 		} else {
 			'Error: Archive mailbox not found';
@@ -1516,7 +1699,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -1532,22 +1715,25 @@ try {
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
+const requestedMailbox = '%s';
+const requestedTargetMailbox = '%s';
+%s
+%s
 try {
 	const acc = mail.accounts.byName('%s');
-	const sourceMbox = acc.mailboxes.byName('%s');
-	const allIds = sourceMbox.messages.id();
-	const targetIdx = allIds.findIndex(id => String(id) === '%s');
-	if (targetIdx < 0) {
+	const sourceMbox = %s;
+	const msg = messageById(sourceMbox, '%s');
+	if (msg === null) {
 		'Error: Message not found';
 	} else {
-		const destMbox = acc.mailboxes.byName('%s');
-		sourceMbox.messages.at(targetIdx).mailbox = destMbox;
+		const destMbox = %s;
+		msg.mailbox = destMbox;
 		'Success';
 	}
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(accountName), escapeJSString(sourceMailbox), escapeJSString(messageID), escapeJSString(targetMailbox))
+`, escapeJSString(sourceMailbox), escapeJSString(targetMailbox), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(sourceMailbox), escapeJSString(messageID), jxaMailboxLookupExpressionFor(targetMailbox, "requestedTargetMailbox"))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -2228,83 +2414,76 @@ func (c *Client) getInboxBasedUnified(mailboxType string, limit, offset int, wit
 	return sortAndSlice(messages, offset, limit), nil
 }
 
-// getSpecialMailboxUnified fetches messages from Mail.app's built-in special
-// mailbox collections (sentMailboxes, draftMailboxes, trashMailboxes,
-// junkMailboxes) via a single JXA call.  No per-message filtering is applied
-// since these views don't need unread/flagged filtering.
+// getSpecialMailboxUnified fetches messages from provider-specific mailbox names.
+// Mail.app's JXA special-mailbox accessors are not available consistently, so
+// this reuses the same account/mailbox path as explicit list commands.
 func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
-	accessor := map[string]string{
-		"sent":   "sentMailboxes",
-		"drafts": "draftMailboxes",
-		"trash":  "trashMailboxes",
-		"junk":   "junkMailboxes",
-	}[mailboxType]
-
 	perLimit := limit + offset
 	if perLimit < 50 {
 		perLimit = 50
 	}
 
-	contentField := "content: '',"
-	if withContent {
-		contentField = "content: msg.content() || '',"
-	}
-
-	script := fmt.Sprintf(`
-const mail = Application('Mail');
-const result = [];
-const mailboxes = mail.%s();
-
-for (let m = 0; m < mailboxes.length; m++) {
-	const mbox = mailboxes[m];
-	let accName = '';
-	let mboxName = '';
-	try { accName = mbox.account().name(); } catch(e) {
-		try { accName = mbox.account.name(); } catch(e2) { accName = ''; }
-	}
-	try { mboxName = mbox.name(); } catch(e) { mboxName = '%s'; }
-
-	let messages;
-	try { messages = mbox.messages(); } catch(e) { continue; }
-
-	// Cap per-mailbox before iterating
-	const cap = Math.min(messages.length, %d);
-
-	for (let k = 0; k < cap; k++) {
-		const msg = messages[k];
-		try { if (msg.deletedStatus()) continue; } catch(e) {}
-		try {
-			result.push({
-				id: String(msg.id()),
-				subject: msg.subject() || '',
-				sender: msg.sender() || '',
-				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-				dateSent: (msg.dateSent() || new Date()).toISOString(),
-				read: msg.readStatus(),
-				flagged: msg.flaggedStatus(),
-				messageSize: 0,
-				%s
-				mailbox: mboxName,
-				account: accName
-			});
-		} catch(e) {}
-	}
-}
-
-JSON.stringify(result);
-`, accessor, mailboxType, perLimit, contentField)
-
-	output, err := c.runJXA(script)
+	allMailboxes, err := c.GetMailboxesJSON("")
 	if err != nil {
 		return nil, err
 	}
 
-	var messages []Message
-	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse %s messages JSON: %w", mailboxType, err)
+	type req = struct {
+		AccountName string
+		MailboxName string
+		Limit       int
+		Offset      int
+		UnreadOnly  bool
+		FlaggedOnly bool
+		WithContent bool
+		Since       string
+	}
+
+	seen := make(map[string]bool)
+	var requests []req
+	for _, mailbox := range allMailboxes {
+		if mailbox.Account == "" || mailbox.Name == "" || !isSpecialMailboxName(mailboxType, mailbox.Name) {
+			continue
+		}
+		key := mailbox.Account + "\x00" + mailbox.Name
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		requests = append(requests, req{
+			AccountName: mailbox.Account,
+			MailboxName: mailbox.Name,
+			Limit:       perLimit,
+			WithContent: withContent,
+		})
+	}
+
+	if len(requests) == 0 {
+		return []Message{}, nil
+	}
+
+	messages, err := c.GetMessagesFromMultipleMailboxes(requests)
+	if err != nil {
+		return nil, err
 	}
 
 	return sortAndSlice(messages, offset, limit), nil
+}
+
+func isSpecialMailboxName(mailboxType, mailboxName string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(mailboxName))
+	candidates := map[string][]string{
+		"sent":   {"sent", "sent messages", "sent mail"},
+		"drafts": {"drafts", "draft"},
+		"trash":  {"trash", "deleted messages", "deleted items", "bin"},
+		"junk":   {"junk", "spam", "junk e-mail", "junk email", "category_spam"},
+	}
+	for _, candidate := range candidates[mailboxType] {
+		if normalized == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // sortAndSlice sorts messages by date descending then applies offset and limit.
