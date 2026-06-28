@@ -353,8 +353,8 @@ select
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
 		else a.comment || ' <' || a.address || '>'
 	end as Sender,
-	strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch') as DateSent,
-	strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_received, 'unixepoch') as DateReceived,
+	coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') as DateSent,
+	coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_received, 'unixepoch'), '') as DateReceived,
 	m.read as Read,
 	m.flagged as Flagged,
 	m.deleted as Deleted,
@@ -849,7 +849,11 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 
 	// If only one account total, no need for parallelization
 	if len(accounts) == 1 {
-		return c.getMailboxesForSingleAccount(accounts[0].Name)
+		mailboxes, err := c.getMailboxesForSingleAccount(accounts[0].Name)
+		if err != nil {
+			return nil, err
+		}
+		return c.enrichArchiveMailboxes(accounts[0].Name, mailboxes), nil
 	}
 
 	// Use channel to collect results from goroutines
@@ -863,6 +867,9 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 	for _, account := range accounts {
 		go func(accName string) {
 			mailboxes, err := c.getMailboxesForSingleAccount(accName)
+			if err == nil {
+				mailboxes = c.enrichArchiveMailboxes(accName, mailboxes)
+			}
 			results <- result{mailboxes: mailboxes, err: err}
 		}(account.Name)
 	}
