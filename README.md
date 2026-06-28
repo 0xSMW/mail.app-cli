@@ -1,9 +1,5 @@
 # mail-app-cli
 
-<p align="center">
-  <img src="logo.png" alt="mail-app-cli logo" width="200">
-</p>
-
 A command-line interface for controlling macOS Mail.app. Provides complete scriptable access to accounts, mailboxes, messages, and attachments.
 
 ## Features
@@ -16,7 +12,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Manage attachments
 - Fully scriptable - perfect for automation and building GUIs
 
-## New in This Branch
+## New in This Fork
 
 - Read Gmail archive mail via `Archive`, `All Mail`, or `[Gmail]/All Mail`
 - Search archived Gmail mail without the previous recent-message cap
@@ -392,31 +388,3 @@ Future enhancements:
 - IMAP folder synchronization
 - Message threading support
 - Draft management
-
-## Contributing
-
-Contributions are welcome! This project follows standard Go conventions.
-
-### Guidelines
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes following Go best practices
-4. Write tests for new functionality
-5. Ensure all tests pass
-6. Commit your changes
-7. Push to the branch
-8. Open a Pull Request
-
-## License
-
-MIT License - see LICENSE file for details
-
-## Support
-
-For issues, questions, or contributions, please open an issue on GitHub.
-
-## Acknowledgments
-
-- Built with Cobra CLI framework
-- Uses AppleScript and JXA for Mail.app integration
