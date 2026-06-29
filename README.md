@@ -4,24 +4,18 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 
 ## Features
 
-- List and manage Mail.app accounts
-- Browse and manage mailboxes
-- List, read, search, and manage messages
-- Archive, move, delete, flag, and mark messages
-- Batch message operations with dry-run and stdin ID support
-- Export messages and attachments
-- Create, update, send, and delete drafts
-- List rules, smart mailboxes, signatures, and thread views
-- Send emails
-- Manage attachments
-- Fully scriptable - perfect for automation and building GUIs
-
-## New in This Fork
-
-- Read Gmail archive mail via `Archive`, `All Mail`, or `[Gmail]/All Mail`
-- Search archived Gmail mail without the previous recent-message cap
-- Report accurate Gmail `All Mail` mailbox counts across accounts
-- Reliably read folder contents across all Mail.app accounts
+- Inspect accounts, mailboxes, and unread counts
+- List, read, search, and filter messages
+- Archive, move, delete, flag, and mark mail
+- Batch message actions with dry-run safety
+- Create, edit, send, and delete drafts
+- Send mail with files and signatures
+- Export messages and attachments for automation
+- Validate message imports before applying changes
+- Manage rules, smart mailboxes, and threads
+- Inspect signatures, sync status, and VIP mail
+- Read Gmail Archive and All Mail reliably
+- Output scriptable JSON for every workflow
 
 ## Installation
 
@@ -515,7 +509,3 @@ go build -o mail-app-cli
 # Test message listing
 ./mail-app-cli messages list -a "Your Account" -m "INBOX" --limit 5
 ```
-
-## Enhancement Status
-
-Implemented command surfaces now include batch operations, JSON export, import validation, draft management, rules listing/toggling/creation, smart mailbox inspection, thread grouping, sync metadata, signatures, and VIP capability checks. Some Mail.app mutation surfaces return explicit unsupported errors when local scriptability does not expose a dependable API.
