@@ -495,7 +495,7 @@ The CLI uses AppleScript and JavaScript for Automation (JXA) to interact with Ma
 
 ## Requirements
 
-- macOS (tested on macOS 12+)
+- macOS (tested on macOS 15+)
 - Mail.app configured with at least one account
 - Go 1.21+ (for building from source)
 
