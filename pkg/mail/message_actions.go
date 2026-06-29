@@ -106,7 +106,20 @@ try {
 		}
 		if (archiveBox) {
 			msg.mailbox = archiveBox;
-			'Success';
+			let sourceName = '';
+			let archiveName = '';
+			try { sourceName = mbox.name(); } catch(e) {}
+			try { archiveName = archiveBox.name(); } catch(e) {}
+			if (sourceName === archiveName) {
+				'Success';
+			} else {
+				const remaining = messageById(mbox, '%s');
+				if (remaining === null) {
+					'Success';
+				} else {
+					'Error: Archive did not move message out of source mailbox';
+				}
+			}
 		} else {
 			'Error: Archive mailbox not found';
 		}
@@ -114,7 +127,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
