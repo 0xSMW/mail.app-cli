@@ -10,12 +10,35 @@ import (
 )
 
 func escapeJSString(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
-	s = strings.ReplaceAll(s, "'", "\\'")   // Escape single quotes
-	s = strings.ReplaceAll(s, "\n", "\\n")  // Escape newlines
-	s = strings.ReplaceAll(s, "\r", "\\r")  // Escape carriage returns
-	s = strings.ReplaceAll(s, "\t", "\\t")  // Escape tabs
-	return s
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\'':
+			b.WriteString(`\'`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r >= 0x20 && r <= 0x7e {
+				b.WriteRune(r)
+				continue
+			}
+			if r <= 0xffff {
+				fmt.Fprintf(&b, `\u%04X`, r)
+				continue
+			}
+			r -= 0x10000
+			high := 0xd800 + (r >> 10)
+			low := 0xdc00 + (r & 0x3ff)
+			fmt.Fprintf(&b, `\u%04X\u%04X`, high, low)
+		}
+	}
+	return b.String()
 }
 
 func escapeAppleScriptString(s string) string {

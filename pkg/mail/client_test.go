@@ -16,6 +16,14 @@ func TestJXABool(t *testing.T) {
 	}
 }
 
+func TestEscapeJSString(t *testing.T) {
+	input := "quote' slash\\ line\n tab\t café 😀 \u2028\u2029"
+	want := `quote\' slash\\ line\n tab\t caf\u00E9 \uD83D\uDE00 \u2028\u2029`
+	if got := escapeJSString(input); got != want {
+		t.Fatalf("escapeJSString = %q, want %q", got, want)
+	}
+}
+
 func TestArchiveAliasHelpers(t *testing.T) {
 	tests := []struct {
 		name string
