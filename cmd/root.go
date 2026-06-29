@@ -37,5 +37,4 @@ func init() {
 	rootCmd.AddCommand(smartCmd)
 	rootCmd.AddCommand(threadsCmd)
 	rootCmd.AddCommand(signaturesCmd)
-	rootCmd.AddCommand(vipCmd)
 }

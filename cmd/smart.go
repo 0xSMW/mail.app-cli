@@ -8,9 +8,7 @@ import (
 )
 
 var (
-	smartDryRun bool
-	smartQuery  string
-	smartLimit  int
+	smartLimit int
 )
 
 var smartCmd = &cobra.Command{
@@ -64,34 +62,7 @@ var smartQueryCmd = &cobra.Command{
 	},
 }
 
-var smartCreateCmd = &cobra.Command{
-	Use:   "create [name]",
-	Short: "Create a smart mailbox",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if smartDryRun {
-			return printJSON(map[string]any{"dryRun": true, "name": args[0], "query": smartQuery}, "smart create dry-run")
-		}
-		return fmt.Errorf("smart create is unsupported because Mail.app smart mailbox criteria are not reliably writable through this local scriptability layer")
-	},
-}
-
-var smartDeleteCmd = &cobra.Command{
-	Use:   "delete [name]",
-	Short: "Delete a smart mailbox",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if smartDryRun {
-			return printJSON(map[string]any{"dryRun": true, "name": args[0], "action": "delete"}, "smart delete dry-run")
-		}
-		return fmt.Errorf("smart delete is unsupported because Mail.app smart mailbox mutation is not reliably exposed through this local scriptability layer")
-	},
-}
-
 func init() {
-	smartCmd.AddCommand(smartListCmd, smartShowCmd, smartQueryCmd, smartCreateCmd, smartDeleteCmd)
+	smartCmd.AddCommand(smartListCmd, smartShowCmd, smartQueryCmd)
 	smartQueryCmd.Flags().IntVarP(&smartLimit, "limit", "l", 50, "Maximum messages")
-	smartCreateCmd.Flags().StringVar(&smartQuery, "query", "", "Search query for smart mailbox dry-run metadata")
-	smartCreateCmd.Flags().BoolVar(&smartDryRun, "dry-run", false, "Show mutation without applying it")
-	smartDeleteCmd.Flags().BoolVar(&smartDryRun, "dry-run", false, "Show mutation without applying it")
 }

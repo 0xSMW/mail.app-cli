@@ -6,18 +6,18 @@ The best overall approach is to make this CLI a reliable automation layer over M
 
 - Build first: **batch operations**, **export/import**, and **draft management**. These unlock real CLI workflows: migrations, triage scripts, backups, scripted replies, and repeatable inbox cleanup.
 - Build next: **rules**, **smart mailboxes**, and **threading**. These make the CLI useful for higher-level organization and review.
-- Build later: **signatures**, **VIP contacts**, and deeper **IMAP folder sync**. Useful, but lower leverage unless the CLI becomes a daily driver or automation backend.
+- Build later only after live scriptability proof: **signature assignment**, **VIP contact management**, and deeper **IMAP folder sync**. Useful, but lower leverage unless the CLI becomes a daily driver or automation backend.
 - Design principle: every mutating command should support `--dry-run`, `--json`, clear selectors, and safe batching.
 
 | Enhancement | CLI Capability | How It Would Work | Why It Matters |
 |---|---|---|---|
 | Rules management | List/create/edit/delete Mail.app rules | `rules list`, `rules create --from ... --move-to ...`, `rules apply --dry-run` | Turns inbox automation into versionable shell scripts. |
-| Smart mailbox operations | Create/list/query smart mailboxes | `smart list`, `smart create --unread --from-domain example.com` | Lets users save reusable search views from automation. |
-| Signatures management | List/set/apply signatures | `signatures list`, `send --signature Work` | Enables scripted sending without hand-managed body templates. |
-| VIP contacts | List/add/remove VIP senders | `vip list`, `vip add person@example.com` | Makes notification and priority workflows scriptable. |
-| Export/import functionality | Backup or move mail data | `export --mailbox INBOX --format mbox/json`, `import --file ...` | Critical for migration, archival, audit, and recovery. |
+| Smart mailbox operations | List/query smart mailboxes | `smart list`, `smart query receipt` | Lets users inspect reusable Mail.app views and run equivalent searches. |
+| Signatures management | List/show signatures and append on send | `signatures list`, `send --signature Work` | Enables scripted sending without hand-managed body templates. |
+| VIP message views | List VIP messages when Mail exposes a VIP mailbox | `messages vip --limit 25` | Supports priority review without claiming unsupported VIP contact mutation. |
+| Export/validation functionality | Export mail data and validate exported JSON | `export --mailbox INBOX --format json`, `import --file ... --dry-run` | Useful for backup, audit, migration planning, and validation. |
 | Batch operations | Apply actions to many messages safely | `messages batch archive --query ... --dry-run`, or stdin IDs | Biggest immediate win: fast triage, cleanup, and repeatable workflows. |
-| IMAP folder synchronization | Sync selected folders and report status | `sync --account Gmail --mailbox INBOX --wait --status` | Useful for scripts that need fresh state before acting. |
+| IMAP folder synchronization | Trigger sync and wait for stable counts | `sync --account Gmail --mailbox INBOX --wait --json` | Useful for scripts that need fresh state before acting. |
 | Message threading support | Group/list/show conversations | `threads list --mailbox INBOX`, `threads show <id>` | Makes CLI review closer to how people actually process email. |
 | Draft management | Create/list/edit/send/delete drafts | `drafts create`, `drafts edit <id>`, `drafts send <id>` | Enables approval workflows, generated replies, and delayed/manual sending. |
 
@@ -60,15 +60,15 @@ All new commands should follow these contracts unless there is a strong reason n
 1. Batch operations.
 2. Export functionality.
 3. Draft management.
-4. Import functionality.
+4. Import validation.
 5. Rules management.
 6. Smart mailbox operations.
 7. Message threading support.
-8. IMAP folder sync status/waiting.
+8. IMAP folder sync waiting.
 9. Signatures management.
-10. VIP contacts.
+10. VIP message views.
 
-This order maximizes immediate automation value while keeping risk controlled. Batch operations mostly wrap existing message helpers. Export and drafts are natural extensions of existing message and send flows. Rules, smart mailboxes, signatures, and VIPs depend more heavily on Mail.app scriptability details and should come after the safer primitives are established.
+This order maximizes immediate automation value while keeping risk controlled. Batch operations mostly wrap existing message helpers. Export and drafts are natural extensions of existing message and send flows. Rules, smart mailboxes, signatures, and VIP message views depend more heavily on Mail.app scriptability details and should come after the safer primitives are established.
 
 ## Enhancement Details
 
@@ -205,21 +205,20 @@ Proposed commands:
 ```bash
 mail-app-cli smart list
 mail-app-cli smart show "Unread Receipts"
-mail-app-cli smart create "Unread Receipts" --unread --from-domain stripe.com
-mail-app-cli smart delete "Unread Receipts" --dry-run
+mail-app-cli smart query "receipt" --limit 20
 ```
 
 Implementation notes:
 
-- Confirm Mail.app scriptability for smart mailbox creation before implementing mutation.
-- If creation is brittle, start with listing and querying existing smart mailboxes.
+- Mail.app smart mailbox mutation is not exposed reliably enough for this CLI surface.
+- Keep support to listing existing smart mailboxes and running equivalent searches.
 - Reuse search/filter semantics from messages list and search.
 
 Acceptance checks:
 
 - Listing smart mailboxes does not require account/mailbox flags.
 - Querying a smart mailbox returns normal message JSON.
-- Mutating commands are guarded by dry-run and exact names.
+- No smart mailbox mutation commands should be exposed until live scriptability proof exists.
 
 ### Message Threading Support
 
@@ -250,7 +249,6 @@ Proposed commands:
 
 ```bash
 mail-app-cli sync --account Gmail --mailbox INBOX --wait --timeout 60
-mail-app-cli sync status --account Gmail
 ```
 
 Implementation notes:
@@ -262,7 +260,7 @@ Implementation notes:
 
 Acceptance checks:
 
-- Sync returns account, requested mailbox, actual sync scope, start/end time, and status.
+- Sync returns account, requested mailbox, actual sync scope, start/end time, and command result.
 - Timeout exits non-zero with a structured error.
 - Existing `sync` behavior remains compatible.
 
@@ -273,15 +271,14 @@ Proposed commands:
 ```bash
 mail-app-cli signatures list
 mail-app-cli signatures show "Work"
-mail-app-cli signatures apply "Work" --account Gmail
 mail-app-cli send --signature "Work" --account Gmail --to user@example.com --subject "Hello"
 ```
 
 Implementation notes:
 
-- Start by listing signatures and using one at send time.
+- List signatures and use one at send time.
 - Keep signature storage/selection compatible with Mail.app rather than inventing a separate template system.
-- If Mail.app does not expose reliable signature assignment for composed messages, fall back to appending signature content to body with explicit docs.
+- Do not expose default-signature assignment unless Mail.app exposes a reliable scriptable API.
 
 Acceptance checks:
 
@@ -289,28 +286,24 @@ Acceptance checks:
 - `send --signature` sends body plus selected signature once.
 - Missing signature fails before sending.
 
-### VIP Contacts
+### VIP Messages
 
 Proposed commands:
 
 ```bash
-mail-app-cli vip list
-mail-app-cli vip add person@example.com
-mail-app-cli vip remove person@example.com --dry-run
 mail-app-cli messages vip --limit 25
 ```
 
 Implementation notes:
 
-- Verify whether Mail.app exposes VIPs directly.
-- If VIP mutation is unavailable through Mail.app, support read-only VIP message views first.
+- Mail.app does not expose deterministic VIP contact list/add/remove APIs through its scripting dictionary.
+- Support read-only VIP message views only when Mail.app exposes a VIP mailbox.
 - Avoid managing Contacts.app unless explicitly added as a dependency surface.
 
 Acceptance checks:
 
-- VIP list is deterministic.
 - VIP message view returns normal message JSON.
-- Mutations fail clearly if unsupported by the local Mail.app scriptability layer.
+- No VIP contact list/add/remove commands should be exposed until live scriptability proof exists.
 
 ## Suggested File Layout
 
