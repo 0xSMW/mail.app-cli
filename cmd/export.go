@@ -107,27 +107,36 @@ var exportAttachmentsCmd = &cobra.Command{
 			Error     string `json:"error,omitempty"`
 		}
 		var saved []savedAttachment
+		failed := 0
 		used := map[string]int{}
 		for _, message := range messages {
 			attachments, err := client.GetAttachmentsJSON(exportAccount, exportMailbox, message.ID)
 			if err != nil {
 				saved = append(saved, savedAttachment{MessageID: message.ID, Status: "failed", Error: err.Error()})
+				failed++
 				continue
 			}
 			for _, attachment := range attachments {
 				name := deterministicAttachmentName(message, attachment.Name, used)
 				path := filepath.Join(exportOutput, name)
 				item := savedAttachment{MessageID: message.ID, Name: attachment.Name, Path: path}
-				if err := client.SaveAttachment(exportAccount, exportMailbox, message.ID, attachment.Name, path); err != nil {
+				if err := client.SaveAttachmentByIndex(exportAccount, exportMailbox, message.ID, attachment.Name, attachment.Index, path); err != nil {
 					item.Status = "failed"
 					item.Error = err.Error()
+					failed++
 				} else {
 					item.Status = "succeeded"
 				}
 				saved = append(saved, item)
 			}
 		}
-		return printJSON(saved, "attachment export")
+		if err := printJSON(saved, "attachment export"); err != nil {
+			return err
+		}
+		if attachmentExportFailed(failed) {
+			return fmt.Errorf("failed to export %d attachment item(s)", failed)
+		}
+		return nil
 	},
 }
 
@@ -137,6 +146,10 @@ func writeJSONFile(path string, payload any, label string) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func attachmentExportFailed(failed int) bool {
+	return failed > 0
 }
 
 func deterministicAttachmentName(message mail.Message, attachmentName string, used map[string]int) string {

@@ -55,6 +55,23 @@ func TestNormalizeThreadSubject(t *testing.T) {
 	}
 }
 
+func TestThreadArchiveAllowed(t *testing.T) {
+	tests := []struct {
+		name   string
+		thread threadSummary
+		want   bool
+	}{
+		{name: "subject only group", thread: threadSummary{ID: "invoice", Synthetic: true, Count: 2}, want: false},
+		{name: "single synthetic message", thread: threadSummary{ID: "invoice", Synthetic: true, Count: 1}, want: true},
+		{name: "non synthetic group", thread: threadSummary{ID: "message-1", Count: 2}, want: true},
+	}
+	for _, tt := range tests {
+		if got := threadArchiveAllowed(tt.thread); got != tt.want {
+			t.Fatalf("%s: threadArchiveAllowed = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestDeterministicAttachmentNameHandlesCollisions(t *testing.T) {
 	used := map[string]int{}
 	message := mail.Message{ID: "42", DateReceived: "2026-06-28T10:00:00Z"}
@@ -65,6 +82,15 @@ func TestDeterministicAttachmentNameHandlesCollisions(t *testing.T) {
 	}
 	if second != "2026-06-28-42-my-file-2.pdf" {
 		t.Fatalf("second attachment name = %q", second)
+	}
+}
+
+func TestAttachmentExportFailed(t *testing.T) {
+	if !attachmentExportFailed(1) {
+		t.Fatal("attachmentExportFailed(1) = false")
+	}
+	if attachmentExportFailed(0) {
+		t.Fatal("attachmentExportFailed(0) = true")
 	}
 }
 

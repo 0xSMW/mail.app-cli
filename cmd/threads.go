@@ -13,6 +13,7 @@ import (
 type threadSummary struct {
 	ID           string         `json:"id"`
 	Subject      string         `json:"subject"`
+	Synthetic    bool           `json:"synthetic"`
 	Count        int            `json:"count"`
 	UnreadCount  int            `json:"unreadCount"`
 	LatestDate   string         `json:"latestDate"`
@@ -80,6 +81,9 @@ var threadsArchiveCmd = &cobra.Command{
 			if thread.ID != args[0] {
 				continue
 			}
+			if !threadArchiveAllowed(thread) {
+				return fmt.Errorf("refusing to archive synthetic subject-only thread %q; archive individual messages instead", thread.ID)
+			}
 			oldAccount, oldMailbox, oldDryRun, oldYes := msgAccount, msgMailbox, batchDryRun, batchYes
 			msgAccount, msgMailbox, batchDryRun, batchYes = threadAccount, threadMailbox, threadDryRun, true
 			defer func() {
@@ -114,8 +118,9 @@ func loadThreads() ([]threadSummary, error) {
 		thread, ok := byKey[key]
 		if !ok {
 			thread = &threadSummary{
-				ID:      key,
-				Subject: strings.TrimSpace(message.Subject),
+				ID:        key,
+				Subject:   strings.TrimSpace(message.Subject),
+				Synthetic: !strings.HasPrefix(key, "message-"),
 			}
 			byKey[key] = thread
 		}
@@ -140,6 +145,10 @@ func loadThreads() ([]threadSummary, error) {
 		return threads[i].LatestDate > threads[j].LatestDate
 	})
 	return threads, nil
+}
+
+func threadArchiveAllowed(thread threadSummary) bool {
+	return !thread.Synthetic || thread.Count <= 1
 }
 
 func messagesForThread(ids []string, account, mailbox string) []mail.Message {

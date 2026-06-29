@@ -17,6 +17,8 @@ type DraftInput struct {
 	Cc          []string `json:"cc,omitempty"`
 	Bcc         []string `json:"bcc,omitempty"`
 	Attachments []string `json:"attachments,omitempty"`
+	SubjectSet  bool     `json:"-"`
+	BodySet     bool     `json:"-"`
 }
 
 type Rule struct {
@@ -98,10 +100,10 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 		Cc:      details.CcRecipients,
 		Bcc:     details.BccRecipients,
 	}
-	if input.Subject != "" {
+	if input.SubjectSet {
 		replacement.Subject = input.Subject
 	}
-	if input.Body != "" {
+	if input.BodySet {
 		replacement.Body = input.Body
 	}
 	if replacement.Subject == details.Subject && replacement.Body == details.Content {
@@ -117,24 +119,23 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
 		return nil, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
 	}
-	c.cleanupDraftAutosaves(draftCleanupTarget{
-		Account: draft.Account,
-		Subject: details.Subject,
-		Content: details.Content,
-		Since:   draft.DateReceived,
-		KeepIDs: map[string]bool{updated.ID: true},
-	})
 	return updated, nil
 }
 
 func (c *Client) GetDraft(accountName, draftID string) (*Message, error) {
-	messages, err := c.GetUnifiedMessagesJSON("drafts", 500, 0, true)
-	if err != nil {
-		return nil, err
-	}
-	for _, message := range messages {
-		if message.ID == draftID && (accountName == "" || message.Account == accountName) {
-			return &message, nil
+	const pageSize = 500
+	for offset := 0; ; offset += pageSize {
+		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
+		if err != nil {
+			return nil, err
+		}
+		for _, message := range messages {
+			if message.ID == draftID && (accountName == "" || message.Account == accountName) {
+				return &message, nil
+			}
+		}
+		if len(messages) < pageSize {
+			break
 		}
 	}
 	return nil, fmt.Errorf("draft not found: %s", draftID)
@@ -145,26 +146,7 @@ func (c *Client) SendDraft(accountName, draftID string) error {
 	if err != nil {
 		return err
 	}
-	details, err := c.GetMessageDetailsJSON(draft.Account, draft.Mailbox, draft.ID)
-	if err != nil {
-		return err
-	}
-	if len(details.ToRecipients) == 0 {
-		return fmt.Errorf("draft has no to recipients")
-	}
-	if err := c.SendMessage(draft.Account, details.Subject, details.Content, details.ToRecipients, details.CcRecipients, details.BccRecipients, nil); err != nil {
-		return err
-	}
-	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
-		return err
-	}
-	c.cleanupDraftAutosaves(draftCleanupTarget{
-		Account: draft.Account,
-		Subject: details.Subject,
-		Content: details.Content,
-		Since:   draft.DateReceived,
-	})
-	return nil
+	return c.runMessageAction(draft.Account, draft.Mailbox, draft.ID, "msg.send();")
 }
 
 func (c *Client) DeleteDraft(accountName, draftID string) error {
@@ -175,12 +157,6 @@ func (c *Client) DeleteDraft(accountName, draftID string) error {
 	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
 		return err
 	}
-	c.cleanupDraftAutosaves(draftCleanupTarget{
-		Account: draft.Account,
-		Subject: draft.Subject,
-		Content: draft.Content,
-		Since:   draft.DateReceived,
-	})
 	return nil
 }
 
@@ -189,27 +165,33 @@ func (c *Client) findDraftBySubject(accountName, subject string) (*Message, erro
 }
 
 func (c *Client) findDraftBySubjectContentSince(accountName, subject, content string, since time.Time) (*Message, error) {
-	messages, err := c.GetUnifiedMessagesJSON("drafts", 50, 0, true)
-	if err != nil {
-		return nil, err
-	}
 	var best *Message
-	for _, message := range messages {
-		if message.Subject != subject || (accountName != "" && message.Account != accountName) {
-			continue
+	const pageSize = 500
+	for offset := 0; ; offset += pageSize {
+		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
+		if err != nil {
+			return nil, err
 		}
-		if content != "" && normalizeDraftContent(message.Content) != normalizeDraftContent(content) {
-			continue
-		}
-		if !since.IsZero() {
-			messageTime, ok := parseMessageTimestamp(message.DateReceived)
-			if !ok || messageTime.Before(since) {
+		for _, message := range messages {
+			if message.Subject != subject || (accountName != "" && message.Account != accountName) {
 				continue
 			}
+			if content != "" && normalizeDraftContent(message.Content) != normalizeDraftContent(content) {
+				continue
+			}
+			if !since.IsZero() {
+				messageTime, ok := parseMessageTimestamp(message.DateReceived)
+				if !ok || messageTime.Before(since) {
+					continue
+				}
+			}
+			if best == nil || message.DateReceived > best.DateReceived {
+				copy := message
+				best = &copy
+			}
 		}
-		if best == nil || message.DateReceived > best.DateReceived {
-			copy := message
-			best = &copy
+		if len(messages) < pageSize {
+			break
 		}
 	}
 	if best == nil {
@@ -247,45 +229,6 @@ end tell
 `, escapeAppleScriptString(mailboxName), escapeAppleScriptString(accountName), id)
 	_, err = c.runAppleScript(script)
 	return err
-}
-
-type draftCleanupTarget struct {
-	Account string
-	Subject string
-	Content string
-	Since   string
-	KeepIDs map[string]bool
-}
-
-func (c *Client) cleanupDraftAutosaves(target draftCleanupTarget) {
-	since, ok := parseMessageTimestamp(target.Since)
-	if !ok {
-		since = time.Now().Add(-30 * time.Second)
-	}
-	time.Sleep(8 * time.Second)
-	messages, err := c.GetUnifiedMessagesJSON("drafts", 100, 0, true)
-	if err != nil {
-		return
-	}
-	for _, message := range messages {
-		if shouldDeleteDraftAutosave(message, target, since) {
-			_ = c.deleteDraftByID(message.Account, message.Mailbox, message.ID)
-		}
-	}
-}
-
-func shouldDeleteDraftAutosave(message Message, target draftCleanupTarget, since time.Time) bool {
-	if target.KeepIDs[message.ID] {
-		return false
-	}
-	if message.Account != target.Account || message.Subject != target.Subject {
-		return false
-	}
-	if normalizeDraftContent(message.Content) != normalizeDraftContent(target.Content) {
-		return false
-	}
-	messageTime, ok := parseMessageTimestamp(message.DateReceived)
-	return !ok || !messageTime.Before(since.Add(-1*time.Second))
 }
 
 func (c *Client) ListRules() ([]Rule, error) {
@@ -346,6 +289,17 @@ func (c *Client) CreateRule(input RuleInput) (*Rule, error) {
 		accountFilter = fmt.Sprintf(`if name of acc is not "%s" then set shouldInspect to false`, escapeAppleScriptString(input.Account))
 	}
 	script := fmt.Sprintf(`
+on findMailboxByName(mailboxList, targetName)
+	repeat with candidateMailbox in mailboxList
+		try
+			if name of candidateMailbox is targetName then return candidateMailbox
+			set nestedMailbox to my findMailboxByName(mailboxes of candidateMailbox, targetName)
+			if nestedMailbox is not missing value then return nestedMailbox
+		end try
+	end repeat
+	return missing value
+end findMailboxByName
+
 tell application "Mail"
 	set destinationMailbox to missing value
 	repeat with acc in accounts
@@ -353,8 +307,13 @@ tell application "Mail"
 		%s
 		if shouldInspect then
 			try
-				set destinationMailbox to mailbox "%s" of acc
-				exit repeat
+				if "%s" is "Archive" or "%s" is "All Mail" then
+					set destinationMailbox to my findMailboxByName(mailboxes of acc, "All Mail")
+					if destinationMailbox is missing value then set destinationMailbox to my findMailboxByName(mailboxes of acc, "Archive")
+				else
+					set destinationMailbox to my findMailboxByName(mailboxes of acc, "%s")
+				end if
+				if destinationMailbox is not missing value then exit repeat
 			end try
 		end if
 	end repeat
@@ -365,7 +324,7 @@ tell application "Mail"
 	end tell
 	return "ok"
 end tell
-`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), appleScriptBool(input.Enabled), escapeAppleScriptString(input.FromDomain))
+`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), appleScriptBool(input.Enabled), escapeAppleScriptString(input.FromDomain))
 	if _, err := c.runAppleScript(script); err != nil {
 		return nil, err
 	}

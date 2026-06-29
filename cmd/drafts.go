@@ -98,7 +98,12 @@ var draftsUpdateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		input := mail.DraftInput{Subject: draftSubject, Body: body}
+		input := mail.DraftInput{
+			Subject:    draftSubject,
+			Body:       body,
+			SubjectSet: cmd.Flags().Changed("subject"),
+			BodySet:    cmd.Flags().Changed("body") || cmd.Flags().Changed("body-file"),
+		}
 		if draftDryRun {
 			return printJSON(map[string]any{"dryRun": true, "draftId": args[0], "updates": input}, "draft update dry-run")
 		}
