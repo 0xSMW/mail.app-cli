@@ -2,7 +2,6 @@ package mail
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -187,16 +186,32 @@ func normalizeDraftContent(value string) string {
 }
 
 func (c *Client) deleteDraftByID(accountName, mailboxName, draftID string) error {
-	id, err := strconv.Atoi(draftID)
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const requestedMailbox = '%s';
+%s
+%s
+
+try {
+	const acc = mail.accounts.byName('%s');
+	const mbox = %s;
+	const msg = messageById(mbox, '%s');
+	if (msg === null) {
+		'Error: Draft not found';
+	} else {
+		msg.delete();
+		'Success';
+	}
+} catch (e) {
+	'Error: ' + e;
+}
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(draftID))
+	output, err := c.runJXA(script)
 	if err != nil {
 		return err
 	}
-	script := fmt.Sprintf(`
-tell application "Mail"
-	delete (first message of mailbox "%s" of account "%s" whose id is %d)
-	return "ok"
-end tell
-`, escapeAppleScriptString(mailboxName), escapeAppleScriptString(accountName), id)
-	_, err = c.runAppleScript(script)
-	return err
+	if strings.Contains(output, "Error") {
+		return fmt.Errorf(output)
+	}
+	return nil
 }
