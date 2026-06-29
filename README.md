@@ -19,6 +19,12 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Read Gmail Archive and All Mail reliably
 - Output scriptable JSON for every workflow
 
+## Quick Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.sh | sh
+```
+
 ## Installation
 
 ### From Source
