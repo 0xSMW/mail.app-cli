@@ -524,3 +524,7 @@ go build -o mail-app-cli
 # Test message listing
 ./mail-app-cli messages list -a "Your Account" -m "INBOX" --limit 5
 ```
+
+---
+
+This project is a hard fork of [intelligrit/mail-app-cli](https://github.com/intelligrit/mail-app-cli).
