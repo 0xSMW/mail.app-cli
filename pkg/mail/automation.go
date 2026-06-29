@@ -111,13 +111,33 @@ func jxaMailboxLookupExpression(mailboxName string) string {
 
 func jxaMailboxLookupExpressionFor(mailboxName, variableName string) string {
 	if isArchiveAlias(mailboxName) {
-		return fmt.Sprintf("(findMailboxByNames(acc.mailboxes(), ['All Mail', 'Archive']) || acc.mailboxes.byName(%s))", variableName)
+		return fmt.Sprintf("findMailbox(acc, %s, ['All Mail', 'Archive'])", variableName)
 	}
-	return fmt.Sprintf("(findMailboxByNames(acc.mailboxes(), [%s]) || acc.mailboxes.byName(%s))", variableName, variableName)
+	return fmt.Sprintf("findMailbox(acc, %s, [%s])", variableName, variableName)
 }
 
 func jxaMailboxLookupHelper() string {
 	return `
+function isInboxName(name) {
+	return String(name || '').toLowerCase() === 'inbox';
+}
+
+function findMailbox(acc, requestedName, names) {
+	if (isInboxName(requestedName)) {
+		try { return acc.inbox(); } catch (e) {}
+	}
+	const found = findMailboxByNames(acc.mailboxes(), names);
+	if (found !== null) {
+		return found;
+	}
+	try {
+		const byName = acc.mailboxes.byName(requestedName);
+		byName.name();
+		return byName;
+	} catch (e) {}
+	return null;
+}
+
 function findMailboxByNames(mailboxes, names) {
 	for (let i = 0; i < mailboxes.length; i++) {
 		const mailbox = mailboxes[i];

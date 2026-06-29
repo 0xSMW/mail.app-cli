@@ -24,6 +24,22 @@ func TestEscapeJSString(t *testing.T) {
 	}
 }
 
+func TestJXAMailboxLookupUsesInboxAccessor(t *testing.T) {
+	helper := jxaMailboxLookupHelper()
+	for _, want := range []string{"function findMailbox(acc, requestedName, names)", "return acc.inbox()"} {
+		if !strings.Contains(helper, want) {
+			t.Fatalf("jxaMailboxLookupHelper missing %q", want)
+		}
+	}
+
+	if got := jxaMailboxLookupExpression("INBOX"); got != "findMailbox(acc, requestedMailbox, [requestedMailbox])" {
+		t.Fatalf("jxaMailboxLookupExpression(INBOX) = %q", got)
+	}
+	if got := jxaMailboxLookupExpression("Archive"); got != "findMailbox(acc, requestedMailbox, ['All Mail', 'Archive'])" {
+		t.Fatalf("jxaMailboxLookupExpression(Archive) = %q", got)
+	}
+}
+
 func TestArchiveAliasHelpers(t *testing.T) {
 	tests := []struct {
 		name string

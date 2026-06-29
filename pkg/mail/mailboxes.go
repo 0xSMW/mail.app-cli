@@ -170,14 +170,16 @@ const result = [];
 try {
 	const acc = mail.accounts.byName('%s');
 	const accName = acc.name();
-	const mailboxes = acc.mailboxes();
-	for (let j = 0; j < mailboxes.length; j++) {
-		const mbox = mailboxes[j];
+	const seen = {};
+	function addMailbox(mbox, fallbackName) {
 		try {
+			const name = fallbackName || mbox.name();
+			if (seen[name]) return;
+			seen[name] = true;
 			let totalCount = 0;
 			try { totalCount = mbox.messages.count(); } catch (e) {}
 			result.push({
-				name: mbox.name(),
+				name: name,
 				unreadCount: mbox.unreadCount(),
 				totalCount: totalCount,
 				account: accName
@@ -185,6 +187,13 @@ try {
 		} catch (e) {
 			// Skip mailboxes that can't be queried at all
 		}
+	}
+	try {
+		addMailbox(acc.inbox(), 'INBOX');
+	} catch (e) {}
+	const mailboxes = acc.mailboxes();
+	for (let j = 0; j < mailboxes.length; j++) {
+		addMailbox(mailboxes[j], '');
 	}
 } catch (e) {
 	// Handle errors gracefully

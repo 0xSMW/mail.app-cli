@@ -10,10 +10,12 @@ func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
+const requestedMailbox = '%s';
+%s
 
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
+	const mbox = %s;
 	const allIds = mbox.messages.id();
 	const targetIdx = allIds.findIndex(id => String(id) === '%s');
 	if (targetIdx >= 0) {
@@ -39,7 +41,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {

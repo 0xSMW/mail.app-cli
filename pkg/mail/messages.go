@@ -7,37 +7,7 @@ import (
 )
 
 func (c *Client) GetMessages(accountName, mailboxName string, limit int) ([]Message, error) {
-	limitClause := ""
-	if limit > 0 {
-		limitClause = fmt.Sprintf("if msgCount > %d then set msgCount to %d", limit, limit)
-	}
-
-	script := fmt.Sprintf(`
-	tell application "Mail"
-		set messageList to {}
-		try
-			set targetAccount to account "%s"
-			set targetMailbox to mailbox "%s" of targetAccount
-			set msgCount to count of messages in targetMailbox
-			%s
-
-			repeat with i from 1 to msgCount
-				set msg to message i of targetMailbox
-				set msgInfo to {subject:(subject of msg), sender:(sender of msg), dateSent:(date sent of msg as string), dateReceived:(date received of msg as string), isRead:(read status of msg), isFlagged:(flagged status of msg), messageSize:(message size of msg)}
-				set end of messageList to msgInfo
-			end repeat
-		end try
-		return messageList
-	end tell
-`, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), limitClause)
-
-	output, err := c.runAppleScript(script)
-	if err != nil {
-		return nil, err
-	}
-
-	messages, err := c.parseMessages(output)
-	return messages, err
+	return c.GetMessagesJSON(accountName, mailboxName, limit, 0, false, false, false, "")
 }
 
 func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {

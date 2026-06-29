@@ -99,6 +99,8 @@ tell application "Mail"
 				if "%s" is "Archive" or "%s" is "All Mail" then
 					set destinationMailbox to my findMailboxByName(mailboxes of acc, "All Mail")
 					if destinationMailbox is missing value then set destinationMailbox to my findMailboxByName(mailboxes of acc, "Archive")
+				else if "%s" is "INBOX" then
+					set destinationMailbox to inbox of acc
 				else
 					set destinationMailbox to my findMailboxByName(mailboxes of acc, "%s")
 				end if
@@ -113,7 +115,7 @@ tell application "Mail"
 	end tell
 	return "ok"
 end tell
-`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), appleScriptBool(input.Enabled), escapeAppleScriptString(input.FromDomain))
+`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), appleScriptBool(input.Enabled), escapeAppleScriptString(input.FromDomain))
 	if _, err := c.runAppleScript(script); err != nil {
 		return nil, err
 	}
