@@ -139,6 +139,7 @@ type Message struct {
 
 // Attachment represents an email attachment
 type Attachment struct {
+	Index    int
 	Name     string
 	FileSize int
 	MimeType string
@@ -1782,10 +1783,11 @@ try {
 			} catch (e) {
 				// mimeType() sometimes fails in Mail.app
 			}
-			result.push({
-				name: att.name(),
-				fileSize: att.fileSize(),
-				mimeType: mimeType
+				result.push({
+					index: a,
+					name: att.name(),
+					fileSize: att.fileSize(),
+					mimeType: mimeType
 			});
 		}
 	}
@@ -1811,27 +1813,43 @@ JSON.stringify(result);
 
 // SaveAttachment saves an attachment to disk
 func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentName, savePath string) error {
+	return c.SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName, -1, savePath)
+}
+
+// SaveAttachmentByIndex saves an attachment by its message-local index. If index
+// is negative, it falls back to the first attachment with the requested name.
+func (c *Client) SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const app = Application.currentApplication();
 app.includeStandardAdditions = true;
+const requestedMailbox = '%s';
+const requestedIndex = %d;
+%s
+%s
 
 try {
 	const acc = mail.accounts.byName('%s');
-	const mbox = acc.mailboxes.byName('%s');
-	const allIds = mbox.messages.id();
-	const targetIdx = allIds.findIndex(id => String(id) === '%s');
-	if (targetIdx < 0) {
+	const mbox = %s;
+	const msg = messageById(mbox, '%s');
+	if (msg === null) {
 		'Error: Message not found';
 	} else {
-		const attachments = mbox.messages.at(targetIdx).mailAttachments();
+		const attachments = msg.mailAttachments();
 		let found = false;
-		for (let a = 0; a < attachments.length; a++) {
-			if (attachments[a].name() === '%s') {
-				const pathObj = Path('%s');
-				attachments[a].save({ in: pathObj });
+		const pathObj = Path('%s');
+		if (requestedIndex >= 0) {
+			if (requestedIndex < attachments.length) {
+				attachments[requestedIndex].save({ in: pathObj });
 				found = true;
-				break;
+			}
+		} else {
+			for (let a = 0; a < attachments.length; a++) {
+				if (attachments[a].name() === '%s') {
+					attachments[a].save({ in: pathObj });
+					found = true;
+					break;
+				}
 			}
 		}
 		if (found) {
@@ -1843,7 +1861,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(accountName), escapeJSString(mailboxName), escapeJSString(messageID), escapeJSString(attachmentName), escapeJSString(savePath))
+`, escapeJSString(mailboxName), index, jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
 
 	output, err := c.runJXA(script)
 	if err != nil {

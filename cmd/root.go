@@ -30,4 +30,12 @@ func init() {
 	rootCmd.AddCommand(attachmentsCmd)
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(syncCmd)
+	rootCmd.AddCommand(exportCmd)
+	rootCmd.AddCommand(importCmd)
+	rootCmd.AddCommand(draftsCmd)
+	rootCmd.AddCommand(rulesCmd)
+	rootCmd.AddCommand(smartCmd)
+	rootCmd.AddCommand(threadsCmd)
+	rootCmd.AddCommand(signaturesCmd)
+	rootCmd.AddCommand(vipCmd)
 }

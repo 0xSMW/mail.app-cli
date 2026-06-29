@@ -1,4 +1,4 @@
-module github.com/intelligrit/mail-app-cli
+module github.com/0xSMW/mail.app-cli
 
 go 1.21
 

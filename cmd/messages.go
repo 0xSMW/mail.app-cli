@@ -5,8 +5,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/intelligrit/mail-app-cli/pkg/cache"
-	"github.com/intelligrit/mail-app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -345,6 +345,8 @@ func init() {
 	messagesCmd.AddCommand(messagesFlaggedCmd)
 	messagesCmd.AddCommand(messagesTrashCmd)
 	messagesCmd.AddCommand(messagesJunkCmd)
+	messagesCmd.AddCommand(messagesBatchCmd)
+	messagesCmd.AddCommand(messagesVIPCmd)
 
 	// Common flags for all message commands
 	messagesCmd.PersistentFlags().StringVarP(&msgAccount, "account", "a", "", "Account name (required)")

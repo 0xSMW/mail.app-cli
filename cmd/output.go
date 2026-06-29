@@ -6,13 +6,21 @@ import (
 )
 
 func printJSON(v any, label string) error {
-	output, err := json.MarshalIndent(v, "", "  ")
+	output, err := marshalIndentedJSON(v, label)
 	if err != nil {
-		return fmt.Errorf("failed to marshal %s: %w", label, err)
+		return err
 	}
 
 	fmt.Println(string(output))
 	return nil
+}
+
+func marshalIndentedJSON(v any, label string) ([]byte, error) {
+	output, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s: %w", label, err)
+	}
+	return output, nil
 }
 
 func requireAccountAndMailbox(account, mailbox string) error {
