@@ -13,9 +13,9 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Create, edit, send, and delete drafts
 - Send mail with files and signatures
 - Export messages and attachments for automation
-- Validate message imports before applying changes
-- Manage rules, smart mailboxes, and threads
-- Inspect signatures, sync status, and VIP mail
+- Validate exported message JSON before migration work
+- Manage rules and inspect smart mailboxes and threads
+- Inspect signatures and VIP mail
 - Read Gmail Archive and All Mail reliably
 - Output scriptable JSON for every workflow
 
@@ -233,7 +233,7 @@ mail-app-cli messages batch flag -a "Gmail" -m "INBOX" --flagged=false --stdin <
 mail-app-cli messages batch delete -a "Gmail" -m "INBOX" --query "old alert" --dry-run
 ```
 
-### Export and Import Validation
+### Export and Validation
 
 Export messages as JSON:
 
@@ -247,7 +247,7 @@ Export attachments:
 mail-app-cli export attachments -a "Gmail" -m "INBOX" --output ./attachments
 ```
 
-Validate an exported message file before import:
+Validate an exported message file:
 
 ```bash
 mail-app-cli import messages -a "Gmail" -m "Archive" --format json --file inbox.json --dry-run
@@ -271,7 +271,7 @@ mail-app-cli drafts send <draft-id> -a "Gmail"
 mail-app-cli drafts delete <draft-id> -a "Gmail" --dry-run
 ```
 
-### Rules, Smart Mailboxes, Threads, Signatures, and VIP
+### Rules, Smart Mailboxes, Threads, Signatures, and VIP Messages
 
 Inspect higher-level Mail.app surfaces:
 
@@ -304,21 +304,17 @@ Inspect smart mailbox, signature, and thread details:
 ```bash
 mail-app-cli smart show "Unread Receipts"
 mail-app-cli smart query "receipt" --limit 20
-mail-app-cli smart create "Unread Receipts" --query "receipt" --dry-run
-mail-app-cli smart delete "Unread Receipts" --dry-run
 mail-app-cli signatures show "Work"
-mail-app-cli signatures apply "Work" -a "Gmail" --dry-run
 mail-app-cli threads show <thread-id> -a "Gmail" -m "INBOX"
 mail-app-cli threads archive <thread-id> -a "Gmail" -m "INBOX" --dry-run
 ```
 
 ### Sync
 
-Trigger sync and get structured status:
+Trigger sync and get a structured result:
 
 ```bash
 mail-app-cli sync --account "Gmail" --mailbox "INBOX" --wait --json
-mail-app-cli sync status --account "Gmail"
 ```
 
 ## JSON Output and jq

@@ -14,13 +14,12 @@ var (
 	importMailbox string
 	importFormat  string
 	importFile    string
-	importPath    string
 	importDryRun  bool
 )
 
 var importCmd = &cobra.Command{
 	Use:   "import",
-	Short: "Validate or import Mail.app data",
+	Short: "Validate exported Mail.app data",
 }
 
 var importMessagesCmd = &cobra.Command{
@@ -31,10 +30,7 @@ var importMessagesCmd = &cobra.Command{
 			return err
 		}
 		if importFormat != "json" {
-			if importPath != "" {
-				return fmt.Errorf("import messages --path is accepted only with eml directory input, which is unsupported by this Mail.app scriptability layer")
-			}
-			return fmt.Errorf("import messages supports --format json validation only; eml import is unsupported by this Mail.app scriptability layer")
+			return fmt.Errorf("import messages validates exported JSON only")
 		}
 		if importFile == "" {
 			return fmt.Errorf("--file is required")
@@ -52,13 +48,12 @@ var importMessagesCmd = &cobra.Command{
 			"mailbox":        importMailbox,
 			"format":         importFormat,
 			"validated":      len(messages),
-			"wouldImport":    importDryRun,
 			"implementation": "validation-only",
 		}
 		if importDryRun {
-			return printJSON(result, "import validation")
+			result["dryRun"] = true
 		}
-		return fmt.Errorf("message import is validation-only because Mail.app does not expose reliable raw-message import through this local scriptability layer; rerun with --dry-run to inspect the validated input")
+		return printJSON(result, "import validation")
 	},
 }
 
@@ -86,6 +81,5 @@ func init() {
 	importMessagesCmd.Flags().StringVarP(&importMailbox, "mailbox", "m", "", "Target mailbox")
 	importMessagesCmd.Flags().StringVar(&importFormat, "format", "json", "Import format: json")
 	importMessagesCmd.Flags().StringVar(&importFile, "file", "", "Export JSON file")
-	importMessagesCmd.Flags().StringVar(&importPath, "path", "", "Directory path for eml imports")
-	importMessagesCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Validate and report would-import items without mutation")
+	importMessagesCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Mark validation output as a dry run")
 }

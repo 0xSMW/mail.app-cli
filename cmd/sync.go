@@ -34,6 +34,7 @@ Examples:
   mail-app-cli sync
   mail-app-cli sync --account "Gmail"
   mail-app-cli sync --account "Gmail" --mailbox INBOX --wait --json`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		client := mail.NewClient()
 		result := syncResult{
@@ -104,22 +105,6 @@ Examples:
 	},
 }
 
-var syncStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Report sync status metadata",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		now := time.Now().UTC()
-		return printJSON(syncResult{
-			Account:          syncAccount,
-			RequestedMailbox: syncMailbox,
-			ActualScope:      "all-accounts",
-			StartedAt:        now,
-			EndedAt:          now,
-			Status:           "idle",
-		}, "sync status")
-	},
-}
-
 func waitForSyncStability(client *mail.Client, account, mailbox string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	lastCount := -1
@@ -176,12 +161,9 @@ func syncObservedCount(client *mail.Client, account, mailbox string) (int, error
 }
 
 func init() {
-	syncCmd.AddCommand(syncStatusCmd)
 	syncCmd.Flags().StringVarP(&syncAccount, "account", "a", "", "Account to sync")
 	syncCmd.Flags().StringVarP(&syncMailbox, "mailbox", "m", "", "Requested mailbox scope")
 	syncCmd.Flags().BoolVar(&syncWait, "wait", false, "Wait briefly after triggering sync")
 	syncCmd.Flags().BoolVar(&syncJSON, "json", false, "Print structured sync result")
 	syncCmd.Flags().IntVar(&syncTimeout, "timeout", 60, "Maximum wait time in seconds")
-	syncStatusCmd.Flags().StringVarP(&syncAccount, "account", "a", "", "Account name")
-	syncStatusCmd.Flags().StringVarP(&syncMailbox, "mailbox", "m", "", "Mailbox name")
 }
