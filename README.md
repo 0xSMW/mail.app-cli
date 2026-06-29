@@ -6,7 +6,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 
 ## Features
 
-- Inspect accounts, mailboxes, and unread counts
+- See accounts, mailboxes, and unread counts
 - List, read, search, and filter messages
 - Archive, move, delete, flag, and mark mail
 - Batch message actions with dry-run safety
@@ -14,8 +14,8 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Send mail with files and signatures
 - Export messages and attachments for automation
 - Validate exported message JSON before migration work
-- Manage rules and inspect smart mailboxes and threads
-- Inspect signatures and VIP mail
+- Manage rules and explore smart mailboxes and threads
+- Browse signatures and VIP mail
 - Read Gmail Archive and All Mail reliably
 - Output scriptable JSON for every workflow
 
