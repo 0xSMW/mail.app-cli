@@ -464,8 +464,25 @@ mail-app-cli/
 │   └── attachments.go
 ├── pkg/
 │   └── mail/        # Mail.app AppleScript/JXA client
+│       ├── accounts.go
+│       ├── attachments.go
+│       ├── automation.go
+│       ├── bulk.go
 │       ├── client.go
-│       └── enhancements.go
+│       ├── drafts.go
+│       ├── envelope_index.go
+│       ├── mailboxes.go
+│       ├── message_actions.go
+│       ├── message_content.go
+│       ├── messages.go
+│       ├── models.go
+│       ├── rules.go
+│       ├── search.go
+│       ├── send.go
+│       ├── signatures.go
+│       ├── smart_mailboxes.go
+│       ├── sync.go
+│       └── unified.go
 └── main.go
 ```
 

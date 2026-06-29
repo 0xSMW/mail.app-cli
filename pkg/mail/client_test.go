@@ -16,6 +16,30 @@ func TestJXABool(t *testing.T) {
 	}
 }
 
+func TestEscapeJSString(t *testing.T) {
+	input := "quote' slash\\ line\n tab\t café 😀 \u2028\u2029"
+	want := `quote\' slash\\ line\n tab\t caf\u00E9 \uD83D\uDE00 \u2028\u2029`
+	if got := escapeJSString(input); got != want {
+		t.Fatalf("escapeJSString = %q, want %q", got, want)
+	}
+}
+
+func TestJXAMailboxLookupUsesInboxAccessor(t *testing.T) {
+	helper := jxaMailboxLookupHelper()
+	for _, want := range []string{"function findMailbox(acc, requestedName, names)", "return acc.inbox()"} {
+		if !strings.Contains(helper, want) {
+			t.Fatalf("jxaMailboxLookupHelper missing %q", want)
+		}
+	}
+
+	if got := jxaMailboxLookupExpression("INBOX"); got != "findMailbox(acc, requestedMailbox, [requestedMailbox])" {
+		t.Fatalf("jxaMailboxLookupExpression(INBOX) = %q", got)
+	}
+	if got := jxaMailboxLookupExpression("Archive"); got != "findMailbox(acc, requestedMailbox, ['All Mail', 'Archive'])" {
+		t.Fatalf("jxaMailboxLookupExpression(Archive) = %q", got)
+	}
+}
+
 func TestArchiveAliasHelpers(t *testing.T) {
 	tests := []struct {
 		name string

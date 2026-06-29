@@ -1,0 +1,206 @@
+package mail
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"os/exec"
+	"strings"
+	"time"
+)
+
+func escapeJSString(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\'':
+			b.WriteString(`\'`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			if r >= 0x20 && r <= 0x7e {
+				b.WriteRune(r)
+				continue
+			}
+			if r <= 0xffff {
+				fmt.Fprintf(&b, `\u%04X`, r)
+				continue
+			}
+			r -= 0x10000
+			high := 0xd800 + (r >> 10)
+			low := 0xdc00 + (r & 0x3ff)
+			fmt.Fprintf(&b, `\u%04X\u%04X`, high, low)
+		}
+	}
+	return b.String()
+}
+
+func escapeAppleScriptString(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\") // Escape backslashes first
+	s = strings.ReplaceAll(s, "\"", "\\\"") // Escape double quotes
+	return s
+}
+
+func (c *Client) runAppleScript(script string) (string, error) {
+	cmd := exec.Command("osascript", "-e", script)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("applescript error: %v - %s", err, stderr.String())
+	}
+
+	return strings.TrimSpace(out.String()), nil
+}
+
+func (c *Client) runJXA(script string) (string, error) {
+	cmd := exec.Command("osascript", "-l", "JavaScript", "-e", script)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("jxa error: %v - %s", err, stderr.String())
+	}
+
+	return strings.TrimSpace(out.String()), nil
+}
+
+func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "osascript", "-l", "JavaScript", "-e", script)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("jxa timed out after %s", timeout)
+	}
+	if err != nil {
+		return "", fmt.Errorf("jxa error: %v - %s", err, stderr.String())
+	}
+
+	return strings.TrimSpace(out.String()), nil
+}
+
+func jxaBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func jxaMailboxLookupExpression(mailboxName string) string {
+	return jxaMailboxLookupExpressionFor(mailboxName, "requestedMailbox")
+}
+
+func jxaMailboxLookupExpressionFor(mailboxName, variableName string) string {
+	if isArchiveAlias(mailboxName) {
+		return fmt.Sprintf("findMailbox(acc, %s, ['All Mail', 'Archive'])", variableName)
+	}
+	return fmt.Sprintf("findMailbox(acc, %s, [%s])", variableName, variableName)
+}
+
+func jxaMailboxLookupHelper() string {
+	return `
+function isInboxName(name) {
+	return String(name || '').toLowerCase() === 'inbox';
+}
+
+function findMailbox(acc, requestedName, names) {
+	if (isInboxName(requestedName)) {
+		try { return acc.inbox(); } catch (e) {}
+	}
+	const found = findMailboxByNames(acc.mailboxes(), names);
+	if (found !== null) {
+		return found;
+	}
+	try {
+		const byName = acc.mailboxes.byName(requestedName);
+		byName.name();
+		return byName;
+	} catch (e) {}
+	return null;
+}
+
+function findMailboxByNames(mailboxes, names) {
+	for (let i = 0; i < mailboxes.length; i++) {
+		const mailbox = mailboxes[i];
+		try {
+			if (names.includes(mailbox.name())) {
+				return mailbox;
+			}
+			const child = findMailboxByNames(mailbox.mailboxes(), names);
+			if (child !== null) {
+				return child;
+			}
+		} catch (e) {}
+	}
+	return null;
+}
+`
+}
+
+func jxaMessageByIdHelper() string {
+	return `
+function messageById(mbox, messageId) {
+	let msg = null;
+	try {
+		msg = mbox.messages.byId(Number(messageId));
+		msg.id();
+		return msg;
+	} catch (e) {
+		msg = null;
+	}
+	try {
+		const allIds = mbox.messages.id();
+		const targetIdx = allIds.findIndex(id => String(id) === messageId);
+		if (targetIdx >= 0) {
+			return mbox.messages.at(targetIdx);
+		}
+	} catch (e) {}
+	return null;
+}
+`
+}
+
+func appleScriptBool(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
+}
+
+func appleScriptStringList(values []string) string {
+	escaped := make([]string, 0, len(values))
+	for _, value := range values {
+		escaped = append(escaped, `"`+escapeAppleScriptString(value)+`"`)
+	}
+	return strings.Join(escaped, ", ")
+}
+
+func appleScriptRecipientBlock(kind string, values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(`
+		repeat with addr in {%s}
+			make new %s recipient at end of %s recipients with properties {address:addr}
+		end repeat
+`, appleScriptStringList(values), kind, kind)
+}

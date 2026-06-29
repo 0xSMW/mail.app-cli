@@ -23,7 +23,7 @@ The best overall approach is to make this CLI a reliable automation layer over M
 
 ## Implementation Guidance
 
-Use this plan to guide future implementation work. The goal is to expand the CLI as a dependable local automation surface for Mail.app while preserving the current project style: Cobra commands in `cmd/`, Mail.app/JXA/AppleScript access in `pkg/mail/client.go`, JSON-first output, and shell-friendly behavior.
+Use this plan to guide future implementation work. The goal is to expand the CLI as a dependable local automation surface for Mail.app while preserving the current project style: Cobra commands in `cmd/`, focused Mail.app/JXA/AppleScript integration files in `pkg/mail/`, JSON-first output, and shell-friendly behavior.
 
 ## Current Baseline
 
@@ -36,7 +36,7 @@ The CLI already exposes:
 - Attachments: list and save.
 - Sending: direct send with recipients and attachments.
 - Sync: sync all accounts or one account.
-- Bulk client helpers already exist in `pkg/mail/client.go`: `BulkMarkMessages`, `BulkFlagMessages`, `BulkDeleteMessages`, `BulkArchiveMessages`, and `BulkMoveMessages`.
+- Bulk client helpers already exist in `pkg/mail/bulk.go`: `BulkMarkMessages`, `BulkFlagMessages`, `BulkDeleteMessages`, `BulkArchiveMessages`, and `BulkMoveMessages`.
 
 Prefer building on those existing primitives before adding new abstractions.
 
@@ -87,7 +87,7 @@ Implementation notes:
 
 - Add a `messages batch` command group in `cmd/messages.go` or a new `cmd/messages_batch.go`.
 - Reuse existing list/search code to resolve target IDs.
-- Reuse existing `Bulk*` methods in `pkg/mail/client.go`.
+- Reuse existing `Bulk*` methods in `pkg/mail/bulk.go`.
 - Return a result object with `matched`, `attempted`, `succeeded`, `failed`, and `items`.
 - Require `--yes` for destructive bulk delete/archive/move unless `--dry-run` is present.
 - Cap default batch size and add `--limit` to avoid accidental huge actions.
@@ -318,7 +318,7 @@ Acceptance checks:
 - `cmd/export.go` and `cmd/import.go` for data movement.
 - `cmd/drafts.go` for first-class draft operations.
 - `cmd/rules.go`, `cmd/smart.go`, `cmd/signatures.go`, `cmd/vip.go`, and `cmd/threads.go` for new command groups.
-- `pkg/mail/client.go` can keep Mail.app integration initially, but split into focused files once it grows: `rules.go`, `drafts.go`, `export.go`, `threads.go`, etc.
+- Keep Mail.app integration split across focused `pkg/mail/` files such as `messages.go`, `message_actions.go`, `bulk.go`, `drafts.go`, `rules.go`, and `automation.go`.
 - Add tests around command argument validation and pure helper functions first; Mail.app integration tests can remain manual or opt-in.
 
 ## Model Execution Notes
