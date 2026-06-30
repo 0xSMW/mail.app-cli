@@ -59,6 +59,56 @@ func TestArchiveAliasHelpers(t *testing.T) {
 	}
 }
 
+func TestDeleteFallbackMailboxes(t *testing.T) {
+	if got := deleteFallbackMailboxes("Newsletter"); len(got) != 2 || got[0] != "All Mail" || got[1] != "Archive" {
+		t.Fatalf("deleteFallbackMailboxes(Newsletter) = %v", got)
+	}
+	if got := deleteFallbackMailboxes("All Mail"); len(got) != 0 {
+		t.Fatalf("deleteFallbackMailboxes(All Mail) = %v, want no fallbacks", got)
+	}
+	if got := deleteFallbackMailboxes("Archive"); len(got) != 0 {
+		t.Fatalf("deleteFallbackMailboxes(Archive) = %v, want no fallbacks", got)
+	}
+}
+
+func TestDeleteMessageResolvedRetriesAllMail(t *testing.T) {
+	var attempts []string
+	err := deleteMessageResolved("Newsletter", func(mailbox string) error {
+		attempts = append(attempts, mailbox)
+		if mailbox == "All Mail" {
+			return nil
+		}
+		return errors.New("Error: Message not found")
+	})
+	if err != nil {
+		t.Fatalf("deleteMessageResolved returned error: %v", err)
+	}
+	want := []string{"Newsletter", "All Mail"}
+	if len(attempts) != len(want) {
+		t.Fatalf("attempts = %v, want %v", attempts, want)
+	}
+	for i := range want {
+		if attempts[i] != want[i] {
+			t.Fatalf("attempts = %v, want %v", attempts, want)
+		}
+	}
+}
+
+func TestDeleteMessageResolvedDoesNotRetryInvalidMailbox(t *testing.T) {
+	var attempts []string
+	err := deleteMessageResolved("Newsleter", func(mailbox string) error {
+		attempts = append(attempts, mailbox)
+		return errors.New("Error: Mailbox not found")
+	})
+	if err == nil {
+		t.Fatal("deleteMessageResolved returned nil")
+	}
+	want := []string{"Newsleter"}
+	if len(attempts) != len(want) || attempts[0] != want[0] {
+		t.Fatalf("attempts = %v, want %v", attempts, want)
+	}
+}
+
 func TestIndexMailboxURLPattern(t *testing.T) {
 	if got := indexMailboxURLPattern("abc-123", "Archive"); got != "imap://abc-123/%5BGmail%5D/All%20Mail" {
 		t.Fatalf("archive URL = %q", got)

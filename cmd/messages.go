@@ -193,11 +193,13 @@ var messagesDeleteCmd = &cobra.Command{
 		}
 
 		client := mail.NewClient()
-		err := client.DeleteMessage(msgAccount, msgMailbox, messageID)
+		err := client.DeleteMessageResolved(msgAccount, msgMailbox, messageID)
 		if err != nil {
 			return fmt.Errorf("failed to delete message: %w", err)
 		}
 		invalidateMailboxCache(msgAccount, msgMailbox)
+		invalidateMailboxCache(msgAccount, "Archive")
+		invalidateMailboxCache(msgAccount, "All Mail")
 
 		fmt.Println("Message deleted")
 		return nil
