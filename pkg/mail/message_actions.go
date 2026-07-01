@@ -24,12 +24,16 @@ const requestedMailbox = '%s';
 try {
 	const acc = mail.accounts.byName('%s');
 	const mbox = %s;
-	const msg = messageById(mbox, '%s');
-	if (msg === null) {
-		'Error: Message not found';
+	if (mbox === null) {
+		'Error: Mailbox not found';
 	} else {
-		%s
-		'Success';
+		const msg = messageById(mbox, '%s');
+		if (msg === null) {
+			'Error: Message not found';
+		} else {
+			%s
+			'Success';
+		}
 	}
 } catch (e) {
 	'Error: ' + e;
@@ -57,6 +61,41 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
 	return c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();")
+}
+
+func (c *Client) DeleteMessageResolved(accountName, mailboxName, messageID string) error {
+	return deleteMessageResolved(mailboxName, func(candidateMailbox string) error {
+		return c.DeleteMessage(accountName, candidateMailbox, messageID)
+	})
+}
+
+func deleteMessageResolved(mailboxName string, deleteFromMailbox func(string) error) error {
+	err := deleteFromMailbox(mailboxName)
+	if err == nil {
+		return nil
+	}
+	if !isMessageNotFoundError(err) {
+		return err
+	}
+
+	for _, fallbackMailbox := range deleteFallbackMailboxes(mailboxName) {
+		if fallbackErr := deleteFromMailbox(fallbackMailbox); fallbackErr == nil {
+			return nil
+		}
+	}
+
+	return err
+}
+
+func deleteFallbackMailboxes(mailboxName string) []string {
+	if isArchiveAlias(mailboxName) {
+		return nil
+	}
+	return []string{"All Mail", "Archive"}
+}
+
+func isMessageNotFoundError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Message not found")
 }
 
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {

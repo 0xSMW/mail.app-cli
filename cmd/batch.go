@@ -60,7 +60,7 @@ var messagesBatchDeleteCmd = &cobra.Command{
 	Short: "Delete selected messages",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runMessageBatch("delete", args, "", func(client *mail.Client, item batchItem) error {
-			return client.DeleteMessage(item.Account, item.SourceMailbox, item.ID)
+			return client.DeleteMessageResolved(item.Account, item.SourceMailbox, item.ID)
 		})
 	},
 }
@@ -174,6 +174,10 @@ func runMessageBatch(action string, argIDs []string, targetMailbox string, mutat
 		invalidateMailboxCache(msgAccount, targetMailbox)
 	}
 	if action == "archive" {
+		invalidateMailboxCache(msgAccount, "Archive")
+		invalidateMailboxCache(msgAccount, "All Mail")
+	}
+	if action == "delete" {
 		invalidateMailboxCache(msgAccount, "Archive")
 		invalidateMailboxCache(msgAccount, "All Mail")
 	}
