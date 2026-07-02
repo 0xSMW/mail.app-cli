@@ -375,30 +375,53 @@ JSON.stringify(result);
 	}
 
 	if len(messages) == 0 && isArchiveAlias(mailboxName) {
-		return c.searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName, limit)
+		return c.searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName, limit, since)
 	}
 
 	return messages, nil
 }
 
-func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
+func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50
+	}
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return []Message{}, nil
+	}
+	termsJSON, err := json.Marshal(terms)
+	if err != nil {
+		return nil, err
+	}
+	sinceUnix := int64(0)
+	if strings.TrimSpace(since) != "" {
+		parsedSince, _, err := parseSinceUnix(since)
+		if err != nil {
+			return nil, err
+		}
+		sinceUnix = parsedSince
 	}
 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
 const seen = {};
-const searchTerm = '%s';
+const searchTerms = %s;
 const maxResults = %d;
 const requestedMailbox = '%s';
+const sinceDate = new Date(%d);
 %s
 
 function addMessage(msg, accName, mboxName) {
 	if (result.length >= maxResults) return;
 	try { if (msg.deletedStatus()) return; } catch(e) {}
 	try {
+		const received = msg.dateReceived();
+		if (sinceDate.getTime() > 0 && (!received || received < sinceDate)) return;
+		const subject = (msg.subject() || '').toLowerCase();
+		const sender = (msg.sender() || '').toLowerCase();
+		const haystack = subject + ' ' + sender;
+		if (!searchTerms.every(term => haystack.includes(term))) return;
 		const id = String(msg.id());
 		if (seen[id]) return;
 		seen[id] = true;
@@ -428,13 +451,15 @@ try {
 	const mbox = %s;
 	const accName = acc.name();
 	const mboxName = mbox.name();
-	try {
-		addMatches(mbox.messages.whose({subject: {_contains: searchTerm}})(), accName, mboxName);
-	} catch(e) {}
-	if (result.length < maxResults) {
+	for (let t = 0; t < searchTerms.length && result.length < maxResults; t++) {
 		try {
-			addMatches(mbox.messages.whose({sender: {_contains: searchTerm}})(), accName, mboxName);
+			addMatches(mbox.messages.whose({subject: {_contains: searchTerms[t]}})(), accName, mboxName);
 		} catch(e) {}
+		if (result.length < maxResults) {
+			try {
+				addMatches(mbox.messages.whose({sender: {_contains: searchTerms[t]}})(), accName, mboxName);
+			} catch(e) {}
+		}
 	}
 	result.sort((a, b) => b.dateReceived.localeCompare(a.dateReceived));
 } catch (e) {
@@ -442,7 +467,7 @@ try {
 }
 
 JSON.stringify(result.slice(0, maxResults));
-`, escapeJSString(query), limit, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+`, string(termsJSON), limit, escapeJSString(mailboxName), sinceUnix*1000, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
