@@ -3,6 +3,7 @@ package mail
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -10,6 +11,22 @@ import (
 type searchTarget struct {
 	AccountName string
 	MailboxName string
+}
+
+var searchTermPattern = regexp.MustCompile(`[[:alnum:]]+`)
+
+func searchTerms(query string) []string {
+	matches := searchTermPattern.FindAllString(strings.ToLower(query), -1)
+	terms := make([]string, 0, len(matches))
+	seen := make(map[string]bool, len(matches))
+	for _, match := range matches {
+		if match == "" || seen[match] {
+			continue
+		}
+		seen[match] = true
+		terms = append(terms, match)
+	}
+	return terms
 }
 
 func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
@@ -47,6 +64,10 @@ func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
 }
 
 func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxName string, limit int) ([]Message, error) {
+	return c.SearchMessagesJSONSince(query, accountName, mailboxName, limit, "")
+}
+
+func (c *Client) SearchMessagesJSONSince(query string, accountName string, mailboxName string, limit int, since string) ([]Message, error) {
 	// Set a reasonable default limit if none specified
 	if limit == 0 {
 		limit = 50
@@ -57,17 +78,17 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
 		} else if ok {
-			messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
+			messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit, since)
 			if err != nil {
 				if isEnvelopeIndexUnavailable(err) {
 					c.warnEnvelopeIndexFallback(err)
-					return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+					return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit, since)
 				}
 				return nil, err
 			}
 			return messages, nil
 		}
-		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit)
+		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit, since)
 	}
 
 	targets, err := c.defaultSearchTargets(accountName)
@@ -82,7 +103,7 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 	// If only one mailbox, no need for parallelization
 	if len(targets) == 1 {
 		target := targets[0]
-		return c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit)
+		return c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit, since)
 	}
 
 	// Search mailboxes in parallel
@@ -94,19 +115,27 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 
 	// Launch goroutine for each mailbox
 	runWithMailCommandLimit(targets, func(target searchTarget) {
-		messages, err := c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit)
+		messages, err := c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit, since)
 		results <- result{messages: messages, err: err}
 	})
 
 	// Collect results
 	var allMessages []Message
+	seenMessages := make(map[string]bool)
 	var errors []error
 	for i := 0; i < len(targets); i++ {
 		res := <-results
 		if res.err != nil {
 			errors = append(errors, res.err)
 		} else {
-			allMessages = append(allMessages, res.messages...)
+			for _, message := range res.messages {
+				key := message.Account + "\x00" + message.ID
+				if seenMessages[key] {
+					continue
+				}
+				seenMessages[key] = true
+				allMessages = append(allMessages, message)
+			}
 		}
 	}
 
@@ -127,22 +156,22 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 	return allMessages, nil
 }
 
-func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName string, limit int) ([]Message, error) {
+func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
 	if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 		return nil, err
 	} else if ok {
-		messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit)
+		messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit, since)
 		if err != nil {
 			if isEnvelopeIndexUnavailable(err) {
 				c.warnEnvelopeIndexFallback(err)
-				return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+				return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit, since)
 			}
 			return nil, err
 		}
 		return messages, nil
 	}
 
-	return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit)
+	return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit, since)
 }
 
 func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error) {
@@ -159,6 +188,18 @@ func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error
 		for _, account := range accounts {
 			enabledAccounts[account.Name] = account.Enabled
 		}
+	}
+
+	return defaultSearchTargetsFromMailboxes(mailboxes, accountName, enabledAccounts), nil
+}
+
+func defaultSearchTargetsFromMailboxes(mailboxes []Mailbox, accountName string, enabledAccounts map[string]bool) []searchTarget {
+	if accountName != "" {
+		targets := accountScopedSearchTargets(mailboxes, accountName)
+		if len(targets) > 0 {
+			return targets
+		}
+		return []searchTarget{{AccountName: accountName, MailboxName: "INBOX"}}
 	}
 
 	seen := make(map[string]bool)
@@ -178,18 +219,85 @@ func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error
 		targets = append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
 	}
 
-	if len(targets) == 0 && accountName != "" {
-		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "INBOX"})
-	}
-
-	return targets, nil
+	return targets
 }
 
-func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
+func accountScopedSearchTargets(mailboxes []Mailbox, accountName string) []searchTarget {
+	seen := make(map[string]bool)
+	var targets []searchTarget
+	hasArchiveTarget := false
+	addTarget := func(mailbox Mailbox) {
+		if mailbox.Account != accountName || mailbox.Name == "" {
+			return
+		}
+		key := mailbox.Account + "\x00" + strings.ToLower(mailbox.Name)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		targets = append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
+		if isArchiveAlias(mailbox.Name) {
+			hasArchiveTarget = true
+		}
+	}
+	for _, preferredGroup := range [][]string{
+		{"All Mail", "Archive"},
+		{"Spam", "Junk"},
+		{"Trash"},
+	} {
+		for _, mailbox := range mailboxes {
+			if mailbox.Account != accountName || mailbox.Name == "" {
+				continue
+			}
+			for _, preferred := range preferredGroup {
+				if !strings.EqualFold(mailbox.Name, preferred) {
+					continue
+				}
+				addTarget(mailbox)
+				goto nextPreferredGroup
+			}
+		}
+	nextPreferredGroup:
+	}
+	for _, mailbox := range mailboxes {
+		if mailbox.TotalCount <= 0 {
+			continue
+		}
+		if hasArchiveTarget && strings.EqualFold(mailbox.Name, "INBOX") {
+			continue
+		}
+		addTarget(mailbox)
+	}
+	if !hasArchiveTarget {
+		for _, mailbox := range mailboxes {
+			if mailbox.Account == accountName && strings.EqualFold(mailbox.Name, "INBOX") {
+				return append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
+			}
+		}
+	}
+	return targets
+}
+
+func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
 	// Use helper for escaping
-	escapedQuery := escapeJSString(query)
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return []Message{}, nil
+	}
+	termsJSON, err := json.Marshal(terms)
+	if err != nil {
+		return nil, err
+	}
 	escapedAccount := escapeJSString(accountName)
 	escapedMailbox := escapeJSString(mailboxName)
+	sinceUnix := int64(0)
+	if strings.TrimSpace(since) != "" {
+		parsedSince, _, err := parseSinceUnix(since)
+		if err != nil {
+			return nil, err
+		}
+		sinceUnix = parsedSince
+	}
 	maxToCheck := 500
 	if isArchiveAlias(mailboxName) {
 		maxToCheck = 10000
@@ -201,10 +309,11 @@ func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxNam
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
-const searchTerm = '%s'.toLowerCase();
+const searchTerms = %s;
 const maxResults = %d;
 const maxMessagesToCheck = %d;
 const requestedMailbox = '%s';
+const sinceDate = new Date(%d);
 %s
 
 try {
@@ -222,9 +331,15 @@ try {
 		try {
 			const subject = (msg.subject() || '').toLowerCase();
 			const sender = (msg.sender() || '').toLowerCase();
+			let content = '';
+			try { content = (msg.content() || '').toLowerCase(); } catch(e) {}
+			const received = msg.dateReceived();
+			if (sinceDate.getTime() > 0 && (!received || received < sinceDate)) {
+				continue;
+			}
+			const haystack = subject + ' ' + sender + ' ' + content;
 
-			// Only search subject and sender
-			if (subject.includes(searchTerm) || sender.includes(searchTerm)) {
+			if (searchTerms.every(term => haystack.includes(term))) {
 				result.push({
 					id: String(msg.id()),
 					subject: msg.subject() || '',
@@ -247,7 +362,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapedQuery, limit, maxToCheck, escapedMailbox, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
+`, string(termsJSON), limit, maxToCheck, escapedMailbox, sinceUnix*1000, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -260,30 +375,53 @@ JSON.stringify(result);
 	}
 
 	if len(messages) == 0 && isArchiveAlias(mailboxName) {
-		return c.searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName, limit)
+		return c.searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName, limit, since)
 	}
 
 	return messages, nil
 }
 
-func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {
+func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50
+	}
+	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return []Message{}, nil
+	}
+	termsJSON, err := json.Marshal(terms)
+	if err != nil {
+		return nil, err
+	}
+	sinceUnix := int64(0)
+	if strings.TrimSpace(since) != "" {
+		parsedSince, _, err := parseSinceUnix(since)
+		if err != nil {
+			return nil, err
+		}
+		sinceUnix = parsedSince
 	}
 
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
 const seen = {};
-const searchTerm = '%s';
+const searchTerms = %s;
 const maxResults = %d;
 const requestedMailbox = '%s';
+const sinceDate = new Date(%d);
 %s
 
 function addMessage(msg, accName, mboxName) {
 	if (result.length >= maxResults) return;
 	try { if (msg.deletedStatus()) return; } catch(e) {}
 	try {
+		const received = msg.dateReceived();
+		if (sinceDate.getTime() > 0 && (!received || received < sinceDate)) return;
+		const subject = (msg.subject() || '').toLowerCase();
+		const sender = (msg.sender() || '').toLowerCase();
+		const haystack = subject + ' ' + sender;
+		if (!searchTerms.every(term => haystack.includes(term))) return;
 		const id = String(msg.id());
 		if (seen[id]) return;
 		seen[id] = true;
@@ -313,13 +451,15 @@ try {
 	const mbox = %s;
 	const accName = acc.name();
 	const mboxName = mbox.name();
-	try {
-		addMatches(mbox.messages.whose({subject: {_contains: searchTerm}})(), accName, mboxName);
-	} catch(e) {}
-	if (result.length < maxResults) {
+	for (let t = 0; t < searchTerms.length && result.length < maxResults; t++) {
 		try {
-			addMatches(mbox.messages.whose({sender: {_contains: searchTerm}})(), accName, mboxName);
+			addMatches(mbox.messages.whose({subject: {_contains: searchTerms[t]}})(), accName, mboxName);
 		} catch(e) {}
+		if (result.length < maxResults) {
+			try {
+				addMatches(mbox.messages.whose({sender: {_contains: searchTerms[t]}})(), accName, mboxName);
+			} catch(e) {}
+		}
 	}
 	result.sort((a, b) => b.dateReceived.localeCompare(a.dateReceived));
 } catch (e) {
@@ -327,7 +467,7 @@ try {
 }
 
 JSON.stringify(result.slice(0, maxResults));
-`, escapeJSString(query), limit, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+`, string(termsJSON), limit, escapeJSString(mailboxName), sinceUnix*1000, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
