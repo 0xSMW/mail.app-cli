@@ -143,6 +143,19 @@ func TestEscapeSQLLikePattern(t *testing.T) {
 	}
 }
 
+func TestSearchTermsTokenizeQuotedMultiWordQuery(t *testing.T) {
+	got := searchTerms(`"Guest post services" guest`)
+	want := []string{"guest", "post", "services"}
+	if len(got) != len(want) {
+		t.Fatalf("searchTerms = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("searchTerms = %v, want %v", got, want)
+		}
+	}
+}
+
 func TestIndexMailboxMembershipCondition(t *testing.T) {
 	regular := indexMailbox{ID: 42, Name: "INBOX"}
 	got := indexMailboxMembershipCondition(&regular)
@@ -162,34 +175,55 @@ func TestIndexMailboxMembershipCondition(t *testing.T) {
 	}
 }
 
-func TestDefaultSearchTargetsPreferAllMailForScopedAccount(t *testing.T) {
+func TestDefaultSearchTargetsPreferAccountCorpusForScopedAccount(t *testing.T) {
 	mailboxes := []Mailbox{
-		{Name: "INBOX", Account: "Klu.ai"},
-		{Name: "All Mail", Account: "Klu.ai"},
-		{Name: "INBOX", Account: "iCloud"},
+		{Name: "INBOX", Account: "Klu.ai", TotalCount: 10},
+		{Name: "All Mail", Account: "Klu.ai", TotalCount: 100},
+		{Name: "Spam", Account: "Klu.ai", TotalCount: 5},
+		{Name: "Trash", Account: "Klu.ai", TotalCount: 3},
+		{Name: "Newsletter", Account: "Klu.ai", TotalCount: 7},
+		{Name: "Empty", Account: "Klu.ai", TotalCount: 0},
+		{Name: "INBOX", Account: "iCloud", TotalCount: 20},
 	}
 
 	targets := defaultSearchTargetsFromMailboxes(mailboxes, "Klu.ai", nil)
-	if len(targets) != 1 {
-		t.Fatalf("targets = %v, want one target", targets)
+	want := []searchTarget{
+		{AccountName: "Klu.ai", MailboxName: "All Mail"},
+		{AccountName: "Klu.ai", MailboxName: "Spam"},
+		{AccountName: "Klu.ai", MailboxName: "Trash"},
+		{AccountName: "Klu.ai", MailboxName: "Newsletter"},
 	}
-	if targets[0] != (searchTarget{AccountName: "Klu.ai", MailboxName: "All Mail"}) {
-		t.Fatalf("target = %+v, want Klu.ai All Mail", targets[0])
+	if len(targets) != len(want) {
+		t.Fatalf("targets = %v, want %v", targets, want)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Fatalf("targets = %v, want %v", targets, want)
+		}
 	}
 }
 
 func TestDefaultSearchTargetsUseArchiveAliasForScopedAccount(t *testing.T) {
 	mailboxes := []Mailbox{
-		{Name: "INBOX", Account: "Work"},
-		{Name: "Archive", Account: "Work"},
+		{Name: "INBOX", Account: "Work", TotalCount: 10},
+		{Name: "Archive", Account: "Work", TotalCount: 50},
+		{Name: "Junk", Account: "Work", TotalCount: 4},
+		{Name: "Clients", Account: "Work", TotalCount: 8},
 	}
 
 	targets := defaultSearchTargetsFromMailboxes(mailboxes, "Work", nil)
-	if len(targets) != 1 {
-		t.Fatalf("targets = %v, want one target", targets)
+	want := []searchTarget{
+		{AccountName: "Work", MailboxName: "Archive"},
+		{AccountName: "Work", MailboxName: "Junk"},
+		{AccountName: "Work", MailboxName: "Clients"},
 	}
-	if targets[0] != (searchTarget{AccountName: "Work", MailboxName: "Archive"}) {
-		t.Fatalf("target = %+v, want Work Archive", targets[0])
+	if len(targets) != len(want) {
+		t.Fatalf("targets = %v, want %v", targets, want)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Fatalf("targets = %v, want %v", targets, want)
+		}
 	}
 }
 

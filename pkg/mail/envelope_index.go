@@ -184,7 +184,7 @@ limit 1;
 		}
 		return nil, false, err
 	}
-	if len(rows) == 0 && isArchiveAlias(mailboxName) {
+	if len(rows) == 0 {
 		query = fmt.Sprintf(`
 select
 	ROWID as ID,
@@ -193,9 +193,9 @@ select
 	unread_count as UnreadCount
 from mailboxes
 where url like %s
-order by case when url like %s then 0 else 1 end, ROWID
+order by case when url = %s then 0 else 1 end, ROWID
 limit 1;
-`, sqlQuote("imap://"+account.ID+"/%[Gmail]%/All%Mail"), sqlQuote("%/%5BGmail%5D/All%20Mail"))
+`, sqlQuote("imap://"+account.ID+"/%/"+escapedMailboxLeaf(mailboxName)), sqlQuote(indexMailboxURLPattern(account.ID, mailboxName)))
 		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 			if isEnvelopeIndexUnavailable(err) {
 				c.warnEnvelopeIndexFallback(err)
@@ -219,6 +219,16 @@ limit 1;
 		mbox.Name = "All Mail"
 	}
 	return mbox, true, nil
+}
+
+func escapedMailboxLeaf(mailboxName string) string {
+	escapedName := strings.ReplaceAll(mailboxName, " ", "%20")
+	escapedName = strings.ReplaceAll(escapedName, "[", "%5B")
+	escapedName = strings.ReplaceAll(escapedName, "]", "%5D")
+	if isArchiveAlias(mailboxName) {
+		return "All%20Mail"
+	}
+	return escapedName
 }
 
 func (c *Client) getMailboxesFromIndex(account Account) ([]Mailbox, bool, error) {
@@ -324,6 +334,7 @@ select
 from messages m
 join subjects s on s.ROWID = m.subject
 join addresses a on a.ROWID = m.sender
+left join summaries su on su.ROWID = m.summary
 join mailboxes mb on mb.ROWID = m.mailbox
 `, sqlQuote(mailboxName), sqlQuote(accountName))
 }
@@ -370,23 +381,38 @@ func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, li
 	return indexMessagesToMessages(rows), nil
 }
 
-func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *indexMailbox, limit int) ([]Message, error) {
+func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *indexMailbox, limit int, since string) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	needle := sqlQuote(escapeSQLLikePattern(strings.ToLower(queryText)))
+	terms := searchTerms(queryText)
+	if len(terms) == 0 {
+		return []Message{}, nil
+	}
+	sinceUnix, hasSince, err := parseSinceUnix(since)
+	if err != nil {
+		return nil, err
+	}
 	membership := indexMailboxMembershipCondition(mbox)
-	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
-where %s
-	and m.deleted = 0
-	and (
+	var where []string
+	where = append(where, membership, "m.deleted = 0")
+	if hasSince {
+		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
+	}
+	for _, term := range terms {
+		needle := sqlQuote(escapeSQLLikePattern(term))
+		where = append(where, fmt.Sprintf(`(
 		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
-	)
+		or lower(coalesce(su.summary, '')) like '%%' || %s || '%%' escape '\'
+	)`, needle, needle, needle, needle))
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
+where %s
 order by m.date_received desc
 limit %d;
-`, membership, needle, needle, needle, limit)
+`, strings.Join(where, "\n\tand "), limit)
 
 	var rows []indexMessage
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
