@@ -161,6 +161,17 @@ func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error
 		}
 	}
 
+	return defaultSearchTargetsFromMailboxes(mailboxes, accountName, enabledAccounts), nil
+}
+
+func defaultSearchTargetsFromMailboxes(mailboxes []Mailbox, accountName string, enabledAccounts map[string]bool) []searchTarget {
+	if accountName != "" {
+		if target, ok := accountScopedSearchTarget(mailboxes, accountName); ok {
+			return []searchTarget{target}
+		}
+		return []searchTarget{{AccountName: accountName, MailboxName: "INBOX"}}
+	}
+
 	seen := make(map[string]bool)
 	var targets []searchTarget
 	for _, mailbox := range mailboxes {
@@ -178,11 +189,21 @@ func (c *Client) defaultSearchTargets(accountName string) ([]searchTarget, error
 		targets = append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
 	}
 
-	if len(targets) == 0 && accountName != "" {
-		targets = append(targets, searchTarget{AccountName: accountName, MailboxName: "INBOX"})
-	}
+	return targets
+}
 
-	return targets, nil
+func accountScopedSearchTarget(mailboxes []Mailbox, accountName string) (searchTarget, bool) {
+	for _, preferred := range []string{"All Mail", "Archive", "INBOX"} {
+		for _, mailbox := range mailboxes {
+			if mailbox.Account != accountName || mailbox.Name == "" {
+				continue
+			}
+			if strings.EqualFold(mailbox.Name, preferred) {
+				return searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name}, true
+			}
+		}
+	}
+	return searchTarget{}, false
 }
 
 func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int) ([]Message, error) {

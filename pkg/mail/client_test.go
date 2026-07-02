@@ -162,6 +162,54 @@ func TestIndexMailboxMembershipCondition(t *testing.T) {
 	}
 }
 
+func TestDefaultSearchTargetsPreferAllMailForScopedAccount(t *testing.T) {
+	mailboxes := []Mailbox{
+		{Name: "INBOX", Account: "Klu.ai"},
+		{Name: "All Mail", Account: "Klu.ai"},
+		{Name: "INBOX", Account: "iCloud"},
+	}
+
+	targets := defaultSearchTargetsFromMailboxes(mailboxes, "Klu.ai", nil)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want one target", targets)
+	}
+	if targets[0] != (searchTarget{AccountName: "Klu.ai", MailboxName: "All Mail"}) {
+		t.Fatalf("target = %+v, want Klu.ai All Mail", targets[0])
+	}
+}
+
+func TestDefaultSearchTargetsUseArchiveAliasForScopedAccount(t *testing.T) {
+	mailboxes := []Mailbox{
+		{Name: "INBOX", Account: "Work"},
+		{Name: "Archive", Account: "Work"},
+	}
+
+	targets := defaultSearchTargetsFromMailboxes(mailboxes, "Work", nil)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want one target", targets)
+	}
+	if targets[0] != (searchTarget{AccountName: "Work", MailboxName: "Archive"}) {
+		t.Fatalf("target = %+v, want Work Archive", targets[0])
+	}
+}
+
+func TestDefaultSearchTargetsKeepInboxForGlobalSearch(t *testing.T) {
+	mailboxes := []Mailbox{
+		{Name: "INBOX", Account: "Klu.ai"},
+		{Name: "All Mail", Account: "Klu.ai"},
+		{Name: "INBOX", Account: "Disabled"},
+	}
+	enabledAccounts := map[string]bool{"Klu.ai": true, "Disabled": false}
+
+	targets := defaultSearchTargetsFromMailboxes(mailboxes, "", enabledAccounts)
+	if len(targets) != 1 {
+		t.Fatalf("targets = %v, want one target", targets)
+	}
+	if targets[0] != (searchTarget{AccountName: "Klu.ai", MailboxName: "INBOX"}) {
+		t.Fatalf("target = %+v, want Klu.ai INBOX", targets[0])
+	}
+}
+
 func TestIsSpecialMailboxNameIncludesSentItems(t *testing.T) {
 	if !isSpecialMailboxName("sent", "Sent Items") {
 		t.Fatal("Sent Items should be treated as a sent mailbox")
