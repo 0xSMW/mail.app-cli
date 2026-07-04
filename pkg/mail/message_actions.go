@@ -99,76 +99,9 @@ func isMessageNotFoundError(err error) bool {
 }
 
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
-	script := fmt.Sprintf(`
-const mail = Application('Mail');
-const requestedMailbox = '%s';
-%s
-%s
-try {
-	const acc = mail.accounts.byName('%s');
-	const mbox = %s;
-	const msg = messageById(mbox, '%s');
-	if (msg === null) {
-		'Error: Message not found';
-	} else {
-		function findArchiveCandidates(mailboxes, candidates) {
-			for (let j = 0; j < mailboxes.length; j++) {
-				const name = mailboxes[j].name();
-				if (name === 'All Mail' || name === 'Archive') {
-					candidates.push({ name: name, mailbox: mailboxes[j] });
-				}
-				try {
-					const sub = mailboxes[j].mailboxes();
-					if (sub.length > 0) {
-						findArchiveCandidates(sub, candidates);
-					}
-				} catch(e) {}
-			}
-		}
+	script := archiveMessageScript(accountName, mailboxName, messageID)
 
-		const archiveCandidates = [];
-		findArchiveCandidates(acc.mailboxes(), archiveCandidates);
-		let archiveBox = null;
-		for (let i = 0; i < archiveCandidates.length; i++) {
-			if (archiveCandidates[i].name === 'All Mail') {
-				archiveBox = archiveCandidates[i].mailbox;
-				break;
-			}
-		}
-		if (!archiveBox) {
-			for (let i = 0; i < archiveCandidates.length; i++) {
-				if (archiveCandidates[i].name === 'Archive') {
-					archiveBox = archiveCandidates[i].mailbox;
-					break;
-				}
-			}
-		}
-		if (archiveBox) {
-			msg.mailbox = archiveBox;
-			let sourceName = '';
-			let archiveName = '';
-			try { sourceName = mbox.name(); } catch(e) {}
-			try { archiveName = archiveBox.name(); } catch(e) {}
-			if (sourceName === archiveName) {
-				'Success';
-			} else {
-				const remaining = messageById(mbox, '%s');
-				if (remaining === null) {
-					'Success';
-				} else {
-					'Error: Archive did not move message out of source mailbox';
-				}
-			}
-		} else {
-			'Error: Archive mailbox not found';
-		}
-	}
-} catch (e) {
-	'Error: ' + e;
-}
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
-
-	output, err := c.runJXA(script)
+	output, err := c.runAppleScript(script)
 	if err != nil {
 		return err
 	}
@@ -176,6 +109,40 @@ try {
 		return fmt.Errorf(output)
 	}
 	return nil
+}
+
+func archiveMessageScript(accountName, mailboxName, messageID string) string {
+	return fmt.Sprintf(`
+on findMailboxByName(mailboxList, targetName)
+	repeat with candidate in mailboxList
+		try
+			if name of candidate is targetName then return candidate
+			set childMailbox to my findMailboxByName(mailboxes of candidate, targetName)
+			if childMailbox is not missing value then return childMailbox
+		end try
+	end repeat
+	return missing value
+end findMailboxByName
+
+tell application "Mail"
+	set targetAccount to account "%s"
+	set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, "%s")
+	if sourceMailbox is missing value then error "Mailbox not found: %s"
+
+	set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "All Mail")
+	if archiveMailbox is missing value then set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "Archive")
+	if archiveMailbox is missing value then error "Archive mailbox not found"
+
+	if name of sourceMailbox is name of archiveMailbox then
+		return "Success"
+	end if
+
+	set targetId to "%s" as integer
+	set targetMessage to first message of sourceMailbox whose id is targetId
+	move targetMessage to archiveMailbox
+	return "Success"
+end tell
+`, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(messageID))
 }
 
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
