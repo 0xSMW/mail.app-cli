@@ -219,6 +219,12 @@ Preview a bulk archive:
 mail-app-cli messages batch archive -a "Gmail" -m "INBOX" --query "receipt" --dry-run
 ```
 
+Preview an exact sender/domain cleanup without shell-side `jq` filtering:
+
+```bash
+mail-app-cli messages batch delete -a "Gmail" -m "All Mail" --sender-domain "linkedin.com" --limit 500 --dry-run
+```
+
 Archive message IDs from stdin:
 
 ```bash
@@ -238,6 +244,24 @@ mail-app-cli messages batch mark -a "Gmail" -m "INBOX" --read=false 123 456
 mail-app-cli messages batch flag -a "Gmail" -m "INBOX" --flagged=false --stdin < ids.txt
 mail-app-cli messages batch delete -a "Gmail" -m "INBOX" --query "old alert" --dry-run
 ```
+
+Run a larger cleanup with chunk progress, read-before-mutate, postcondition checks, and a reusable JSON report:
+
+```bash
+mail-app-cli messages batch delete \
+  -a "Gmail" \
+  -m "All Mail" \
+  --sender-domain "linkedin.com" \
+  --limit 500 \
+  --chunk-size 50 \
+  --progress \
+  --mark-read \
+  --verify \
+  --report-file ./linkedin-cleanup.json \
+  --yes
+```
+
+Before 1.2.0, complex sweeps usually needed separate `search`, `jq`, shell loops, manual chunking, and repeated `messages list` verification. In 1.2.0, the CLI can select exact senders/domains, accept `search --no-cache` for script compatibility, emit batch progress, write a full result report, mark messages read before archive/delete/move, and include structured verification status in batch output.
 
 ### Export and Validation
 

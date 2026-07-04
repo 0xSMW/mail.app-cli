@@ -8,10 +8,13 @@ import (
 )
 
 var (
-	searchLimit   int
-	searchAccount string
-	searchMailbox string
-	searchSince   string
+	searchLimit        int
+	searchAccount      string
+	searchMailbox      string
+	searchSince        string
+	searchSender       string
+	searchSenderDomain string
+	searchNoCache      bool
 )
 
 var searchCmd = &cobra.Command{
@@ -24,12 +27,16 @@ Use --mailbox with --account to narrow the search to a specific mailbox.
 Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query" | jq '.[] | select(.read==false)'`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if searchMailbox != "" && searchAccount == "" {
+			return fmt.Errorf("--mailbox requires --account")
+		}
 		query := args[0]
 		client := mail.NewClient()
 		messages, err := client.SearchMessagesJSONSince(query, searchAccount, searchMailbox, searchLimit, searchSince)
 		if err != nil {
 			return fmt.Errorf("failed to search messages: %w", err)
 		}
+		messages = filterMessagesBySender(messages, searchSender, searchSenderDomain)
 
 		return printJSON(messages, "search results")
 	},
@@ -40,4 +47,7 @@ func init() {
 	searchCmd.Flags().StringVarP(&searchAccount, "account", "a", "", "Limit search to specific account (optional)")
 	searchCmd.Flags().StringVarP(&searchMailbox, "mailbox", "m", "", "Limit search to specific mailbox (optional, requires --account)")
 	searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
+	searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only return messages from this exact sender/email")
+	searchCmd.Flags().StringVar(&searchSenderDomain, "sender-domain", "", "Only return messages from this sender domain")
+	searchCmd.Flags().BoolVar(&searchNoCache, "no-cache", false, "Accepted for compatibility; search results are not cached")
 }
