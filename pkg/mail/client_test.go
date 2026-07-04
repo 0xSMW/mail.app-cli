@@ -59,6 +59,36 @@ func TestArchiveAliasHelpers(t *testing.T) {
 	}
 }
 
+func TestArchiveMessageScriptMovesThenVerifiesSourceMailbox(t *testing.T) {
+	script := archiveMessageScript("Work", "INBOX", "12345")
+	for _, want := range []string{
+		"on findMailboxByName(mailboxList, targetName)",
+		"set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, \"INBOX\")",
+		"set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, \"All Mail\")",
+		"set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, \"Archive\")",
+		"set targetId to \"12345\" as integer",
+		"set targetMessage to first message of sourceMailbox whose id is targetId",
+		"move targetMessage to archiveMailbox",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("archiveMessageScript missing %q", want)
+		}
+	}
+}
+
+func TestArchiveMessageScriptEscapesInputs(t *testing.T) {
+	script := archiveMessageScript(`Bob "Gmail"`, `Inbox "Primary"`, "12345")
+	for _, want := range []string{
+		`set targetAccount to account "Bob \"Gmail\""`,
+		`set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, "Inbox \"Primary\"")`,
+		`Mailbox not found: Inbox \"Primary\"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("archiveMessageScript missing escaped value %q", want)
+		}
+	}
+}
+
 func TestDeleteFallbackMailboxes(t *testing.T) {
 	if got := deleteFallbackMailboxes("Newsletter"); len(got) != 2 || got[0] != "All Mail" || got[1] != "Archive" {
 		t.Fatalf("deleteFallbackMailboxes(Newsletter) = %v", got)
