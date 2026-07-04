@@ -41,6 +41,52 @@ func TestUniqueStringsPreservesOrder(t *testing.T) {
 	}
 }
 
+func TestNormalizeSenderExtractsEmailAndDomain(t *testing.T) {
+	got := normalizeSender(`Cursor Bot <cursor[bot]@users.noreply.github.com>`)
+	if got.Email != "cursor[bot]@users.noreply.github.com" {
+		t.Fatalf("Email = %q", got.Email)
+	}
+	if got.Domain != "users.noreply.github.com" {
+		t.Fatalf("Domain = %q", got.Domain)
+	}
+}
+
+func TestFilterMessagesBySender(t *testing.T) {
+	messages := []mail.Message{
+		{ID: "1", Sender: "LinkedIn <jobs-noreply@linkedin.com>"},
+		{ID: "2", Sender: "Nextdoor <news@rs.email.nextdoor.com>"},
+		{ID: "3", Sender: "plain@example.com"},
+	}
+	got := filterMessagesBySender(messages, "", "linkedin.com")
+	if len(got) != 1 || got[0].ID != "1" {
+		t.Fatalf("domain filter = %+v", got)
+	}
+	got = filterMessagesBySender(messages, "", "nextdoor.com")
+	if len(got) != 1 || got[0].ID != "2" {
+		t.Fatalf("subdomain filter = %+v", got)
+	}
+	got = filterMessagesBySender(messages, "plain@example.com", "")
+	if len(got) != 1 || got[0].ID != "3" {
+		t.Fatalf("sender filter = %+v", got)
+	}
+	got = filterMessagesBySender(messages, "jobs-noreply@linkedin.com", "linkedin.com")
+	if len(got) != 1 || got[0].ID != "1" {
+		t.Fatalf("combined filter = %+v", got)
+	}
+}
+
+func TestNormalizedBatchChunkSize(t *testing.T) {
+	if got := normalizedBatchChunkSize(12, 5); got != 5 {
+		t.Fatalf("chunk size = %d, want 5", got)
+	}
+	if got := normalizedBatchChunkSize(12, 0); got != 12 {
+		t.Fatalf("default chunk size = %d, want 12", got)
+	}
+	if got := normalizedBatchChunkSize(3, 10); got != 3 {
+		t.Fatalf("large chunk size = %d, want 3", got)
+	}
+}
+
 func TestNormalizeThreadSubject(t *testing.T) {
 	tests := map[string]string{
 		"Re: Invoice":       "invoice",
