@@ -8,6 +8,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 
 - See accounts, mailboxes, and unread counts
 - List, read, search, and filter messages
+- Reopen recently handled messages for fast follow-up questions
 - Archive, move, delete, flag, and mark mail
 - Batch message actions with dry-run safety
 - Create, edit, send, and delete drafts
@@ -17,6 +18,7 @@ A command-line interface for controlling macOS Mail.app. Provides complete scrip
 - Manage rules and explore smart mailboxes and threads
 - Browse signatures and VIP mail
 - Read Gmail Archive and All Mail reliably
+- Diagnose local Mail Envelope Index access
 - Output scriptable JSON for every workflow
 
 ## Quick Install
@@ -189,6 +191,52 @@ Search with limit:
 
 ```bash
 mail-app-cli search "project update" --limit 20
+```
+
+Search uses Mail's local Envelope Index for fast all-mailbox results. If
+Envelope Index access is blocked by macOS privacy settings, `search` can fall
+back to matching recently handled message metadata and prior matching query
+terms; otherwise, grant Full Disk Access to the app launching `mail-app-cli`, or
+use `--account` and `--mailbox` for a bounded Mail.app automation fallback.
+
+Force live search and bypass the recent-message shortcut:
+
+```bash
+mail-app-cli search "project update" --no-cache
+```
+
+### Recent Messages
+
+After `search`, `messages show`, `messages archive`, or `messages move`, the CLI
+records local recent-message metadata so follow-up questions can avoid
+rediscovering the same email through a broad mailbox search. The recent journal
+stores envelope metadata and prior matching query terms, not message bodies.
+
+Search recently handled messages:
+
+```bash
+mail-app-cli recent search "project update"
+```
+
+Show full details for a recently handled message by ID or query:
+
+```bash
+mail-app-cli recent show "project update"
+```
+
+Clear the recent-message journal:
+
+```bash
+mail-app-cli recent clear
+```
+
+### Doctor
+
+Check whether the current terminal or automation runner can read Mail's Envelope
+Index:
+
+```bash
+mail-app-cli doctor
 ```
 
 ### Attachments
@@ -477,11 +525,13 @@ mail-app-cli/
 │   ├── root.go
 │   ├── accounts.go
 │   ├── batch.go
+│   ├── doctor.go
 │   ├── drafts.go
 │   ├── export.go
 │   ├── import.go
 │   ├── mailboxes.go
 │   ├── messages.go
+│   ├── recent.go
 │   ├── rules.go
 │   ├── send.go
 │   ├── search.go
@@ -504,6 +554,7 @@ mail-app-cli/
 │       ├── message_content.go
 │       ├── messages.go
 │       ├── models.go
+│       ├── recent.go
 │       ├── rules.go
 │       ├── search.go
 │       ├── send.go

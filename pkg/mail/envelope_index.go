@@ -109,7 +109,7 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 		if reason == "" {
 			reason = "unknown error"
 		}
-		fmt.Fprintf(os.Stderr, "mail-app-cli: Mail Envelope Index is unavailable (%s). Falling back to Mail.app automation, which may be much slower. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.\n", reason)
+		fmt.Fprintf(os.Stderr, "mail-app-cli: Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.\n", reason)
 	})
 }
 
@@ -137,6 +137,13 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 		return fmt.Errorf("failed to parse envelope index JSON: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) CheckEnvelopeIndex() error {
+	var rows []struct {
+		OK int `json:"ok"`
+	}
+	return c.runEnvelopeIndexQuery("select 1 as ok;", &rows)
 }
 
 func indexMailboxURLPattern(accountID, mailboxName string) string {
@@ -379,6 +386,29 @@ func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, li
 		return nil, err
 	}
 	return indexMessagesToMessages(rows), nil
+}
+
+func (c *Client) getMessageEnvelopeFromIndex(accountName string, mbox *indexMailbox, messageID string) (*Message, error) {
+	id, err := strconv.ParseInt(strings.TrimSpace(messageID), 10, 64)
+	if err != nil {
+		return nil, nil
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
+where %s
+	and m.deleted = 0
+	and m.ROWID = %d
+limit 1;
+`, indexMailboxMembershipCondition(mbox), id)
+
+	var rows []indexMessage
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return nil, err
+	}
+	messages := indexMessagesToMessages(rows)
+	if len(messages) == 0 {
+		return nil, nil
+	}
+	return &messages[0], nil
 }
 
 func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *indexMailbox, limit int, since string) ([]Message, error) {

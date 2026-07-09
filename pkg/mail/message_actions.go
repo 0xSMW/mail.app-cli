@@ -99,16 +99,21 @@ func isMessageNotFoundError(err error) bool {
 }
 
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
+	_, err := c.ArchiveMessageWithDestination(accountName, mailboxName, messageID)
+	return err
+}
+
+func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, messageID string) (string, error) {
 	script := archiveMessageScript(accountName, mailboxName, messageID)
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return "", fmt.Errorf(output)
 	}
-	return nil
+	return strings.TrimSpace(output), nil
 }
 
 func archiveMessageScript(accountName, mailboxName, messageID string) string {
@@ -134,13 +139,13 @@ tell application "Mail"
 	if archiveMailbox is missing value then error "Archive mailbox not found"
 
 	if name of sourceMailbox is name of archiveMailbox then
-		return "Success"
+		return name of archiveMailbox
 	end if
 
 	set targetId to "%s" as integer
 	set targetMessage to first message of sourceMailbox whose id is targetId
 	move targetMessage to archiveMailbox
-	return "Success"
+	return name of archiveMailbox
 end tell
 `, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(messageID))
 }

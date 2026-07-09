@@ -12,7 +12,7 @@ var rootCmd = &cobra.Command{
 	Short: "Mail.app CLI - Command line interface for macOS Mail.app",
 	Long: `A command line tool for interacting with macOS Mail.app.
 Manage accounts, mailboxes, messages, and more from your terminal.`,
-	Version: "1.2.0",
+	Version: "1.2.1",
 }
 
 func Execute() {
@@ -37,4 +37,6 @@ func init() {
 	rootCmd.AddCommand(smartCmd)
 	rootCmd.AddCommand(threadsCmd)
 	rootCmd.AddCommand(signaturesCmd)
+	rootCmd.AddCommand(recentCmd)
+	rootCmd.AddCommand(doctorCmd)
 }

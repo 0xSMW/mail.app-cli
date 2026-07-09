@@ -69,6 +69,7 @@ func TestArchiveMessageScriptMovesThenVerifiesSourceMailbox(t *testing.T) {
 		"set targetId to \"12345\" as integer",
 		"set targetMessage to first message of sourceMailbox whose id is targetId",
 		"move targetMessage to archiveMailbox",
+		"return name of archiveMailbox",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("archiveMessageScript missing %q", want)
@@ -257,20 +258,120 @@ func TestDefaultSearchTargetsUseArchiveAliasForScopedAccount(t *testing.T) {
 	}
 }
 
-func TestDefaultSearchTargetsKeepInboxForGlobalSearch(t *testing.T) {
+func TestDefaultSearchTargetsUseCorpusForGlobalSearch(t *testing.T) {
 	mailboxes := []Mailbox{
-		{Name: "INBOX", Account: "Klu.ai"},
-		{Name: "All Mail", Account: "Klu.ai"},
+		{Name: "INBOX", Account: "Klu.ai", TotalCount: 10},
+		{Name: "All Mail", Account: "Klu.ai", TotalCount: 100},
+		{Name: "Junk", Account: "Klu.ai", TotalCount: 3},
+		{Name: "INBOX", Account: "iCloud", TotalCount: 8},
+		{Name: "Archive", Account: "iCloud", TotalCount: 40},
 		{Name: "INBOX", Account: "Disabled"},
 	}
-	enabledAccounts := map[string]bool{"Klu.ai": true, "Disabled": false}
+	enabledAccounts := map[string]bool{"Klu.ai": true, "iCloud": true, "Disabled": false}
 
 	targets := defaultSearchTargetsFromMailboxes(mailboxes, "", enabledAccounts)
-	if len(targets) != 1 {
-		t.Fatalf("targets = %v, want one target", targets)
+	want := []searchTarget{
+		{AccountName: "Klu.ai", MailboxName: "All Mail"},
+		{AccountName: "Klu.ai", MailboxName: "Junk"},
+		{AccountName: "Klu.ai", MailboxName: "INBOX"},
+		{AccountName: "iCloud", MailboxName: "Archive"},
+		{AccountName: "iCloud", MailboxName: "INBOX"},
 	}
-	if targets[0] != (searchTarget{AccountName: "Klu.ai", MailboxName: "INBOX"}) {
-		t.Fatalf("target = %+v, want Klu.ai INBOX", targets[0])
+	if len(targets) != len(want) {
+		t.Fatalf("targets = %v, want %v", targets, want)
+	}
+	for i := range want {
+		if targets[i] != want[i] {
+			t.Fatalf("targets = %v, want %v", targets, want)
+		}
+	}
+}
+
+func TestRecentMessagesSearchAndLocationUpdate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	message := Message{
+		ID:           "12345",
+		Account:      "iCloud",
+		Mailbox:      "INBOX",
+		Subject:      "Fwd: Total Loss Paperwork TL13 - Claim 061724050-01",
+		Sender:       "Sonja Walker <sonja@example.com>",
+		DateReceived: "2026-07-09T12:00:00Z",
+		DateSent:     "2026-07-09T12:00:00Z",
+		Read:         true,
+		Flagged:      true,
+		MessageSize:  2048,
+		Content:      "Hello Sonja Walker, as your Liberty Mutual Claims Representative...",
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+	if matches, err := SearchRecentMessages("Sonja Liberty Mutual", "", "", 10, ""); err != nil {
+		t.Fatalf("SearchRecentMessages before query terms returned error: %v", err)
+	} else if len(matches) != 0 {
+		t.Fatalf("matches before query terms = %v, want none from body-only text", matches)
+	}
+	if err := RecordRecentSearchResults([]Message{message}, "Sonja Liberty Mutual"); err != nil {
+		t.Fatalf("RecordRecentSearchResults returned error: %v", err)
+	}
+	if err := UpdateRecentMessageLocation("iCloud", "12345", "Archive", "archive"); err != nil {
+		t.Fatalf("UpdateRecentMessageLocation returned error: %v", err)
+	}
+	if err := RecordRecentMessage(Message{ID: "12345", Account: "iCloud", Mailbox: "Archive"}, "archive"); err != nil {
+		t.Fatalf("RecordRecentMessage minimal update returned error: %v", err)
+	}
+
+	matches, err := SearchRecentMessages("Sonja Liberty Mutual", "", "", 10, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("matches = %v, want one match", matches)
+	}
+	if matches[0].Mailbox != "Archive" {
+		t.Fatalf("match mailbox = %q, want Archive", matches[0].Mailbox)
+	}
+	if !matches[0].Read || !matches[0].Flagged || matches[0].MessageSize != 2048 {
+		t.Fatalf("match envelope flags/size = read:%v flagged:%v size:%d, want preserved", matches[0].Read, matches[0].Flagged, matches[0].MessageSize)
+	}
+
+	resolved, err := ResolveRecentMessage("Sonja Liberty Mutual", "", "")
+	if err != nil {
+		t.Fatalf("ResolveRecentMessage returned error: %v", err)
+	}
+	if resolved.ID != "12345" {
+		t.Fatalf("resolved ID = %q, want 12345", resolved.ID)
+	}
+}
+
+func TestRecentMessagesPreserveSearchTermsAcrossSkeletalUpdate(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	message := Message{
+		ID:      "abc",
+		Account: "iCloud",
+		Mailbox: "INBOX",
+		Subject: "Total Loss Paperwork",
+		Sender:  "Sonja Walker <sonja@example.com>",
+	}
+	if err := RecordRecentSearchResults([]Message{message}, "Sonja Liberty Mutual"); err != nil {
+		t.Fatalf("RecordRecentSearchResults returned error: %v", err)
+	}
+	if err := RecordRecentMessage(Message{ID: "abc", Account: "iCloud", Mailbox: "Archive"}, "archive"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+	matches, err := SearchRecentMessages("Sonja Liberty Mutual", "", "", 10, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("matches = %v, want one match", matches)
+	}
+	if matches[0].Subject != "Total Loss Paperwork" {
+		t.Fatalf("subject = %q, want preserved subject", matches[0].Subject)
+	}
+	if matches[0].Mailbox != "Archive" {
+		t.Fatalf("mailbox = %q, want Archive", matches[0].Mailbox)
 	}
 }
 

@@ -328,6 +328,9 @@ JSON.stringify(result);
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(output) == "null" {
+		return nil, nil
+	}
 
 	var message Message
 	if err := json.Unmarshal([]byte(output), &message); err != nil {
