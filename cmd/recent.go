@@ -64,7 +64,7 @@ func getRecentMessageDetails(client *mail.Client, entry *mail.RecentMessage) (*m
 	var lastErr error
 	for _, mailbox := range candidates {
 		message, err := client.GetMessageDetailsJSON(entry.Account, mailbox, entry.ID)
-		if err == nil && message != nil {
+		if err == nil && message != nil && message.ID == entry.ID {
 			_ = mail.UpdateRecentMessageLocation(entry.Account, entry.ID, mailbox, "recent-show")
 			return message, nil
 		}

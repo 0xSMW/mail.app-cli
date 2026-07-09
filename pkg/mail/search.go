@@ -215,6 +215,14 @@ func defaultSearchTargetsFromMailboxes(mailboxes []Mailbox, accountName string, 
 	var targets []searchTarget
 	seen := make(map[string]bool)
 	accounts := make(map[string]bool)
+	addTarget := func(target searchTarget) {
+		key := target.AccountName + "\x00" + strings.ToLower(target.MailboxName)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		targets = append(targets, target)
+	}
 	for _, mailbox := range mailboxes {
 		if mailbox.Account == "" || accounts[mailbox.Account] {
 			continue
@@ -224,12 +232,13 @@ func defaultSearchTargetsFromMailboxes(mailboxes []Mailbox, accountName string, 
 		}
 		accounts[mailbox.Account] = true
 		for _, target := range accountScopedSearchTargets(mailboxes, mailbox.Account) {
-			key := target.AccountName + "\x00" + strings.ToLower(target.MailboxName)
-			if seen[key] {
-				continue
+			addTarget(target)
+		}
+		for _, inbox := range mailboxes {
+			if inbox.Account == mailbox.Account && strings.EqualFold(inbox.Name, "INBOX") {
+				addTarget(searchTarget{AccountName: inbox.Account, MailboxName: inbox.Name})
+				break
 			}
-			seen[key] = true
-			targets = append(targets, target)
 		}
 	}
 

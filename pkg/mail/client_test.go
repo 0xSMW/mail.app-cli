@@ -69,6 +69,7 @@ func TestArchiveMessageScriptMovesThenVerifiesSourceMailbox(t *testing.T) {
 		"set targetId to \"12345\" as integer",
 		"set targetMessage to first message of sourceMailbox whose id is targetId",
 		"move targetMessage to archiveMailbox",
+		"return name of archiveMailbox",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("archiveMessageScript missing %q", want)
@@ -272,7 +273,9 @@ func TestDefaultSearchTargetsUseCorpusForGlobalSearch(t *testing.T) {
 	want := []searchTarget{
 		{AccountName: "Klu.ai", MailboxName: "All Mail"},
 		{AccountName: "Klu.ai", MailboxName: "Junk"},
+		{AccountName: "Klu.ai", MailboxName: "INBOX"},
 		{AccountName: "iCloud", MailboxName: "Archive"},
+		{AccountName: "iCloud", MailboxName: "INBOX"},
 	}
 	if len(targets) != len(want) {
 		t.Fatalf("targets = %v, want %v", targets, want)
@@ -295,6 +298,9 @@ func TestRecentMessagesSearchAndLocationUpdate(t *testing.T) {
 		Sender:       "Sonja Walker <sonja@example.com>",
 		DateReceived: "2026-07-09T12:00:00Z",
 		DateSent:     "2026-07-09T12:00:00Z",
+		Read:         true,
+		Flagged:      true,
+		MessageSize:  2048,
 		Content:      "Hello Sonja Walker, as your Liberty Mutual Claims Representative...",
 	}
 	if err := RecordRecentMessage(message, "show"); err != nil {
@@ -324,6 +330,9 @@ func TestRecentMessagesSearchAndLocationUpdate(t *testing.T) {
 	}
 	if matches[0].Mailbox != "Archive" {
 		t.Fatalf("match mailbox = %q, want Archive", matches[0].Mailbox)
+	}
+	if !matches[0].Read || !matches[0].Flagged || matches[0].MessageSize != 2048 {
+		t.Fatalf("match envelope flags/size = read:%v flagged:%v size:%d, want preserved", matches[0].Read, matches[0].Flagged, matches[0].MessageSize)
 	}
 
 	resolved, err := ResolveRecentMessage("Sonja Liberty Mutual", "", "")
