@@ -122,6 +122,7 @@ var messagesShowCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to get message: %w", err)
 		}
+		_ = mail.RecordRecentMessage(*message, "show")
 
 		return printJSON(message, "message")
 	},
@@ -218,10 +219,12 @@ var messagesArchiveCmd = &cobra.Command{
 		}
 
 		client := mail.NewClient()
+		_ = client.RecordRecentEnvelope(msgAccount, msgMailbox, messageID, "archive")
 		err := client.ArchiveMessage(msgAccount, msgMailbox, messageID)
 		if err != nil {
 			return fmt.Errorf("failed to archive message: %w", err)
 		}
+		_ = mail.UpdateRecentMessageLocation(msgAccount, messageID, "Archive", "archive")
 		invalidateMailboxCache(msgAccount, msgMailbox)
 		// Also invalidate the archive mailbox (provider-dependent name)
 		invalidateMailboxCache(msgAccount, "Archive")
@@ -245,10 +248,12 @@ var messagesMoveCmd = &cobra.Command{
 		}
 
 		client := mail.NewClient()
+		_ = client.RecordRecentEnvelope(msgAccount, msgMailbox, messageID, "move")
 		err := client.MoveMessage(msgAccount, msgMailbox, messageID, targetMailbox)
 		if err != nil {
 			return fmt.Errorf("failed to move message: %w", err)
 		}
+		_ = mail.UpdateRecentMessageLocation(msgAccount, messageID, targetMailbox, "move")
 		invalidateMailboxCache(msgAccount, msgMailbox)
 		invalidateMailboxCache(msgAccount, targetMailbox)
 

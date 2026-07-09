@@ -3,9 +3,12 @@ package mail
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type searchTarget struct {
@@ -71,6 +74,13 @@ func (c *Client) SearchMessagesJSONSince(query string, accountName string, mailb
 	// Set a reasonable default limit if none specified
 	if limit == 0 {
 		limit = 50
+	}
+
+	if mailboxName == "" {
+		if err := c.CheckEnvelopeIndex(); err != nil && isEnvelopeIndexUnavailable(err) {
+			c.warnEnvelopeIndexFallback(err)
+			return nil, fmt.Errorf("fast search requires Mail Envelope Index access for archived/all-mailbox queries; grant Full Disk Access to the app launching mail-app-cli, or use --account and --mailbox for a bounded slow fallback")
+		}
 	}
 
 	// If specific mailbox requested, use a single mailbox search.
@@ -202,21 +212,25 @@ func defaultSearchTargetsFromMailboxes(mailboxes []Mailbox, accountName string, 
 		return []searchTarget{{AccountName: accountName, MailboxName: "INBOX"}}
 	}
 
-	seen := make(map[string]bool)
 	var targets []searchTarget
+	seen := make(map[string]bool)
+	accounts := make(map[string]bool)
 	for _, mailbox := range mailboxes {
-		if mailbox.Account == "" || mailbox.Name == "" || !strings.EqualFold(mailbox.Name, "INBOX") {
+		if mailbox.Account == "" || accounts[mailbox.Account] {
 			continue
 		}
 		if accountName == "" && !enabledAccounts[mailbox.Account] {
 			continue
 		}
-		key := mailbox.Account + "\x00" + mailbox.Name
-		if seen[key] {
-			continue
+		accounts[mailbox.Account] = true
+		for _, target := range accountScopedSearchTargets(mailboxes, mailbox.Account) {
+			key := target.AccountName + "\x00" + strings.ToLower(target.MailboxName)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			targets = append(targets, target)
 		}
-		seen[key] = true
-		targets = append(targets, searchTarget{AccountName: mailbox.Account, MailboxName: mailbox.Name})
 	}
 
 	return targets
@@ -364,7 +378,7 @@ try {
 JSON.stringify(result);
 `, string(termsJSON), limit, maxToCheck, escapedMailbox, sinceUnix*1000, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
 
-	output, err := c.runJXA(script)
+	output, err := c.runJXAWithTimeout(script, mailSearchTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -469,7 +483,7 @@ try {
 JSON.stringify(result.slice(0, maxResults));
 `, string(termsJSON), limit, escapeJSString(mailboxName), sinceUnix*1000, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 
-	output, err := c.runJXA(script)
+	output, err := c.runJXAWithTimeout(script, mailSearchTimeout())
 	if err != nil {
 		return nil, err
 	}
@@ -480,4 +494,16 @@ JSON.stringify(result.slice(0, maxResults));
 	}
 
 	return messages, nil
+}
+
+func mailSearchTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("MAIL_APP_CLI_SEARCH_TIMEOUT"))
+	if raw == "" {
+		return 8 * time.Second
+	}
+	seconds, err := strconv.Atoi(raw)
+	if err != nil || seconds <= 0 {
+		return 8 * time.Second
+	}
+	return time.Duration(seconds) * time.Second
 }

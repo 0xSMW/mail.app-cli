@@ -34,9 +34,19 @@ Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query
 		client := mail.NewClient()
 		messages, err := client.SearchMessagesJSONSince(query, searchAccount, searchMailbox, searchLimit, searchSince)
 		if err != nil {
+			if !searchNoCache {
+				recentMessages, recentErr := mail.SearchRecentMessages(query, searchAccount, searchMailbox, searchLimit, searchSince)
+				if recentErr == nil {
+					recentMessages = filterMessagesBySender(recentMessages, searchSender, searchSenderDomain)
+					if len(recentMessages) > 0 {
+						return printJSON(recentMessages, "recent search results")
+					}
+				}
+			}
 			return fmt.Errorf("failed to search messages: %w", err)
 		}
 		messages = filterMessagesBySender(messages, searchSender, searchSenderDomain)
+		_ = mail.RecordRecentSearchResults(messages, query)
 
 		return printJSON(messages, "search results")
 	},
