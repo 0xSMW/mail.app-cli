@@ -2,6 +2,7 @@ package mail
 
 import (
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -60,7 +61,15 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 }
 
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
-	return c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();")
+	if err := c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();"); err != nil {
+		return err
+	}
+	if err := RemoveRecentMessage(accountName, messageID); err != nil {
+		c.recentCleanupWarningOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "mail-app-cli: message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.\n", err)
+		})
+	}
+	return nil
 }
 
 func (c *Client) DeleteMessageResolved(accountName, mailboxName, messageID string) error {
