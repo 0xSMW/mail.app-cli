@@ -3,7 +3,11 @@ package mail
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -372,6 +376,230 @@ func TestRecentMessagesPreserveSearchTermsAcrossSkeletalUpdate(t *testing.T) {
 	}
 	if matches[0].Mailbox != "Archive" {
 		t.Fatalf("mailbox = %q, want Archive", matches[0].Mailbox)
+	}
+}
+
+func TestRecentMessagesRejectEmptyTokenizedQuery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	message := Message{
+		ID:      "12345",
+		Account: "iCloud",
+		Mailbox: "INBOX",
+		Subject: "Total Loss Paperwork",
+		Sender:  "Sonja Walker <sonja@example.com>",
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+
+	matches, err := SearchRecentMessages("!!!", "", "", 10, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %v, want none", matches)
+	}
+	resolved, err := ResolveRecentMessage("12345", "", "")
+	if err != nil {
+		t.Fatalf("ResolveRecentMessage exact ID returned error: %v", err)
+	}
+	if resolved.ID != "12345" {
+		t.Fatalf("resolved ID = %q, want 12345", resolved.ID)
+	}
+}
+
+func TestRecentMessagesSearchExcludesLocationMetadata(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	message := Message{
+		ID:      "8675309",
+		Account: "Gmail",
+		Mailbox: "INBOX",
+		Subject: "Total Loss Paperwork",
+		Sender:  "Sonja Walker <sonja@example.com>",
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+
+	for _, query := range []string{"8675309", "gmail", "inbox"} {
+		matches, err := SearchRecentMessages(query, "", "", 10, "")
+		if err != nil {
+			t.Fatalf("SearchRecentMessages(%q) returned error: %v", query, err)
+		}
+		if len(matches) != 0 {
+			t.Fatalf("SearchRecentMessages(%q) = %v, want none", query, matches)
+		}
+	}
+	resolved, err := ResolveRecentMessage("inbox", "", "")
+	if err != nil {
+		t.Fatalf("ResolveRecentMessage location selector returned error: %v", err)
+	}
+	if resolved.ID != "8675309" {
+		t.Fatalf("resolved ID = %q, want 8675309", resolved.ID)
+	}
+}
+
+func TestRemoveRecentMessageExcludesDeletedEntry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	message := Message{
+		ID:      "12345",
+		Account: "iCloud",
+		Mailbox: "Archive",
+		Subject: "Total Loss Paperwork",
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+	if err := RemoveRecentMessage("iCloud", "12345"); err != nil {
+		t.Fatalf("RemoveRecentMessage returned error: %v", err)
+	}
+
+	matches, err := SearchRecentMessages("total loss", "", "", 10, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %v, want none", matches)
+	}
+	if _, err := ResolveRecentMessage("12345", "", ""); err == nil {
+		t.Fatal("ResolveRecentMessage returned nil error for removed entry")
+	}
+}
+
+func TestRemoveRecentMessageSerializesConcurrentCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const messageCount = 20
+	for i := 0; i < messageCount; i++ {
+		message := Message{
+			ID:      fmt.Sprintf("message-%d", i),
+			Account: "iCloud",
+			Mailbox: "Archive",
+			Subject: "Total Loss Paperwork",
+		}
+		if err := RecordRecentMessage(message, "show"); err != nil {
+			t.Fatalf("RecordRecentMessage returned error: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, messageCount)
+	for i := 0; i < messageCount; i++ {
+		messageID := fmt.Sprintf("message-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- RemoveRecentMessage("iCloud", messageID)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("RemoveRecentMessage returned error: %v", err)
+		}
+	}
+
+	matches, err := SearchRecentMessages("total loss", "", "", messageCount, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %v, want none", matches)
+	}
+}
+
+func TestDeleteMessageRemovesRecentEntry(t *testing.T) {
+	home := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\nprintf Success\n"), 0755); err != nil {
+		t.Fatalf("write fake osascript: %v", err)
+	}
+	message := Message{
+		ID:      "12345",
+		Account: "iCloud",
+		Mailbox: "Archive",
+		Subject: "Total Loss Paperwork",
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+
+	if err := NewClient().DeleteMessage("iCloud", "Archive", "12345"); err != nil {
+		t.Fatalf("DeleteMessage returned error: %v", err)
+	}
+	if _, err := ResolveRecentMessage("12345", "", ""); err == nil {
+		t.Fatal("ResolveRecentMessage returned nil error after delete")
+	}
+}
+
+func TestDeleteMessageWarnsWhenRecentCleanupFails(t *testing.T) {
+	home := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", binDir)
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\nprintf Success\n"), 0755); err != nil {
+		t.Fatalf("write fake osascript: %v", err)
+	}
+	recentDir := filepath.Join(home, ".cache", "mail-app-cli")
+	if err := os.MkdirAll(recentDir, 0755); err != nil {
+		t.Fatalf("create recent directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(recentDir, recentMessagesFile), []byte("{"), recentMessagePermissions); err != nil {
+		t.Fatalf("write corrupt recent journal: %v", err)
+	}
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	originalStderr := os.Stderr
+	os.Stderr = writer
+	t.Cleanup(func() {
+		os.Stderr = originalStderr
+		_ = reader.Close()
+		_ = writer.Close()
+	})
+
+	if err := NewClient().DeleteMessage("iCloud", "Archive", "12345"); err != nil {
+		t.Fatalf("DeleteMessage returned error: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close stderr writer: %v", err)
+	}
+	os.Stderr = originalStderr
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if !strings.Contains(string(output), "message was deleted, but recent-message history could not be updated") {
+		t.Fatalf("stderr = %q, want recent cleanup warning", output)
+	}
+}
+
+func TestRecentMessagesExcludeEntriesMarkedDeleted(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	message := Message{
+		ID:      "12345",
+		Account: "iCloud",
+		Mailbox: "Archive",
+		Subject: "Total Loss Paperwork",
+		Deleted: true,
+	}
+	if err := RecordRecentMessage(message, "show"); err != nil {
+		t.Fatalf("RecordRecentMessage returned error: %v", err)
+	}
+
+	matches, err := SearchRecentMessages("total loss", "", "", 10, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %v, want none", matches)
+	}
+	if _, err := ResolveRecentMessage("12345", "", ""); err == nil {
+		t.Fatal("ResolveRecentMessage returned nil error for deleted entry")
 	}
 }
 

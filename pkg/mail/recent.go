@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,8 @@ const (
 	maxRecentMessages        = 250
 	recentMessagePermissions = 0600
 )
+
+var recentMessagesMu sync.Mutex
 
 type RecentMessage struct {
 	ID              string   `json:"id"`
@@ -78,6 +81,9 @@ func saveRecentMessages(messages []RecentMessage) error {
 }
 
 func ClearRecentMessages() error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	path, err := recentMessagesPath()
 	if err != nil {
 		return err
@@ -135,6 +141,9 @@ func recordRecentMessage(message Message, action string, terms []string) error {
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Account) == "" {
 		return nil
 	}
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	messages, err := loadRecentMessages()
 	if err != nil {
 		return err
@@ -276,6 +285,9 @@ JSON.stringify(result);
 }
 
 func UpdateRecentMessageLocation(account, messageID, mailbox, action string) error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	messages, err := loadRecentMessages()
 	if err != nil {
 		return err
@@ -301,7 +313,35 @@ func UpdateRecentMessageLocation(account, messageID, mailbox, action string) err
 	return nil
 }
 
+func RemoveRecentMessage(account, messageID string) error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
+	messages, err := loadRecentMessages()
+	if err != nil {
+		return err
+	}
+	key := recentMessageKey(account, messageID)
+	if key == "" {
+		return nil
+	}
+	remaining := messages[:0]
+	for _, message := range messages {
+		if recentMessageKey(message.Account, message.ID) != key {
+			remaining = append(remaining, message)
+		}
+	}
+	if len(remaining) == len(messages) {
+		return nil
+	}
+	return saveRecentMessages(remaining)
+}
+
 func SearchRecentMessages(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	return searchRecentMessages(query, accountName, mailboxName, limit, since, false)
+}
+
+func searchRecentMessages(query, accountName, mailboxName string, limit int, since string, includeLocation bool) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -310,12 +350,18 @@ func SearchRecentMessages(query, accountName, mailboxName string, limit int, sin
 		return nil, err
 	}
 	terms := searchTerms(query)
+	if len(terms) == 0 {
+		return []Message{}, nil
+	}
 	recent, err := loadRecentMessages()
 	if err != nil {
 		return nil, err
 	}
 	matches := make([]RecentMessage, 0, len(recent))
 	for _, entry := range recent {
+		if entry.Deleted {
+			continue
+		}
 		if accountName != "" && entry.Account != accountName {
 			continue
 		}
@@ -325,7 +371,7 @@ func SearchRecentMessages(query, accountName, mailboxName string, limit int, sin
 		if hasSince && !recentMessageSince(entry, sinceUnix) {
 			continue
 		}
-		if !recentMessageMatchesTerms(entry, terms) {
+		if !recentMessageMatchesTerms(entry, terms, includeLocation) {
 			continue
 		}
 		matches = append(matches, entry)
@@ -353,6 +399,9 @@ func ResolveRecentMessage(selector, accountName, mailboxName string) (*RecentMes
 		return nil, err
 	}
 	for _, entry := range recent {
+		if entry.Deleted {
+			continue
+		}
 		if accountName != "" && entry.Account != accountName {
 			continue
 		}
@@ -364,7 +413,7 @@ func ResolveRecentMessage(selector, accountName, mailboxName string) (*RecentMes
 			return &copy, nil
 		}
 	}
-	matches, err := SearchRecentMessages(selector, accountName, mailboxName, 1, "")
+	matches, err := searchRecentMessages(selector, accountName, mailboxName, 1, "", true)
 	if err != nil {
 		return nil, err
 	}
@@ -394,18 +443,12 @@ func recentMessageSince(entry RecentMessage, sinceUnix int64) bool {
 	return true
 }
 
-func recentMessageMatchesTerms(entry RecentMessage, terms []string) bool {
-	if len(terms) == 0 {
-		return true
+func recentMessageMatchesTerms(entry RecentMessage, terms []string, includeLocation bool) bool {
+	fields := []string{entry.Subject, entry.Sender, strings.Join(entry.SearchTerms, " ")}
+	if includeLocation {
+		fields = append(fields, entry.ID, entry.Account, entry.Mailbox)
 	}
-	haystack := strings.ToLower(strings.Join([]string{
-		entry.ID,
-		entry.Account,
-		entry.Mailbox,
-		entry.Subject,
-		entry.Sender,
-		strings.Join(entry.SearchTerms, " "),
-	}, " "))
+	haystack := strings.ToLower(strings.Join(fields, " "))
 	for _, term := range terms {
 		if !strings.Contains(haystack, term) {
 			return false

@@ -10,6 +10,7 @@ type Client struct {
 	accountsLoaded           bool
 	indexFallbackWarningOnce sync.Once
 	contentWarningOnce       sync.Once
+	recentCleanupWarningOnce sync.Once
 }
 
 func NewClient() *Client {
