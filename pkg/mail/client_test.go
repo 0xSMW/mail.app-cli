@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -462,6 +463,48 @@ func TestRemoveRecentMessageExcludesDeletedEntry(t *testing.T) {
 	}
 	if _, err := ResolveRecentMessage("12345", "", ""); err == nil {
 		t.Fatal("ResolveRecentMessage returned nil error for removed entry")
+	}
+}
+
+func TestRemoveRecentMessageSerializesConcurrentCleanup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	const messageCount = 20
+	for i := 0; i < messageCount; i++ {
+		message := Message{
+			ID:      fmt.Sprintf("message-%d", i),
+			Account: "iCloud",
+			Mailbox: "Archive",
+			Subject: "Total Loss Paperwork",
+		}
+		if err := RecordRecentMessage(message, "show"); err != nil {
+			t.Fatalf("RecordRecentMessage returned error: %v", err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, messageCount)
+	for i := 0; i < messageCount; i++ {
+		messageID := fmt.Sprintf("message-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- RemoveRecentMessage("iCloud", messageID)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("RemoveRecentMessage returned error: %v", err)
+		}
+	}
+
+	matches, err := SearchRecentMessages("total loss", "", "", messageCount, "")
+	if err != nil {
+		t.Fatalf("SearchRecentMessages returned error: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("matches = %v, want none", matches)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,8 @@ const (
 	maxRecentMessages        = 250
 	recentMessagePermissions = 0600
 )
+
+var recentMessagesMu sync.Mutex
 
 type RecentMessage struct {
 	ID              string   `json:"id"`
@@ -78,6 +81,9 @@ func saveRecentMessages(messages []RecentMessage) error {
 }
 
 func ClearRecentMessages() error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	path, err := recentMessagesPath()
 	if err != nil {
 		return err
@@ -135,6 +141,9 @@ func recordRecentMessage(message Message, action string, terms []string) error {
 	if strings.TrimSpace(message.ID) == "" || strings.TrimSpace(message.Account) == "" {
 		return nil
 	}
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	messages, err := loadRecentMessages()
 	if err != nil {
 		return err
@@ -276,6 +285,9 @@ JSON.stringify(result);
 }
 
 func UpdateRecentMessageLocation(account, messageID, mailbox, action string) error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	messages, err := loadRecentMessages()
 	if err != nil {
 		return err
@@ -302,6 +314,9 @@ func UpdateRecentMessageLocation(account, messageID, mailbox, action string) err
 }
 
 func RemoveRecentMessage(account, messageID string) error {
+	recentMessagesMu.Lock()
+	defer recentMessagesMu.Unlock()
+
 	messages, err := loadRecentMessages()
 	if err != nil {
 		return err
