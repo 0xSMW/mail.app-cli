@@ -16,6 +16,57 @@ type searchTarget struct {
 	MailboxName string
 }
 
+// SearchOptions controls the safety contract for searches that span multiple
+// mailboxes. A partial result is unsafe for workflows such as duplicate
+// detection, so callers must explicitly opt in before receiving one.
+type SearchOptions struct {
+	AllowPartial bool
+}
+
+// SearchMailbox identifies a mailbox included in a search attempt.
+type SearchMailbox struct {
+	Account string `json:"account"`
+	Mailbox string `json:"mailbox"`
+}
+
+// SearchMailboxFailure records a mailbox that could not be searched. Error is
+// diagnostic metadata rather than a machine-stable error code.
+type SearchMailboxFailure struct {
+	Account string `json:"account"`
+	Mailbox string `json:"mailbox"`
+	Error   string `json:"error"`
+}
+
+// SearchResult is the structured search contract. Complete is false whenever
+// at least one requested mailbox failed to return a result.
+type SearchResult struct {
+	Messages          []Message              `json:"messages"`
+	Complete          bool                   `json:"complete"`
+	SearchedMailboxes []SearchMailbox        `json:"searchedMailboxes"`
+	FailedMailboxes   []SearchMailboxFailure `json:"failedMailboxes"`
+}
+
+// PartialSearchError means one or more mailboxes were unavailable. Its Result
+// is populated so callers that deliberately opted in can inspect the precise
+// scope of the incomplete result.
+type PartialSearchError struct {
+	Result SearchResult
+}
+
+func (e *PartialSearchError) Error() string {
+	failed := make([]string, 0, len(e.Result.FailedMailboxes))
+	for _, mailbox := range e.Result.FailedMailboxes {
+		failed = append(failed, fmt.Sprintf("%s/%s: %s", mailbox.Account, mailbox.Mailbox, mailbox.Error))
+	}
+	return fmt.Sprintf("search incomplete; failed mailboxes: %s", strings.Join(failed, "; "))
+}
+
+type mailboxSearchResult struct {
+	target   searchTarget
+	messages []Message
+	err      error
+}
+
 var searchTermPattern = regexp.MustCompile(`[[:alnum:]]+`)
 
 func searchTerms(query string) []string {
@@ -71,6 +122,17 @@ func (c *Client) SearchMessagesJSON(query string, accountName string, mailboxNam
 }
 
 func (c *Client) SearchMessagesJSONSince(query string, accountName string, mailboxName string, limit int, since string) ([]Message, error) {
+	result, err := c.SearchMessagesJSONSinceWithOptions(query, accountName, mailboxName, limit, since, SearchOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return result.Messages, nil
+}
+
+// SearchMessagesJSONSinceWithOptions searches the requested mailbox scope and
+// records its completeness. Cross-mailbox searches fail closed unless
+// AllowPartial is set.
+func (c *Client) SearchMessagesJSONSinceWithOptions(query string, accountName string, mailboxName string, limit int, since string, options SearchOptions) (SearchResult, error) {
 	// Set a reasonable default limit if none specified
 	if limit == 0 {
 		limit = 50
@@ -79,91 +141,137 @@ func (c *Client) SearchMessagesJSONSince(query string, accountName string, mailb
 	if mailboxName == "" {
 		if err := c.CheckEnvelopeIndex(); err != nil && isEnvelopeIndexUnavailable(err) {
 			c.warnEnvelopeIndexFallback(err)
-			return nil, fmt.Errorf("fast search requires Mail Envelope Index access for archived/all-mailbox queries; grant Full Disk Access to the app launching mail-app-cli, or use --account and --mailbox for a bounded slow fallback")
+			return SearchResult{}, fmt.Errorf("fast search requires Mail Envelope Index access for archived/all-mailbox queries; grant Full Disk Access to the app launching mail-app-cli, or use --account and --mailbox for a bounded slow fallback")
 		}
 	}
 
 	// If specific mailbox requested, use a single mailbox search.
 	if mailboxName != "" {
+		target := searchTarget{AccountName: accountName, MailboxName: mailboxName}
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
-			return nil, err
+			return SearchResult{}, err
 		} else if ok {
 			messages, err := c.searchMessagesFromIndex(query, accountName, mbox, limit, since)
 			if err != nil {
 				if isEnvelopeIndexUnavailable(err) {
 					c.warnEnvelopeIndexFallback(err)
-					return c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit, since)
+					messages, err = c.searchMessagesInSingleMailboxJXA(query, accountName, mailboxName, limit, since)
+					if err != nil {
+						return SearchResult{}, err
+					}
+					return completeSearchResult(messages, []searchTarget{target}), nil
 				}
-				return nil, err
+				return SearchResult{}, err
 			}
-			return messages, nil
+			return completeSearchResult(messages, []searchTarget{target}), nil
 		}
-		return c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit, since)
+		messages, err := c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit, since)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		return completeSearchResult(messages, []searchTarget{target}), nil
 	}
 
 	targets, err := c.defaultSearchTargets(accountName)
 	if err != nil {
-		return nil, err
+		return SearchResult{}, err
 	}
 
 	if len(targets) == 0 {
-		return []Message{}, nil
+		return completeSearchResult([]Message{}, targets), nil
 	}
 
 	// If only one mailbox, no need for parallelization
 	if len(targets) == 1 {
 		target := targets[0]
-		return c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit, since)
+		messages, err := c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit, since)
+		if err != nil {
+			return SearchResult{}, err
+		}
+		return completeSearchResult(messages, targets), nil
 	}
 
 	// Search mailboxes in parallel
-	type result struct {
-		messages []Message
-		err      error
-	}
-	results := make(chan result, len(targets))
+	results := make(chan mailboxSearchResult, len(targets))
 
 	// Launch goroutine for each mailbox
 	runWithMailCommandLimit(targets, func(target searchTarget) {
 		messages, err := c.searchMessagesInSingleMailbox(query, target.AccountName, target.MailboxName, limit, since)
-		results <- result{messages: messages, err: err}
+		results <- mailboxSearchResult{target: target, messages: messages, err: err}
 	})
 
-	// Collect results
-	var allMessages []Message
-	seenMessages := make(map[string]bool)
-	var errors []error
+	collected := make([]mailboxSearchResult, 0, len(targets))
 	for i := 0; i < len(targets); i++ {
-		res := <-results
-		if res.err != nil {
-			errors = append(errors, res.err)
-		} else {
-			for _, message := range res.messages {
-				key := message.Account + "\x00" + message.ID
-				if seenMessages[key] {
-					continue
-				}
-				seenMessages[key] = true
-				allMessages = append(allMessages, message)
+		collected = append(collected, <-results)
+	}
+	result := collectSearchResults(targets, collected, limit)
+	return applySearchOptions(result, options)
+}
+
+func applySearchOptions(result SearchResult, options SearchOptions) (SearchResult, error) {
+	if !result.Complete && !options.AllowPartial {
+		return result, &PartialSearchError{Result: result}
+	}
+	return result, nil
+}
+
+func completeSearchResult(messages []Message, targets []searchTarget) SearchResult {
+	return SearchResult{
+		Messages:          messages,
+		Complete:          true,
+		SearchedMailboxes: searchMailboxes(targets),
+		FailedMailboxes:   []SearchMailboxFailure{},
+	}
+}
+
+func collectSearchResults(targets []searchTarget, results []mailboxSearchResult, limit int) SearchResult {
+	byTarget := make(map[searchTarget]mailboxSearchResult, len(results))
+	for _, result := range results {
+		byTarget[result.target] = result
+	}
+
+	allMessages := make([]Message, 0)
+	seenMessages := make(map[string]bool)
+	failed := make([]SearchMailboxFailure, 0)
+	for _, target := range targets {
+		result, ok := byTarget[target]
+		if !ok || result.err != nil {
+			errText := "search result was not returned"
+			if ok {
+				errText = result.err.Error()
 			}
+			failed = append(failed, SearchMailboxFailure{Account: target.AccountName, Mailbox: target.MailboxName, Error: errText})
+			continue
+		}
+		for _, message := range result.messages {
+			key := message.Account + "\x00" + message.ID
+			if seenMessages[key] {
+				continue
+			}
+			seenMessages[key] = true
+			allMessages = append(allMessages, message)
 		}
 	}
 
-	// Return partial results even if some mailboxes failed
-	if len(errors) > 0 && len(allMessages) == 0 {
-		return nil, fmt.Errorf("failed to search all mailboxes: %v", errors)
-	}
-
-	// Sort by date received (newest first) and apply limit
-	sort.Slice(allMessages, func(i, j int) bool {
-		return allMessages[i].DateReceived > allMessages[j].DateReceived
-	})
-
-	if len(allMessages) > limit {
+	sort.Slice(allMessages, func(i, j int) bool { return allMessages[i].DateReceived > allMessages[j].DateReceived })
+	if limit > 0 && len(allMessages) > limit {
 		allMessages = allMessages[:limit]
 	}
 
-	return allMessages, nil
+	return SearchResult{
+		Messages:          allMessages,
+		Complete:          len(failed) == 0,
+		SearchedMailboxes: searchMailboxes(targets),
+		FailedMailboxes:   failed,
+	}
+}
+
+func searchMailboxes(targets []searchTarget) []SearchMailbox {
+	mailboxes := make([]SearchMailbox, 0, len(targets))
+	for _, target := range targets {
+		mailboxes = append(mailboxes, SearchMailbox{Account: target.AccountName, Mailbox: target.MailboxName})
+	}
+	return mailboxes
 }
 
 func (c *Client) searchMessagesInSingleMailbox(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
@@ -381,7 +489,7 @@ try {
 		}
 	}
 } catch (e) {
-	// Handle errors gracefully
+	throw new Error('mailbox search failed for ' + requestedMailbox + ': ' + e);
 }
 
 JSON.stringify(result);
@@ -475,18 +583,16 @@ try {
 	const accName = acc.name();
 	const mboxName = mbox.name();
 	for (let t = 0; t < searchTerms.length && result.length < maxResults; t++) {
-		try {
-			addMatches(mbox.messages.whose({subject: {_contains: searchTerms[t]}})(), accName, mboxName);
-		} catch(e) {}
+		const subjectMatches = mbox.messages.whose({subject: {_contains: searchTerms[t]}})();
+		addMatches(subjectMatches, accName, mboxName);
 		if (result.length < maxResults) {
-			try {
-				addMatches(mbox.messages.whose({sender: {_contains: searchTerms[t]}})(), accName, mboxName);
-			} catch(e) {}
+			const senderMatches = mbox.messages.whose({sender: {_contains: searchTerms[t]}})();
+			addMatches(senderMatches, accName, mboxName);
 		}
 	}
 	result.sort((a, b) => b.dateReceived.localeCompare(a.dateReceived));
 } catch (e) {
-	// Handle errors gracefully
+	throw new Error('archive mailbox search failed for ' + requestedMailbox + ': ' + e);
 }
 
 JSON.stringify(result.slice(0, maxResults));
