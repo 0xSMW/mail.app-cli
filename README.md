@@ -366,6 +366,7 @@ Manage supported rule actions:
 ```bash
 mail-app-cli rules show "Receipts"
 mail-app-cli rules create "Receipts" -a "Gmail" --from-domain stripe.com --move-to Receipts --dry-run
+mail-app-cli rules create "Published packages" -a "Gmail" --from-domain support@npmjs.com --subject-contains "Successfully published @example/" --move-to Trash --mark-read --dry-run
 mail-app-cli rules enable "Receipts"
 mail-app-cli rules disable "Receipts"
 mail-app-cli rules delete "Receipts" --dry-run

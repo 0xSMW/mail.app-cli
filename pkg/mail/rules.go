@@ -3,6 +3,7 @@ package mail
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 type Rule struct {
@@ -13,11 +14,13 @@ type Rule struct {
 }
 
 type RuleInput struct {
-	Name       string `json:"name"`
-	Account    string `json:"account,omitempty"`
-	FromDomain string `json:"fromDomain,omitempty"`
-	MoveTo     string `json:"moveTo"`
-	Enabled    bool   `json:"enabled"`
+	Name            string   `json:"name"`
+	Account         string   `json:"account,omitempty"`
+	FromDomain      string   `json:"fromDomain,omitempty"`
+	MoveTo          string   `json:"moveTo"`
+	Enabled         bool     `json:"enabled"`
+	SubjectContains []string `json:"subjectContains,omitempty"`
+	MarkRead        bool     `json:"markRead,omitempty"`
 }
 
 func (c *Client) ListRules() ([]Rule, error) {
@@ -64,20 +67,51 @@ JSON.stringify(result);
 }
 
 func (c *Client) CreateRule(input RuleInput) (*Rule, error) {
+	if err := ValidateRuleInput(input); err != nil {
+		return nil, err
+	}
+	script := createRuleScript(input)
+	if _, err := c.runAppleScript(script); err != nil {
+		return nil, err
+	}
+	return ruleFromInput(input), nil
+}
+
+// ValidateRuleInput verifies the complete input contract before a rule is created.
+// Callers should use it for dry runs as well as live rule creation.
+func ValidateRuleInput(input RuleInput) error {
 	if input.Name == "" {
-		return nil, fmt.Errorf("rule name is required")
+		return fmt.Errorf("rule name is required")
 	}
 	if input.MoveTo == "" {
-		return nil, fmt.Errorf("target mailbox is required")
+		return fmt.Errorf("target mailbox is required")
 	}
 	if input.FromDomain == "" {
-		return nil, fmt.Errorf("from domain is required")
+		return fmt.Errorf("from domain is required")
 	}
+	for _, subject := range input.SubjectContains {
+		if subject == "" {
+			return fmt.Errorf("subject contains value is required")
+		}
+	}
+	return nil
+}
+
+func createRuleScript(input RuleInput) string {
 	accountFilter := ""
 	if input.Account != "" {
 		accountFilter = fmt.Sprintf(`if name of acc is not "%s" then set shouldInspect to false`, escapeAppleScriptString(input.Account))
 	}
-	script := fmt.Sprintf(`
+	var conditionScript strings.Builder
+	fmt.Fprintf(&conditionScript, "\t\tmake new rule condition at end of rule conditions with properties {rule type:from header, qualifier:does contain value, expression:\"%s\"}\n", escapeAppleScriptString(input.FromDomain))
+	for _, subject := range input.SubjectContains {
+		fmt.Fprintf(&conditionScript, "\t\tmake new rule condition at end of rule conditions with properties {rule type:subject header, qualifier:does contain value, expression:\"%s\"}\n", escapeAppleScriptString(subject))
+	}
+	markReadProperty := ""
+	if input.MarkRead {
+		markReadProperty = "set mark read to true"
+	}
+	return fmt.Sprintf(`
 on findMailboxByName(mailboxList, targetName)
 	repeat with candidateMailbox in mailboxList
 		try
@@ -109,22 +143,45 @@ tell application "Mail"
 		end if
 	end repeat
 	if destinationMailbox is missing value then error "Target mailbox not found: %s"
-	set newRule to make new rule at end of rules with properties {name:"%s", enabled:%s, should move message:true, move message:destinationMailbox, all conditions must be met:true}
-	tell newRule
-		make new rule condition at end of rule conditions with properties {rule type:from header, qualifier:does contain value, expression:"%s"}
-	end tell
+	set newRule to missing value
+	try
+		set newRule to make new rule at end of rules with properties {name:"%s", enabled:false}
+		tell newRule
+			set all conditions must be met to true
+			set should move message to true
+			set move message to destinationMailbox
+			%s
+			%s
+		end tell
+		if %s then set enabled of newRule to true
+	on error errMsg number errNum
+		if newRule is not missing value then
+			try
+				set enabled of newRule to false
+			end try
+		end if
+		error errMsg number errNum
+	end try
 	return "ok"
 end tell
-`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), appleScriptBool(input.Enabled), escapeAppleScriptString(input.FromDomain))
-	if _, err := c.runAppleScript(script); err != nil {
-		return nil, err
+`, accountFilter, escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.MoveTo), escapeAppleScriptString(input.Name), markReadProperty, conditionScript.String(), appleScriptBool(input.Enabled))
+}
+
+func ruleFromInput(input RuleInput) *Rule {
+	conditions := []string{"from contains " + input.FromDomain}
+	for _, subject := range input.SubjectContains {
+		conditions = append(conditions, "subject contains "+subject)
+	}
+	actions := []string{"move to " + input.MoveTo}
+	if input.MarkRead {
+		actions = append(actions, "mark read")
 	}
 	return &Rule{
 		Name:       input.Name,
 		Enabled:    input.Enabled,
-		Conditions: []string{"from contains " + input.FromDomain},
-		Actions:    []string{"move to " + input.MoveTo},
-	}, nil
+		Conditions: conditions,
+		Actions:    actions,
+	}
 }
 
 func (c *Client) SetRuleEnabled(name string, enabled bool) error {
