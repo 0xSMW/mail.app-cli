@@ -50,7 +50,7 @@ func TestCreateRuleScriptOmitsMarkReadByDefault(t *testing.T) {
 	}
 }
 
-func TestCreateRuleScriptKeepsIncompleteRuleDisabled(t *testing.T) {
+func TestCreateRuleScriptDeletesIncompleteRule(t *testing.T) {
 	script := createRuleScript(RuleInput{
 		Name:       "Receipts",
 		FromDomain: "stripe.com",
@@ -60,15 +60,16 @@ func TestCreateRuleScriptKeepsIncompleteRuleDisabled(t *testing.T) {
 
 	createAt := strings.Index(script, `make new rule at end of rules with properties {name:"Receipts", enabled:false}`)
 	enableAt := strings.Index(script, `if true then set enabled of newRule to true`)
-	cleanupAt := strings.Index(script, `set enabled of newRule to false`)
-	if createAt < 0 || enableAt < 0 || cleanupAt < 0 {
-		t.Fatalf("create rule script is missing disabled creation, final enable, or failure cleanup:\n%s", script)
+	deleteAt := strings.Index(script, `delete newRule`)
+	disableFallbackAt := strings.Index(script, `set enabled of newRule to false`)
+	if createAt < 0 || enableAt < 0 || deleteAt < 0 || disableFallbackAt < 0 {
+		t.Fatalf("create rule script is missing disabled creation, final enable, deletion rollback, or disable fallback:\n%s", script)
 	}
 	if createAt > enableAt {
 		t.Fatal("rule is enabled before it is created")
 	}
-	if cleanupAt < enableAt {
-		t.Fatal("failure cleanup must remain available after the final enable step")
+	if deleteAt < enableAt || disableFallbackAt < deleteAt {
+		t.Fatal("failure rollback must delete the partial rule and disable it only if deletion fails")
 	}
 }
 

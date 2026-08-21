@@ -157,7 +157,11 @@ tell application "Mail"
 	on error errMsg number errNum
 		if newRule is not missing value then
 			try
-				set enabled of newRule to false
+				delete newRule
+			on error
+				try
+					set enabled of newRule to false
+				end try
 			end try
 		end if
 		error errMsg number errNum
