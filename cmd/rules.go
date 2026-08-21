@@ -14,7 +14,9 @@ var (
 	ruleQuery      string
 	ruleLimit      int
 	ruleFromDomain string
+	ruleSubjects   []string
 	ruleMoveTo     string
+	ruleMarkRead   bool
 	ruleEnabled    bool
 )
 
@@ -101,11 +103,16 @@ var rulesCreateCmd = &cobra.Command{
 			return fmt.Errorf("--from-domain is required")
 		}
 		input := mail.RuleInput{
-			Name:       args[0],
-			Account:    ruleAccount,
-			FromDomain: ruleFromDomain,
-			MoveTo:     ruleMoveTo,
-			Enabled:    ruleEnabled,
+			Name:            args[0],
+			Account:         ruleAccount,
+			FromDomain:      ruleFromDomain,
+			MoveTo:          ruleMoveTo,
+			Enabled:         ruleEnabled,
+			SubjectContains: ruleSubjects,
+			MarkRead:        ruleMarkRead,
+		}
+		if err := mail.ValidateRuleInput(input); err != nil {
+			return err
 		}
 		if ruleDryRun {
 			return printJSON(map[string]any{
@@ -169,6 +176,8 @@ func init() {
 	rulesApplyCmd.Flags().IntVarP(&ruleLimit, "limit", "l", 100, "Maximum matched messages")
 	rulesCreateCmd.Flags().StringVarP(&ruleAccount, "account", "a", "", "Account containing target mailbox")
 	rulesCreateCmd.Flags().StringVar(&ruleFromDomain, "from-domain", "", "Sender domain condition")
+	rulesCreateCmd.Flags().StringArrayVar(&ruleSubjects, "subject-contains", nil, "Subject text condition (repeatable)")
 	rulesCreateCmd.Flags().StringVar(&ruleMoveTo, "move-to", "", "Target mailbox action")
+	rulesCreateCmd.Flags().BoolVar(&ruleMarkRead, "mark-read", false, "Mark matching messages as read")
 	rulesCreateCmd.Flags().BoolVar(&ruleEnabled, "enabled", true, "Create rule as enabled")
 }

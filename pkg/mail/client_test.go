@@ -291,6 +291,152 @@ func TestDefaultSearchTargetsUseCorpusForGlobalSearch(t *testing.T) {
 	}
 }
 
+func TestCollectSearchResultsReportsFailedMailboxesInTargetOrder(t *testing.T) {
+	targets := []searchTarget{
+		{AccountName: "Work", MailboxName: "All Mail"},
+		{AccountName: "Personal", MailboxName: "INBOX"},
+	}
+	result := collectSearchResults(targets, []mailboxSearchResult{
+		{
+			target: targets[1],
+			err:    errors.New("Mail is unavailable"),
+		},
+		{
+			target: targets[0],
+			messages: []Message{
+				{ID: "older", Account: "Work", DateReceived: "2026-08-01T00:00:00Z"},
+				{ID: "newer", Account: "Work", DateReceived: "2026-08-02T00:00:00Z"},
+			},
+		},
+	}, 50)
+
+	if result.Complete {
+		t.Fatal("Complete = true, want false")
+	}
+	if len(result.SearchedMailboxes) != 2 || result.SearchedMailboxes[1].Mailbox != "INBOX" {
+		t.Fatalf("SearchedMailboxes = %#v", result.SearchedMailboxes)
+	}
+	if len(result.FailedMailboxes) != 1 {
+		t.Fatalf("FailedMailboxes = %#v, want one failure", result.FailedMailboxes)
+	}
+	failure := result.FailedMailboxes[0]
+	if failure.Account != "Personal" || failure.Mailbox != "INBOX" || failure.Error != "Mail is unavailable" {
+		t.Fatalf("failure = %#v", failure)
+	}
+	if len(result.Messages) != 2 || result.Messages[0].ID != "newer" {
+		t.Fatalf("Messages = %#v, want newest first", result.Messages)
+	}
+}
+
+func TestCollectSearchResultsDeduplicatesAndLimitsCompleteResults(t *testing.T) {
+	targets := []searchTarget{
+		{AccountName: "Work", MailboxName: "All Mail"},
+		{AccountName: "Work", MailboxName: "INBOX"},
+	}
+	result := collectSearchResults(targets, []mailboxSearchResult{
+		{target: targets[0], messages: []Message{
+			{ID: "same", Account: "Work", DateReceived: "2026-08-01T00:00:00Z"},
+			{ID: "old", Account: "Work", DateReceived: "2026-07-01T00:00:00Z"},
+		}},
+		{target: targets[1], messages: []Message{
+			{ID: "same", Account: "Work", DateReceived: "2026-08-01T00:00:00Z"},
+			{ID: "new", Account: "Work", DateReceived: "2026-08-03T00:00:00Z"},
+		}},
+	}, 2)
+
+	if !result.Complete {
+		t.Fatalf("Complete = false, failures = %#v", result.FailedMailboxes)
+	}
+	if len(result.FailedMailboxes) != 0 {
+		t.Fatalf("FailedMailboxes = %#v, want none", result.FailedMailboxes)
+	}
+	if len(result.Messages) != 2 || result.Messages[0].ID != "new" || result.Messages[1].ID != "same" {
+		t.Fatalf("Messages = %#v", result.Messages)
+	}
+}
+
+func TestMailboxJXAFailureIsPartialAndFailsClosed(t *testing.T) {
+	writeFakeOsaScript(t, `
+case "$*" in
+  *"mailbox search failed for"*)
+    printf '%s\n' 'Mail application is unavailable' >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' 'unexpected JXA script' >&2
+    exit 2
+    ;;
+esac
+`)
+
+	targets := []searchTarget{
+		{AccountName: "Work", MailboxName: "All Mail"},
+		{AccountName: "Personal", MailboxName: "INBOX"},
+	}
+	_, mailboxErr := NewClient().searchMessagesInSingleMailboxJXA("invoice", targets[0].AccountName, targets[0].MailboxName, 50, "")
+	if mailboxErr == nil {
+		t.Fatal("searchMessagesInSingleMailboxJXA returned nil error for mailbox-level JXA failure")
+	}
+
+	result := collectSearchResults(targets, []mailboxSearchResult{
+		{target: targets[0], err: mailboxErr},
+		{target: targets[1], messages: []Message{{ID: "1", Account: "Personal", DateReceived: "2026-08-20T00:00:00Z"}}},
+	}, 50)
+	_, err := applySearchOptions(result, SearchOptions{})
+	var partialErr *PartialSearchError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("applySearchOptions error = %v, want *PartialSearchError", err)
+	}
+	if partialErr.Result.Complete || len(partialErr.Result.FailedMailboxes) != 1 {
+		t.Fatalf("partial result = %#v", partialErr.Result)
+	}
+
+	allowed, err := applySearchOptions(result, SearchOptions{AllowPartial: true})
+	if err != nil {
+		t.Fatalf("allow partial returned error: %v", err)
+	}
+	if allowed.Complete || len(allowed.Messages) != 1 || allowed.Messages[0].Account != "Personal" {
+		t.Fatalf("allowed partial result = %#v", allowed)
+	}
+}
+
+func TestArchiveWhoseQueryFailureIsPartialAndFailsClosed(t *testing.T) {
+	writeFakeOsaScript(t, `
+case "$*" in
+  *"const subjectMatches = mbox.messages.whose"*)
+    printf '%s\n' 'whose query failed' >&2
+    exit 1
+    ;;
+  *)
+    printf '%s\n' 'archive whose query was not executed' >&2
+    exit 2
+    ;;
+esac
+`)
+
+	targets := []searchTarget{
+		{AccountName: "Work", MailboxName: "All Mail"},
+		{AccountName: "Personal", MailboxName: "INBOX"},
+	}
+	_, archiveErr := NewClient().searchArchiveMailboxWithWhoseJXA("invoice", targets[0].AccountName, targets[0].MailboxName, 50, "")
+	if archiveErr == nil {
+		t.Fatal("searchArchiveMailboxWithWhoseJXA returned complete empty success for a whose query failure")
+	}
+
+	result := collectSearchResults(targets, []mailboxSearchResult{
+		{target: targets[0], err: archiveErr},
+		{target: targets[1], messages: []Message{{ID: "1", Account: "Personal", DateReceived: "2026-08-20T00:00:00Z"}}},
+	}, 50)
+	_, err := applySearchOptions(result, SearchOptions{})
+	var partialErr *PartialSearchError
+	if !errors.As(err, &partialErr) {
+		t.Fatalf("applySearchOptions error = %v, want *PartialSearchError", err)
+	}
+	if partialErr.Result.Complete || len(partialErr.Result.Messages) != 1 {
+		t.Fatalf("partial result = %#v", partialErr.Result)
+	}
+}
+
 func TestRecentMessagesSearchAndLocationUpdate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

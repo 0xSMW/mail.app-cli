@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
@@ -15,6 +16,7 @@ var (
 	searchSender       string
 	searchSenderDomain string
 	searchNoCache      bool
+	searchAllowPartial bool
 )
 
 var searchCmd = &cobra.Command{
@@ -32,8 +34,14 @@ Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query
 		}
 		query := args[0]
 		client := mail.NewClient()
-		messages, err := client.SearchMessagesJSONSince(query, searchAccount, searchMailbox, searchLimit, searchSince)
+		result, err := client.SearchMessagesJSONSinceWithOptions(query, searchAccount, searchMailbox, searchLimit, searchSince, mail.SearchOptions{
+			AllowPartial: searchAllowPartial,
+		})
 		if err != nil {
+			var partialErr *mail.PartialSearchError
+			if errors.As(err, &partialErr) {
+				return fmt.Errorf("failed to search messages: %w", err)
+			}
 			if !searchNoCache {
 				recentMessages, recentErr := mail.SearchRecentMessages(query, searchAccount, searchMailbox, searchLimit, searchSince)
 				if recentErr == nil {
@@ -45,8 +53,15 @@ Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query
 			}
 			return fmt.Errorf("failed to search messages: %w", err)
 		}
+		messages := result.Messages
 		messages = filterMessagesBySender(messages, searchSender, searchSenderDomain)
-		_ = mail.RecordRecentSearchResults(messages, query)
+		if result.Complete {
+			_ = mail.RecordRecentSearchResults(messages, query)
+		}
+		if searchAllowPartial {
+			result.Messages = messages
+			return printJSON(result, "structured search results")
+		}
 
 		return printJSON(messages, "search results")
 	},
@@ -59,5 +74,6 @@ func init() {
 	searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
 	searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only return messages from this exact sender/email")
 	searchCmd.Flags().StringVar(&searchSenderDomain, "sender-domain", "", "Only return messages from this sender domain")
+	searchCmd.Flags().BoolVar(&searchAllowPartial, "allow-partial", false, "Return partial cross-mailbox results with completeness metadata")
 	searchCmd.Flags().BoolVar(&searchNoCache, "no-cache", false, "Accepted for compatibility; search results are not cached")
 }
