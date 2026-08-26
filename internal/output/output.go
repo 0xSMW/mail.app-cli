@@ -102,11 +102,15 @@ type Writer struct {
 	Command       string
 	SchemaVersion int
 	started       time.Time
+	jqCode        *gojq.Code
+	pending       []string
 }
 
-// New builds a writer. command is the space-joined command path used in meta.
-func New(format Format, stdout, stderr io.Writer, color bool, jq, command string, schemaVersion int) *Writer {
-	return &Writer{
+// New builds a writer. command is the space-joined command path used in
+// meta. The jq expression is compiled here so a bad one fails before the
+// command runs.
+func New(format Format, stdout, stderr io.Writer, color bool, jq, command string, schemaVersion int) (*Writer, error) {
+	w := &Writer{
 		Format:        format,
 		Stdout:        stdout,
 		Stderr:        stderr,
@@ -116,6 +120,29 @@ func New(format Format, stdout, stderr io.Writer, color bool, jq, command string
 		SchemaVersion: schemaVersion,
 		started:       time.Now(),
 	}
+	if jq != "" {
+		query, err := gojq.Parse(jq)
+		if err != nil {
+			return nil, clierr.Usagef("invalid --jq expression: %v", err)
+		}
+		code, err := gojq.Compile(query)
+		if err != nil {
+			return nil, clierr.Usagef("invalid --jq expression: %v", err)
+		}
+		w.jqCode = code
+	}
+	return w, nil
+}
+
+// AddNotice queues a warning for the next Write. In plain mode it is
+// printed to stderr right away.
+func (w *Writer) AddNotice(message string) {
+	if w.Format == FormatPlain {
+		p := &Printer{Out: w.Stderr, Color: w.Color}
+		fmt.Fprintln(w.Stderr, p.Dim("notice: "+message))
+		return
+	}
+	w.pending = append(w.pending, message)
 }
 
 // Result is what a command produces.
@@ -130,6 +157,10 @@ type Result struct {
 	Meta map[string]any
 	// Plain renders the human view. When nil, pretty JSON of Data is used.
 	Plain func(p *Printer)
+	// Err marks the result as a failure that still carries data (a receipt
+	// with failed items, an unhealthy doctor). The envelope gets ok:false
+	// and the error fields; the caller exits with the error's code.
+	Err *clierr.Error
 }
 
 // Envelope is the JSON success shape.
@@ -140,6 +171,10 @@ type Envelope struct {
 	Summary       string         `json:"summary,omitempty"`
 	Notices       []string       `json:"notices,omitempty"`
 	Meta          map[string]any `json:"meta,omitempty"`
+	Error         string         `json:"error,omitempty"`
+	Code          string         `json:"code,omitempty"`
+	ExitCode      int            `json:"exitCode,omitempty"`
+	Hint          string         `json:"hint,omitempty"`
 }
 
 // ErrorEnvelope is the JSON failure shape, written to stderr.
@@ -153,9 +188,32 @@ type ErrorEnvelope struct {
 	Command       string `json:"command,omitempty"`
 }
 
-// Write renders one result in the writer's format.
+// Write renders one result in the writer's format. When r.Err is set the
+// error is marked Reported and returned after the data is written.
 func (w *Writer) Write(r Result) error {
+	if err := w.write(r); err != nil {
+		return err
+	}
+	if r.Err != nil {
+		r.Err.Reported = true
+		return r.Err
+	}
+	return nil
+}
+
+func (w *Writer) write(r Result) error {
 	data := normalizeData(r.Data)
+	r.Notices = append(append([]string(nil), w.pending...), r.Notices...)
+	w.pending = nil
+	if w.Format != FormatJSON && w.Format != FormatPlain {
+		p := &Printer{Out: w.Stderr, Color: false}
+		for _, notice := range r.Notices {
+			fmt.Fprintln(w.Stderr, p.Dim("notice: "+notice))
+		}
+		if r.Err != nil {
+			w.Error(r.Err)
+		}
+	}
 	switch w.Format {
 	case FormatCount:
 		n, ok := listLength(data)
@@ -191,11 +249,17 @@ func (w *Writer) Write(r Result) error {
 		for _, notice := range r.Notices {
 			fmt.Fprintln(w.Stderr, p.Dim("notice: "+notice))
 		}
+		var err error
 		if r.Plain != nil {
 			r.Plain(p)
-			return p.err
+			err = p.err
+		} else {
+			err = writeJSON(w.Stdout, data)
 		}
-		return writeJSON(w.Stdout, data)
+		if err == nil && r.Err != nil {
+			w.Error(r.Err)
+		}
+		return err
 	}
 }
 
@@ -210,14 +274,21 @@ func (w *Writer) envelope(data any, r Result) Envelope {
 	for k, v := range r.Meta {
 		meta[k] = v
 	}
-	return Envelope{
-		OK:            true,
+	env := Envelope{
+		OK:            r.Err == nil,
 		SchemaVersion: w.SchemaVersion,
 		Data:          data,
 		Summary:       r.Summary,
 		Notices:       r.Notices,
 		Meta:          meta,
 	}
+	if r.Err != nil {
+		env.Error = r.Err.Message
+		env.Code = string(r.Err.Code)
+		env.ExitCode = clierr.ExitCode(r.Err.Code)
+		env.Hint = r.Err.Hint
+	}
+	return env
 }
 
 // Error renders a failure. JSON-style formats get an envelope on stderr;
@@ -246,13 +317,9 @@ func (w *Writer) Error(err *clierr.Error) {
 }
 
 func (w *Writer) runJQ(input any) error {
-	query, err := gojq.Parse(w.JQ)
-	if err != nil {
-		return clierr.Usagef("invalid --jq expression: %v", err)
-	}
-	code, err := gojq.Compile(query)
-	if err != nil {
-		return clierr.Usagef("invalid --jq expression: %v", err)
+	code := w.jqCode
+	if code == nil {
+		return clierr.Usage("--jq expression was not compiled")
 	}
 	// gojq wants the generic shapes encoding/json produces.
 	raw, err := json.Marshal(input)

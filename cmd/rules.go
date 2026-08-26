@@ -148,8 +148,11 @@ var rulesCreateCmd = &cobra.Command{
 
 var rulesApplyCmd = &cobra.Command{
 	Use:   "apply <rule-name>",
-	Short: "Preview which messages a selector would match",
+	Short: "Preview only: search the mailbox in scope with --query; the rule itself is never run",
 	Args:  cobra.ExactArgs(1),
+	Annotations: map[string]string{
+		annotationAgentNotes: "Mail.app cannot run a rule on demand. This searches with --query and labels the result with the rule name; nothing is applied.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		account, err := requireAccount()
 		if err != nil {
@@ -194,7 +197,7 @@ func setRuleEnabled(name string, enabled bool) error {
 
 func init() {
 	rulesCmd.AddCommand(rulesListCmd, rulesShowCmd, rulesCreateCmd, rulesEnableCmd, rulesDisableCmd, rulesDeleteCmd, rulesApplyCmd)
-	for _, cmd := range []*cobra.Command{rulesCreateCmd, rulesEnableCmd, rulesDisableCmd, rulesDeleteCmd, rulesApplyCmd} {
+	for _, cmd := range []*cobra.Command{rulesCreateCmd, rulesEnableCmd, rulesDisableCmd, rulesDeleteCmd} {
 		cmd.Flags().BoolVar(&ruleDryRun, "dry-run", false, "Report what would change without touching Mail.app")
 	}
 	rulesApplyCmd.Flags().StringVar(&ruleQuery, "query", "", "Selector query for the preview")

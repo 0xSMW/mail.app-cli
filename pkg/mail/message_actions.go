@@ -2,7 +2,6 @@ package mail
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -66,7 +65,7 @@ func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error
 	}
 	if err := RemoveRecentMessage(accountName, messageID); err != nil {
 		c.recentCleanupWarningOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "mail-app-cli: message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.\n", err)
+			Warn(fmt.Sprintf("message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.", err))
 		})
 	}
 	return nil

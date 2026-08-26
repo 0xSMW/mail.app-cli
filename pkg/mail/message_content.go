@@ -15,7 +15,7 @@ func (c *Client) warnContentFallback(err error) {
 		if reason == "" {
 			reason = "unknown error"
 		}
-		fmt.Fprintf(os.Stderr, "mail-app-cli: message content fetch was limited (%s). Returned message metadata with any content that could be fetched in time. Use a smaller --limit or messages show for full content on specific messages.\n", reason)
+		Warn(fmt.Sprintf("message content fetch was limited (%s). Returned message metadata with any content that could be fetched in time. Use a smaller --limit or show for full content on specific messages.", reason))
 	})
 }
 

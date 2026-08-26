@@ -72,6 +72,9 @@ type Error struct {
 	Message string
 	Hint    string
 	Cause   error
+	// Reported is set once the error has been written inside a result
+	// envelope, so the process exits with its code without printing again.
+	Reported bool
 }
 
 func (e *Error) Error() string { return e.Message }

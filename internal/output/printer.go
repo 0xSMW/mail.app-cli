@@ -3,8 +3,9 @@ package output
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
-	"text/tabwriter"
+	"unicode/utf8"
 )
 
 // Printer renders the human view. Every method records the first write
@@ -30,23 +31,50 @@ func (p *Printer) Line(format string, args ...any) {
 // Blank prints an empty line.
 func (p *Printer) Blank() { p.write("\n") }
 
-// Table prints aligned columns. Headers are bold when color is on.
+var ansiPattern = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+// visibleWidth counts runes after stripping ANSI codes.
+func visibleWidth(s string) int {
+	return utf8.RuneCountInString(ansiPattern.ReplaceAllString(s, ""))
+}
+
+// Table prints aligned columns, measuring width without ANSI codes so
+// styled cells line up. Headers are bold when color is on.
 func (p *Printer) Table(headers []string, rows [][]string) {
 	if p.err != nil {
 		return
 	}
-	tw := tabwriter.NewWriter(p.Out, 0, 0, 2, ' ', 0)
+	all := make([][]string, 0, len(rows)+1)
 	if len(headers) > 0 {
 		styled := make([]string, len(headers))
 		for i, h := range headers {
 			styled[i] = p.Bold(h)
 		}
-		fmt.Fprintln(tw, strings.Join(styled, "\t"))
+		all = append(all, styled)
 	}
-	for _, row := range rows {
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
+	all = append(all, rows...)
+	var widths []int
+	for _, row := range all {
+		for i, cell := range row {
+			if i >= len(widths) {
+				widths = append(widths, 0)
+			}
+			if w := visibleWidth(cell); w > widths[i] {
+				widths[i] = w
+			}
+		}
 	}
-	p.err = tw.Flush()
+	var b strings.Builder
+	for _, row := range all {
+		for i, cell := range row {
+			b.WriteString(cell)
+			if i < len(row)-1 {
+				b.WriteString(strings.Repeat(" ", widths[i]-visibleWidth(cell)+2))
+			}
+		}
+		b.WriteString("\n")
+	}
+	p.write(b.String())
 }
 
 // KeyValues prints a two-column block with aligned keys.

@@ -17,10 +17,15 @@ import (
 // arguments do not leak into the next.
 func resetFlags(cmd *cobra.Command) {
 	reset := func(f *pflag.Flag) {
-		if f.Changed {
-			_ = f.Value.Set(f.DefValue)
-			f.Changed = false
+		if !f.Changed {
+			return
 		}
+		if slice, ok := f.Value.(pflag.SliceValue); ok {
+			_ = slice.Replace(nil)
+		} else {
+			_ = f.Value.Set(f.DefValue)
+		}
+		f.Changed = false
 	}
 	cmd.PersistentFlags().VisitAll(reset)
 	cmd.Flags().VisitAll(reset)
@@ -160,8 +165,8 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 			t.Fatalf("command %q missing from tree", want)
 		}
 	}
-	if !paths["messages"].Compatibility {
-		t.Fatal("messages group is not marked compatibility")
+	if !paths["messages archive"].Compatibility || paths["messages list"].Compatibility {
+		t.Fatal("compatibility annotation is on the wrong messages commands")
 	}
 	if paths["search"].AgentNotes == "" {
 		t.Fatal("search has no agent notes")
@@ -210,6 +215,35 @@ func TestSkillPrintsMarkdown(t *testing.T) {
 	code, _, _ = run(t, "skill", "install", "--json")
 	if code != 0 {
 		t.Fatal("reinstall over a managed directory should succeed")
+	}
+}
+
+func TestCountRefusedBeforeRunOnNonList(t *testing.T) {
+	code, stdout, stderr := run(t, "version", "--count")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--ids-only and --count") {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+	code, stdout, stderr = run(t, "version", "--jq", ".data[")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "invalid --jq") {
+		t.Fatalf("bad jq: exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+}
+
+func TestUnknownHelpTopicIsUsageError(t *testing.T) {
+	code, _, stderr := run(t, "help", "nonsense")
+	if code != 1 || !strings.Contains(stderr, "unknown help topic") {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr)
+	}
+	code, stdout, _ := run(t, "help", "config", "set")
+	if code != 0 || !strings.Contains(stdout, "Set a key") {
+		t.Fatalf("help config set: exit = %d, stdout = %q", code, stdout)
+	}
+}
+
+func TestCommandsHaveNoNullLists(t *testing.T) {
+	_, stdout, _ := run(t, "commands", "--json")
+	if strings.Contains(stdout, ": null") {
+		t.Fatalf("commands --json contains null: %s", stdout[:200])
 	}
 }
 

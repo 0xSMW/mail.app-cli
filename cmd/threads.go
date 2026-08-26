@@ -27,6 +27,7 @@ type threadSummary struct {
 var (
 	threadLimit  int
 	threadDryRun bool
+	threadVerify bool
 )
 
 var threadsCmd = &cobra.Command{
@@ -110,7 +111,7 @@ var threadsArchiveCmd = &cobra.Command{
 			for _, message := range messagesForThread(thread.MessageIDs, messages) {
 				items = append(items, batchItem{ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox, Subject: message.Subject})
 			}
-			opts := batchOptions{Action: "archive", DryRun: threadDryRun}
+			opts := batchOptions{Action: "archive", DryRun: threadDryRun, Verify: threadVerify}
 			result, mutationErr := runMessageBatch(mailClient, opts, items, archiveMutator(false))
 			return writeReceipt(result, opts, nil, mutationErr, "")
 		}
@@ -136,9 +137,11 @@ func loadThreads() ([]threadSummary, []mail.Message, error) {
 		thread, ok := byKey[key]
 		if !ok {
 			thread = &threadSummary{
-				ID:        key,
-				Subject:   strings.TrimSpace(message.Subject),
-				Synthetic: !strings.HasPrefix(key, "message-"),
+				ID:           key,
+				Subject:      strings.TrimSpace(message.Subject),
+				Synthetic:    !strings.HasPrefix(key, "message-"),
+				Participants: []string{},
+				MessageIDs:   []string{},
 			}
 			byKey[key] = thread
 		}
@@ -228,4 +231,5 @@ func init() {
 		cmd.Flags().IntVarP(&threadLimit, "limit", "l", 200, "Maximum messages to inspect")
 	}
 	threadsArchiveCmd.Flags().BoolVar(&threadDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+	threadsArchiveCmd.Flags().BoolVar(&threadVerify, "verify", false, "Re-read each message after mutation and record the outcome")
 }

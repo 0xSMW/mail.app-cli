@@ -90,7 +90,7 @@ Errors go to stderr with a code and a hint:
 | `--json` | envelope even on a terminal |
 | `--plain` | table even in a pipe |
 | `--quiet`, `-q` | bare `data`, no envelope |
-| `--ids-only` | one ID per line from any list |
+| `--ids-only` | one ID per line from lists whose items carry an `id` (messages, accounts, attachments) |
 | `--count` | just the number of items |
 | `--jq EXPR` | run a jq expression over the envelope (over `data` with `--quiet`); strings print raw |
 | `--no-color` | no ANSI; `NO_COLOR=1` does the same |
@@ -126,6 +126,8 @@ Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
 
 `--account`/`-a` and `--mailbox`/`-m` work on every command. Precedence is flag, then `MAIL_APP_CLI_ACCOUNT`/`MAIL_APP_CLI_MAILBOX`, then the config file, then defaults: the only enabled account, and `INBOX`. With several accounts and no default, account-scoped commands exit 1 and list the names.
 
+The mailbox default applies to the commands that read one mailbox: `messages list`, `messages batch` selectors, `threads`, `export`, `import`, and `rules apply`. `inbox`, `unread`, `search`, and `sync` only narrow to a mailbox when `-m` is on the command line, and ID-driven verbs never use the default to guess where a message is.
+
 ```bash
 mail-app-cli config set account "Work"
 mail-app-cli config show
@@ -138,13 +140,13 @@ mailbox  INBOX   default
 output   auto    default
 ```
 
-Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet.
+Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (a no-op), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
 
 After archive, delete, or move, Mail.app gives the message a new ID in the destination mailbox. The receipt reports the ID you passed; find the message again with `search` or `recent search` before touching it a second time.
 
 ## Mutations
 
-Every mutation returns the same receipt and accepts `--dry-run`:
+Every message mutation (`seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, the `messages *` spellings, `messages batch`, and `threads archive`) returns the same receipt and accepts `--dry-run` and `--verify`. Other mutations (`send`, `drafts *`, `rules *`) accept `--dry-run` and return their own shape.
 
 ```bash
 $ mail-app-cli archive 252534 252479 --dry-run
@@ -159,7 +161,7 @@ ID      STATUS   LOCATION      DETAIL
  "items": [{"id": "252534", "account": "Work", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
 ```
 
-`--verify` re-reads each message afterwards and records `verifyStatus`. A receipt with failures still prints, then the process exits 6.
+`--verify` re-reads each message afterwards and records `verifyStatus`. A receipt with failures is still written, with `ok: false`, `code: "mutation_failed"`, and `exitCode: 6` in the same envelope, and the process exits 6. `ok` means "this command did what you asked", so check it, or check the exit code, before trusting a receipt.
 
 Bulk selection by query, sender, or domain lives under `messages batch` and needs `--yes` for archive, delete, and move unless `--dry-run` is set:
 
@@ -190,7 +192,7 @@ mail-app-cli search "invoice" -a "Work" --since 2026-08-01 --sender-domain strip
 mail-app-cli search "invoice" -a "Work" -m "All Mail"
 ```
 
-Every term must match the subject, sender, or Mail's indexed summary. Without `-a` the search covers each enabled account's archive and inbox. If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found plus `complete`, `searchedMailboxes`, and `failedMailboxes`. If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
+Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` (an object, so `--ids-only` and `--count` do not apply). If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
 
 ## Other commands
 
@@ -236,8 +238,13 @@ mail-app-cli show --agent --help
 | "Message archived" text | receipt JSON, or one line on a terminal |
 | exit 1 for every failure | see the exit-code table |
 | `sync --json` | `sync` (global `--json`) |
+| `... \| jq length` | `... \| jq '.data \| length'` or `--count` |
+| stderr was a bare string | stderr is a JSON error envelope when piped, text on a terminal |
+| `--version` printed `mail-app-cli version 1.3.0` | `mail-app-cli 2.0.0` |
+| `doctor` always exited 0 | exits 3 when not healthy |
+| `search --no-cache` was accepted and ignored | disables the recent-journal fallback |
 
-Keys are camelCase everywhere. Lists are never `null`.
+Keys are camelCase everywhere. Lists are never `null`. Warnings that 1.x printed as free text on stderr are `notices` in the envelope.
 
 ## Environment
 

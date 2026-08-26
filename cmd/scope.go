@@ -90,10 +90,13 @@ func accountExplicit() bool {
 
 // messageRef is a message ID with the account and mailbox it can be reached in.
 type messageRef struct {
-	ID       string
-	Account  string
-	Mailbox  string
-	Envelope *mail.Message
+	ID      string
+	Account string
+	Mailbox string
+	// ArchiveMailbox is the mailbox archive should act from (INBOX or the
+	// backing mailbox), never a user label.
+	ArchiveMailbox string
+	Envelope       *mail.Message
 }
 
 // locateMessages resolves IDs to accounts and mailboxes. An explicit
@@ -117,7 +120,7 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		}
 		refs := make([]messageRef, 0, len(ids))
 		for _, id := range ids {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
+			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope(), ArchiveMailbox: mailboxInScope()})
 		}
 		return refs, nil, nil
 	}
@@ -133,11 +136,14 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 	var missing []string
 	for _, id := range ids {
 		if location, ok := located[id]; ok {
-			if accountExplicit() && !strings.EqualFold(location.Account, resolved.Account.Value) {
-				return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message %s is in account %q, not %q", id, location.Account, resolved.Account.Value))
+			if configured := resolved.Account.Value; configured != "" && !strings.EqualFold(location.Account, configured) {
+				if accountExplicit() {
+					return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message %s is in account %q, not %q", id, location.Account, configured))
+				}
+				notices = append(notices, fmt.Sprintf("message %s is in account %q, not the configured %q", id, location.Account, configured))
 			}
 			envelope := location.Envelope
-			refs = append(refs, messageRef{ID: id, Account: location.Account, Mailbox: location.Mailbox, Envelope: &envelope})
+			refs = append(refs, messageRef{ID: id, Account: location.Account, Mailbox: location.Mailbox, ArchiveMailbox: location.ArchiveMailbox, Envelope: &envelope})
 			continue
 		}
 		missing = append(missing, id)
@@ -155,7 +161,7 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 			notices = append(notices, fmt.Sprintf("not in the Envelope Index, assuming %s/%s: %s", account, mailboxInScope(), strings.Join(missing, ", ")))
 		}
 		for _, id := range missing {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
+			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope(), ArchiveMailbox: mailboxInScope()})
 		}
 	}
 	return refs, notices, nil

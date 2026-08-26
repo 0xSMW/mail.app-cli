@@ -12,10 +12,14 @@ import (
 // archiving means moving out of INBOX. BackingMailbox is the row the Envelope
 // Index stores the message under (All Mail for labelled Gmail messages).
 type MessageLocation struct {
-	ID             string   `json:"id"`
-	Account        string   `json:"account"`
-	Mailbox        string   `json:"mailbox"`
-	BackingMailbox string   `json:"backingMailbox"`
+	ID             string `json:"id"`
+	Account        string `json:"account"`
+	Mailbox        string `json:"mailbox"`
+	BackingMailbox string `json:"backingMailbox"`
+	// ArchiveMailbox is where an archive should act from: INBOX when the
+	// message carries that label, otherwise the backing mailbox. Archiving
+	// from a user label would strip the label instead of leaving INBOX.
+	ArchiveMailbox string   `json:"archiveMailbox"`
 	Labels         []string `json:"labels"`
 	Envelope       Message  `json:"-"`
 }
@@ -123,6 +127,7 @@ where l.message_id in (%s);
 			Account:        accountName,
 			Mailbox:        preferredMessageMailbox(backing, userLabelsByID[row.ID]),
 			BackingMailbox: backing,
+			ArchiveMailbox: archiveSourceMailbox(backing, labels),
 			Labels:         labels,
 		}
 		location.Envelope = Message{
@@ -191,6 +196,17 @@ func indexMailboxDisplayName(rawURL string) string {
 // are not places it can be moved out of.
 func isGmailSystemLabelURL(rawURL string) bool {
 	return strings.Contains(rawURL, "/%5BGmail%5D/")
+}
+
+// archiveSourceMailbox is INBOX when the message is labelled with it and the
+// backing mailbox otherwise, so archive only ever removes INBOX.
+func archiveSourceMailbox(backing string, labels []string) string {
+	for _, label := range labels {
+		if strings.EqualFold(label, "INBOX") {
+			return label
+		}
+	}
+	return backing
 }
 
 // preferredMessageMailbox picks the mailbox a mutation should address. INBOX

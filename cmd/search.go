@@ -23,9 +23,9 @@ var searchCmd = &cobra.Command{
 	Use:   "search <query>",
 	Short: "Search messages by subject, sender, and indexed summary",
 	Long: `Search messages. Every term must match somewhere in the subject, sender,
-or Mail's indexed summary. Without --account the search covers each enabled
-account's archive and inbox; with --account it covers that account's
-mailboxes; with --mailbox it is limited to one mailbox.`,
+or Mail's indexed summary. Without --mailbox the search covers every
+non-empty mailbox of each enabled account (or of the one named with
+--account); with --mailbox it is limited to that mailbox.`,
 	Args: cobra.ExactArgs(1),
 	Annotations: map[string]string{
 		annotationAgentNotes: "Fails closed with exit 5 when any mailbox could not be searched; add --allow-partial to accept incomplete results, which then arrive as {messages, complete, searchedMailboxes, failedMailboxes}. Needs Envelope Index access (Full Disk Access) for cross-mailbox queries.",
@@ -69,7 +69,7 @@ mailboxes; with --mailbox it is limited to one mailbox.`,
 		if result.Complete {
 			_ = mail.RecordRecentSearchResults(messages, query)
 		}
-		meta := map[string]any{"source": "index", "query": query, "complete": result.Complete, "searchedMailboxes": len(result.SearchedMailboxes)}
+		meta := map[string]any{"source": "index", "query": query, "complete": result.Complete, "searchedMailboxCount": len(result.SearchedMailboxes)}
 		if searchAllowPartial {
 			result.Messages = messages
 			var notices []string

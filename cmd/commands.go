@@ -97,7 +97,7 @@ func describeCommand(cmd *cobra.Command, recurse bool) commandRecord {
 	}
 	if !cmd.HasParent() {
 		record.GlobalFlags = describeFlags(cmd.PersistentFlags())
-		record.Flags = nil
+		record.Flags = []flagRecord{}
 	}
 	if !recurse {
 		return record
@@ -112,7 +112,7 @@ func describeCommand(cmd *cobra.Command, recurse bool) commandRecord {
 }
 
 func describeFlags(set *pflag.FlagSet) []flagRecord {
-	var flags []flagRecord
+	flags := []flagRecord{}
 	set.VisitAll(func(f *pflag.Flag) {
 		if f.Name == "help" {
 			return

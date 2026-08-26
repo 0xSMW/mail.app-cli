@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -144,7 +143,7 @@ func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, 
 			end = len(items)
 		}
 		if opts.Progress {
-			fmt.Fprintf(os.Stderr, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
+			fmt.Fprintf(writer.Stderr, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
 		}
 		for _, item := range items[start:end] {
 			if opts.Action == "move" && strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
@@ -186,7 +185,7 @@ func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, 
 				}
 			}
 			if opts.Progress {
-				fmt.Fprintf(os.Stderr, "%s: %d/%d %s %s\n", opts.Action, result.Attempted, len(items), item.ID, item.Status)
+				fmt.Fprintf(writer.Stderr, "%s: %d/%d %s %s\n", opts.Action, result.Attempted, len(items), item.ID, item.Status)
 			}
 			result.Items = append(result.Items, item)
 		}
@@ -224,29 +223,41 @@ func invalidateBatchCaches(action string, items []batchItem) {
 }
 
 func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem) (string, error) {
+	present := func(mailbox string) bool {
+		message, err := client.GetMessageDetailsJSON(item.Account, mailbox, item.ID)
+		return err == nil && message != nil
+	}
 	switch opts.Action {
 	case "archive", "move":
 		// Mail.app may keep the ID (Gmail label changes) or assign a new one
-		// (real moves). Presence in the destination proves the first case;
-		// absence from the source proves the second. Gmail keeps every message
-		// in All Mail, so a source that is All Mail proves nothing either way.
-		if item.TargetMailbox != "" && !strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
-			if message, err := client.GetMessageDetailsJSON(item.Account, item.TargetMailbox, item.ID); err == nil && message != nil {
-				return "present-in-destination", nil
+		// (real moves), and Gmail keeps every message in All Mail. So: a
+		// no-op is fine; archiving into All Mail is proven by absence from
+		// the source; moving out of All Mail is proven by presence in the
+		// destination; anything else accepts either proof.
+		if item.TargetMailbox == "" || strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
+			return "already-in-destination", nil
+		}
+		if mail.IsArchiveAlias(item.TargetMailbox) {
+			if present(item.SourceMailbox) {
+				return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 			}
+			return "absent-from-source", nil
+		}
+		if present(item.TargetMailbox) {
+			return "present-in-destination", nil
 		}
 		if mail.IsArchiveAlias(item.SourceMailbox) {
 			return "destination-unverified", fmt.Errorf("message not found in %s by its old ID; Mail.app may have renumbered it", item.TargetMailbox)
 		}
-		if message, err := client.GetMessageDetailsJSON(item.Account, item.SourceMailbox, item.ID); err != nil || message == nil {
+		if !present(item.SourceMailbox) {
 			return "absent-from-source", nil
 		}
-		return "present-in-source", fmt.Errorf("message still present in source mailbox")
+		return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 	case "delete":
-		if message, err := client.GetMessageDetailsJSON(item.Account, item.SourceMailbox, item.ID); err != nil || message == nil {
-			return "absent-from-source", nil
+		if present(item.SourceMailbox) {
+			return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 		}
-		return "present-in-source", fmt.Errorf("message still present in source mailbox")
+		return "absent-from-source", nil
 	}
 	message, err := client.GetMessageDetailsJSON(item.Account, item.SourceMailbox, item.ID)
 	if err != nil {
@@ -316,8 +327,15 @@ func receiptSummary(result batchResult, opts batchOptions) string {
 	if result.DryRun {
 		return fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), count, target)
 	}
-	if result.Failed > 0 {
-		return fmt.Sprintf("%s %d of %s%s; %d failed", verb, result.Succeeded, count, target, result.Failed)
+	if result.Failed > 0 || result.Skipped > 0 {
+		summary := fmt.Sprintf("%s %d of %s%s", verb, result.Succeeded, count, target)
+		if result.Failed > 0 {
+			summary += fmt.Sprintf("; %d failed", result.Failed)
+		}
+		if result.Skipped > 0 {
+			summary += fmt.Sprintf("; %d already there", result.Skipped)
+		}
+		return summary
 	}
 	return fmt.Sprintf("%s %s%s", verb, count, target)
 }
@@ -332,7 +350,7 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 		} else {
 			p.Line("%s", p.Green(summary))
 		}
-		if !result.DryRun && result.Failed == 0 && len(result.Items) <= 1 {
+		if !result.DryRun && result.Failed == 0 && result.Skipped == 0 && len(result.Items) <= 1 {
 			return
 		}
 		rows := make([][]string, 0, len(result.Items))
@@ -374,23 +392,26 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 			return err
 		}
 	}
-	if err := writer.Write(output.Result{
+	return writer.Write(output.Result{
 		Data:    result,
 		Summary: receiptSummary(result, opts),
 		Notices: notices,
 		Meta:    map[string]any{"action": result.Action, "dryRun": result.DryRun},
 		Plain:   renderReceipt(result, opts),
-	}); err != nil {
-		return err
-	}
-	return mutationErr
+		Err:     clierr.Classify(mutationErr),
+	})
 }
 
-// itemsFromRefs turns located messages into receipt items.
-func itemsFromRefs(refs []messageRef) []batchItem {
+// itemsFromRefs turns located messages into receipt items. Archive acts
+// from the INBOX-or-backing mailbox so it never strips a user label.
+func itemsFromRefs(refs []messageRef, action string) []batchItem {
 	items := make([]batchItem, 0, len(refs))
 	for _, ref := range refs {
-		item := batchItem{ID: ref.ID, Account: ref.Account, SourceMailbox: ref.Mailbox}
+		source := ref.Mailbox
+		if action == "archive" && ref.ArchiveMailbox != "" {
+			source = ref.ArchiveMailbox
+		}
+		item := batchItem{ID: ref.ID, Account: ref.Account, SourceMailbox: source}
 		if ref.Envelope != nil {
 			item.Subject = ref.Envelope.Subject
 		}
@@ -405,7 +426,7 @@ func mutateByIDs(ids []string, opts batchOptions, mutate mutator) error {
 	if err != nil {
 		return err
 	}
-	result, mutationErr := runMessageBatch(mailClient, opts, itemsFromRefs(refs), mutate)
+	result, mutationErr := runMessageBatch(mailClient, opts, itemsFromRefs(refs, opts.Action), mutate)
 	return writeReceipt(result, opts, notices, mutationErr, "")
 }
 
@@ -454,7 +475,7 @@ var messagesBatchDeleteCmd = &cobra.Command{
 }
 
 var messagesBatchMoveCmd = &cobra.Command{
-	Use:   "move [target-mailbox] [message-id...]",
+	Use:   "move <target-mailbox> [message-id...]",
 	Short: "Move selected messages",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -527,7 +548,7 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 			return err
 		}
 		notices = locateNotices
-		items = itemsFromRefs(refs)
+		items = itemsFromRefs(refs, action)
 	}
 	if len(items) == 0 {
 		return clierr.New(clierr.CodeNotFound, "no messages selected")
@@ -587,15 +608,6 @@ func uniqueStrings(values []string) []string {
 		result = append(result, value)
 	}
 	return result
-}
-
-func sortedKeys(m map[string]bool) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 func init() {

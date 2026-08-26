@@ -16,7 +16,12 @@ type item struct {
 
 func newTestWriter(format Format, jq string) (*Writer, *bytes.Buffer, *bytes.Buffer) {
 	var out, errOut bytes.Buffer
-	return New(format, &out, &errOut, false, jq, "test cmd", 1), &out, &errOut
+	w, err := New(format, &out, &errOut, false, jq, "test cmd", 1)
+	if err != nil {
+		w, _ = New(format, &out, &errOut, false, "", "test cmd", 1)
+		w.JQ = jq
+	}
+	return w, &out, &errOut
 }
 
 func TestResolvePrecedence(t *testing.T) {
@@ -132,8 +137,7 @@ func TestJQRunsAgainstEnvelopeOrData(t *testing.T) {
 	if strings.TrimSpace(out.String()) != "2" {
 		t.Fatalf("quiet jq = %q", out.String())
 	}
-	w, _, _ = newTestWriter(FormatJSON, ".data[")
-	if err := w.Write(Result{Data: data}); err == nil {
+	if _, err := New(FormatJSON, &bytes.Buffer{}, &bytes.Buffer{}, false, ".data[", "x", 1); err == nil {
 		t.Fatal("invalid jq accepted")
 	}
 }
@@ -166,6 +170,55 @@ func TestPlainUsesRendererAndErrorsGoToStderr(t *testing.T) {
 	}
 	if env.OK || env.Code != "not_found" || env.ExitCode != 2 || env.Error != "gone" {
 		t.Fatalf("error envelope = %+v", env)
+	}
+}
+
+func TestResultErrMarksEnvelopeNotOK(t *testing.T) {
+	w, out, errOut := newTestWriter(FormatJSON, "")
+	err := w.Write(Result{Data: []item{{ID: "1"}}, Err: clierr.New(clierr.CodeMutationFailed, "1 failed")})
+	var typed *clierr.Error
+	if !errorsAs(err, &typed) || !typed.Reported {
+		t.Fatalf("Write did not return the reported error: %v", err)
+	}
+	var env Envelope
+	if err := json.Unmarshal(out.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.OK || env.Code != "mutation_failed" || env.ExitCode != 6 || env.Error != "1 failed" {
+		t.Fatalf("envelope = %+v", env)
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("stderr should be empty in JSON mode, got %q", errOut.String())
+	}
+	w, out, errOut = newTestWriter(FormatQuiet, "")
+	w.AddNotice("guessed mailbox")
+	_ = w.Write(Result{Data: []item{}, Err: clierr.New(clierr.CodeMutationFailed, "1 failed")})
+	if !strings.Contains(errOut.String(), "notice: guessed mailbox") || !strings.Contains(errOut.String(), "mutation_failed") {
+		t.Fatalf("quiet stderr = %q", errOut.String())
+	}
+	if strings.TrimSpace(out.String()) != "[]" {
+		t.Fatalf("quiet stdout = %q", out.String())
+	}
+}
+
+func TestTableAlignsStyledCells(t *testing.T) {
+	var out bytes.Buffer
+	p := &Printer{Out: &out, Color: true}
+	p.Table([]string{"A", "BB"}, [][]string{{p.Dim("1"), "x"}, {"333", p.Red("y")}})
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+	widths := map[int]bool{}
+	for _, line := range lines {
+		stripped := ansiPattern.ReplaceAllString(line, "")
+		widths[strings.Index(stripped, "x")+strings.Index(stripped, "y")+strings.Index(stripped, "BB")] = true
+	}
+	for _, line := range lines {
+		stripped := ansiPattern.ReplaceAllString(line, "")
+		if len(stripped) < 5 {
+			t.Fatalf("line too short: %q", stripped)
+		}
+		if stripped[5:6] == " " && !strings.HasPrefix(stripped, "333") {
+			t.Fatalf("second column misaligned in %q", stripped)
+		}
 	}
 }
 

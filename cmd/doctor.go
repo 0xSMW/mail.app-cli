@@ -131,7 +131,7 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Check Mail.app access, permissions, and index availability",
 	Annotations: map[string]string{
-		annotationAgentNotes: "Run this first when any command exits 3. healthy=false with envelopeIndexAvailable=false means slow automation-only reads, not a broken install.",
+		annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		result := diagnose(mailClient, version, os.Executable)
@@ -139,12 +139,10 @@ var doctorCmd = &cobra.Command{
 		if !result.Healthy {
 			summary = "not healthy"
 		}
-		if err := writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result)}); err != nil {
-			return err
-		}
+		var failure *clierr.Error
 		if !result.Healthy {
-			return clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks above")
+			failure = clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
 		}
-		return nil
+		return writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
 	},
 }

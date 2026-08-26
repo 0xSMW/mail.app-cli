@@ -91,6 +91,7 @@ mailboxes list --no-cache
 messages
 messages archive
 messages archive --dry-run
+messages archive --verify
 messages batch
 messages batch archive
 messages batch archive --chunk-size
@@ -161,6 +162,7 @@ messages batch move --verify
 messages batch move --yes
 messages delete
 messages delete --dry-run
+messages delete --verify
 messages drafts
 messages drafts --limit (-l)
 messages drafts --offset (-o)
@@ -168,6 +170,7 @@ messages drafts --with-content
 messages flag
 messages flag --dry-run
 messages flag --flagged (-f)
+messages flag --verify
 messages flagged
 messages flagged --limit (-l)
 messages flagged --offset (-o)
@@ -192,8 +195,10 @@ messages list --with-content
 messages mark
 messages mark --dry-run
 messages mark --read (-r)
+messages mark --verify
 messages move
 messages move --dry-run
+messages move --verify
 messages sent
 messages sent --limit (-l)
 messages sent --offset (-o)
@@ -221,7 +226,6 @@ recent search --limit (-l)
 recent show
 rules
 rules apply
-rules apply --dry-run
 rules apply --limit (-l)
 rules apply --query
 rules create
@@ -279,6 +283,7 @@ threads
 threads archive
 threads archive --dry-run
 threads archive --limit (-l)
+threads archive --verify
 threads list
 threads list --limit (-l)
 threads show

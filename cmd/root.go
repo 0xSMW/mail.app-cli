@@ -27,6 +27,9 @@ const (
 	annotationAgentNotes    = "agentNotes"
 	annotationCompatibility = "compatibility"
 	annotationHelpTopic     = "helpTopic"
+	// annotationList marks commands whose data is a list, the only ones that
+	// accept --ids-only and --count.
+	annotationList = "list"
 )
 
 var (
@@ -70,16 +73,32 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	}
 	cerr := classifyCommandError(err)
+	if cerr.Reported {
+		return clierr.ExitCode(cerr.Code)
+	}
 	w := writer
 	if w == nil {
+		// prepare never ran (parse error, bad config). Honor an explicit JSON
+		// request in the raw args so agents still get a parseable error.
 		format := output.FormatJSON
-		if output.IsTerminal(os.Stdout) {
+		if output.IsTerminal(os.Stdout) && !wantsJSONArgs(args) {
 			format = output.FormatPlain
 		}
-		w = output.New(format, stdout, stderr, false, "", "", mail.SchemaVersion)
+		w, _ = output.New(format, stdout, stderr, false, "", "", mail.SchemaVersion)
 	}
 	w.Error(cerr)
 	return clierr.ExitCode(cerr.Code)
+}
+
+func wantsJSONArgs(args []string) bool {
+	for _, arg := range args {
+		switch {
+		case arg == "--json", arg == "--agent", arg == "--quiet", arg == "-q", arg == "--jq",
+			strings.HasPrefix(arg, "--jq="), arg == "--ids-only", arg == "--count":
+			return true
+		}
+	}
+	return os.Getenv(config.EnvOutput) == "json"
 }
 
 // classifyCommandError turns cobra's own parse failures into usage errors and
@@ -103,7 +122,7 @@ func classifyCommandError(err error) *clierr.Error {
 
 func prepare(cmd *cobra.Command, args []string) error {
 	loaded, err := config.Load()
-	if err != nil {
+	if err != nil && !isMetaCommand(cmd) {
 		return clierr.Wrap(clierr.CodeUsage, err, err.Error()).WithHint("fix or delete the config file, see 'mail-app-cli config path'")
 	}
 	cfg = loaded
@@ -122,10 +141,57 @@ func prepare(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if (outFlags.Count || outFlags.IDsOnly) && cmd.Annotations[annotationList] != "true" && !isMetaCommand(cmd) {
+		return clierr.Usage("--ids-only and --count only apply to commands that return a list").
+			WithHint("use --jq to pick fields from this command's data")
+	}
 	color := output.ColorEnabled(format, tty, outFlags.NoColor, os.Getenv)
-	writer = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
+	writer, err = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
+	if err != nil {
+		return err
+	}
+	mail.Warn = writer.AddNotice
 	mailClient = mail.NewClient()
 	return nil
+}
+
+// isMetaCommand reports cobra's own help and completion commands, which
+// must work even when the config file is broken.
+func isMetaCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "help", "completion", "__complete", "__completeNoDesc":
+			return true
+		}
+	}
+	return false
+}
+
+// markList tags commands whose data is a list.
+func markList(cmds ...*cobra.Command) {
+	for _, cmd := range cmds {
+		if cmd.Annotations == nil {
+			cmd.Annotations = map[string]string{}
+		}
+		cmd.Annotations[annotationList] = "true"
+	}
+}
+
+// helpCommand replaces cobra's default so an unknown topic is a usage error
+// instead of the root help with exit 0.
+func helpCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "help [command or topic]",
+		Short: "Help about any command or topic",
+		RunE: func(c *cobra.Command, args []string) error {
+			target, _, err := rootCmd.Find(args)
+			if err != nil || (len(args) > 0 && target == rootCmd) {
+				return clierr.Usagef("unknown help topic %q", strings.Join(args, " ")).
+					WithHint("topics: output, exit-codes, environment, agents; or a command name")
+			}
+			return target.Help()
+		},
+	}
 }
 
 func commandPath(cmd *cobra.Command) string {
@@ -195,4 +261,14 @@ func init() {
 		rootCmd.AddCommand(cmd)
 	}
 	rootCmd.AddCommand(helpTopicCommands()...)
+	rootCmd.SetHelpCommand(helpCommand())
+
+	markList(
+		inboxCmd, unreadCmd, searchCmd,
+		accountsListCmd, mailboxesListCmd, messagesListCmd,
+		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd, messagesDraftsCmd,
+		messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd, messagesVIPCmd,
+		attachmentsListCmd, draftsListCmd, rulesListCmd, smartListCmd, smartQueryCmd,
+		signaturesListCmd, threadsListCmd, recentSearchCmd, exportAttachmentsCmd,
+	)
 }

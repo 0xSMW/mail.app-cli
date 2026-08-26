@@ -52,7 +52,7 @@ Error (stderr, non-zero exit):
 Shortcuts:
 
   --quiet       bare data with no envelope (the 1.x shape, with camelCase keys)
-  --ids-only    one id per line from any list command
+  --ids-only    one id per line from lists whose items carry an id
   --count       just the number of items
   --jq EXPR     run a jq expression over the envelope (over data with --quiet);
                 strings print raw, like jq -r
@@ -67,7 +67,7 @@ func exitCodesTopic() string {
 	for _, row := range clierr.Table() {
 		fmt.Fprintf(&b, "  %d  %-16s %s\n", row.Exit, row.Code, row.Meaning)
 	}
-	b.WriteString("\nThe same code appears as \"code\" in the JSON error envelope on stderr.\nMutation receipts are still written to stdout before exit 6, so the items\nthat failed can be read from data.items[].error.")
+	b.WriteString("\nThe same code appears as \"code\" in the JSON error envelope on stderr.\nMutation receipts and doctor results are written to stdout with ok:false and\nthe same code fields, so data.items[].error is still readable after exit 6.")
 	return b.String()
 }
 
@@ -101,14 +101,20 @@ Shell completion
 
 const agentsTopic = `Agents
 
-  1. Always pass --json (or pipe) and read "ok" before "data".
+  1. Always pass --json (or pipe). "ok" is false whenever the exit code is
+     non-zero, including receipts with failed items and an unhealthy doctor,
+     which still carry "data".
   2. Check the exit code; the JSON error on stderr has "code" and "hint".
+     Warnings arrive as "notices" in the envelope, not as loose stderr text.
   3. IDs are numeric and come from list, search, inbox, and show output. A
      message ID alone is enough for show, seen, unseen, flag, unflag, archive,
      delete, move, and attachments: the mailbox is resolved through the
      Envelope Index. Pass --account and --mailbox only to override.
-  4. Every mutation accepts --dry-run and returns the same receipt shape:
-     {action, dryRun, matched, attempted, succeeded, failed, items[]}.
+  4. Every message mutation (seen, unseen, flag, unflag, archive, delete,
+     move, messages *, messages batch, threads archive) accepts --dry-run
+     and --verify and returns one receipt shape:
+     {action, dryRun, matched, attempted, succeeded, failed, skipped, items[]}.
+     send, drafts, and rules accept --dry-run and return their own shapes.
      Preview selector-driven batch operations before adding --yes.
   5. 'search' fails closed (exit 5) when a mailbox could not be searched; add
      --allow-partial only when incomplete results are acceptable.

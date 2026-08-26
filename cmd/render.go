@@ -204,5 +204,9 @@ func plural(n int, singular string) string {
 	if n == 1 {
 		return fmt.Sprintf("%d %s", n, singular)
 	}
-	return fmt.Sprintf("%d %ss", n, singular)
+	suffix := "s"
+	if strings.HasSuffix(singular, "x") || strings.HasSuffix(singular, "ch") || strings.HasSuffix(singular, "sh") || strings.HasSuffix(singular, "s") {
+		suffix = "es"
+	}
+	return fmt.Sprintf("%d %s%s", n, singular, suffix)
 }

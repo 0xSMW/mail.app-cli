@@ -22,6 +22,15 @@ func TestPreferredMessageMailbox(t *testing.T) {
 	}
 }
 
+func TestArchiveSourceMailbox(t *testing.T) {
+	if got := archiveSourceMailbox("All Mail", []string{"Receipts", "INBOX"}); got != "INBOX" {
+		t.Fatalf("archive source = %q, want INBOX", got)
+	}
+	if got := archiveSourceMailbox("All Mail", []string{"Receipts"}); got != "All Mail" {
+		t.Fatalf("archive source with user label = %q, want All Mail", got)
+	}
+}
+
 func TestIsGmailSystemLabelURL(t *testing.T) {
 	if !isGmailSystemLabelURL("imap://ABC/%5BGmail%5D/Important") {
 		t.Fatal("Important should be a system label")

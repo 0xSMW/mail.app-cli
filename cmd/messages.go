@@ -25,6 +25,7 @@ var (
 	msgNoCache       bool
 	msgForceRefresh  bool
 	msgDryRun        bool
+	msgVerify        bool
 )
 
 // sanitizeCacheKey replaces non-alphanumeric chars so the key is safe as a filename component.
@@ -58,8 +59,7 @@ The single-message verbs here (show, mark, flag, archive, delete, move) are
 the 1.x spelling; the top-level show, seen, unseen, flag, unflag, archive,
 delete, and move commands do the same work and accept several IDs.`,
 	Annotations: map[string]string{
-		annotationCompatibility: "true",
-		annotationAgentNotes:    "Prefer the top-level verbs. 'messages list' is the one command that lists a specific mailbox with filters.",
+		annotationAgentNotes: "'messages list' lists one mailbox with filters. The single-message verbs here are 1.x spellings; prefer the top-level show, seen, flag, archive, delete, and move.",
 	},
 }
 
@@ -125,7 +125,7 @@ var messagesMarkCmd = &cobra.Command{
 	Short: "Mark a message read (default) or unread with --read=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "mark", Read: msgRead, DryRun: msgDryRun, Journal: true}, markMutator(msgRead))
+		return mutateByIDs(args, batchOptions{Action: "mark", Read: msgRead, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, markMutator(msgRead))
 	},
 }
 
@@ -134,7 +134,7 @@ var messagesFlagCmd = &cobra.Command{
 	Short: "Flag a message (default) or unflag with --flagged=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "flag", Flagged: msgFlaggedSet, DryRun: msgDryRun, Journal: true}, flagMutator(msgFlaggedSet))
+		return mutateByIDs(args, batchOptions{Action: "flag", Flagged: msgFlaggedSet, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, flagMutator(msgFlaggedSet))
 	},
 }
 
@@ -143,7 +143,7 @@ var messagesDeleteCmd = &cobra.Command{
 	Short: "Move a message to the trash",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "delete", DryRun: msgDryRun, Journal: true}, deleteMutator)
+		return mutateByIDs(args, batchOptions{Action: "delete", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, deleteMutator)
 	},
 }
 
@@ -152,7 +152,7 @@ var messagesArchiveCmd = &cobra.Command{
 	Short: "Archive a message",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "archive", DryRun: msgDryRun, Journal: true}, archiveMutator(true))
+		return mutateByIDs(args, batchOptions{Action: "archive", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, archiveMutator(true))
 	},
 }
 
@@ -161,7 +161,7 @@ var messagesMoveCmd = &cobra.Command{
 	Short: "Move a message to another mailbox",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Journal: true}, moveMutator(true))
+		return mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Verify: msgVerify, Journal: true}, moveMutator(true))
 	},
 }
 
@@ -208,8 +208,15 @@ func init() {
 
 	messagesMarkCmd.Flags().BoolVarP(&msgRead, "read", "r", true, "Mark read (default) or --read=false for unread")
 	messagesFlagCmd.Flags().BoolVarP(&msgFlaggedSet, "flagged", "f", true, "Flag (default) or --flagged=false to unflag")
+	for _, cmd := range []*cobra.Command{messagesShowCmd, messagesMarkCmd, messagesFlagCmd, messagesDeleteCmd, messagesArchiveCmd, messagesMoveCmd} {
+		if cmd.Annotations == nil {
+			cmd.Annotations = map[string]string{}
+		}
+		cmd.Annotations[annotationCompatibility] = "true"
+	}
 	for _, cmd := range []*cobra.Command{messagesMarkCmd, messagesFlagCmd, messagesDeleteCmd, messagesArchiveCmd, messagesMoveCmd} {
 		cmd.Flags().BoolVar(&msgDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+		cmd.Flags().BoolVar(&msgVerify, "verify", false, "Re-read the message after mutation and record the outcome")
 	}
 
 	for _, cmd := range []*cobra.Command{

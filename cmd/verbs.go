@@ -27,7 +27,7 @@ var (
 
 var inboxCmd = &cobra.Command{
 	Use:   "inbox",
-	Short: "List inbox messages across accounts, or one account with --account",
+	Short: "List INBOX across accounts, one account with --account, or another mailbox with --mailbox",
 	Annotations: map[string]string{
 		annotationAgentNotes: "Newest first. Without --account this merges every enabled account's INBOX. IDs feed show, seen, flag, archive, delete, and move.",
 	},
@@ -181,7 +181,7 @@ func init() {
 		cmd.Flags().BoolVar(&verbWithContent, "with-content", false, "Include bodies (slow: one Mail.app call per ten messages)")
 	}
 	inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
-	showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the body; answer from the Envelope Index when possible")
+	showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
 
 	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
 	_ = moveCmd.MarkFlagRequired("to")
