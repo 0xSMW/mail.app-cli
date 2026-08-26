@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/cache"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -13,8 +14,6 @@ import (
 const messageCacheTTL = 5 * time.Minute
 
 var (
-	msgAccount       string
-	msgMailbox       string
 	msgLimit         int
 	msgOffset        int
 	msgUnread        bool
@@ -25,6 +24,7 @@ var (
 	msgSince         string
 	msgNoCache       bool
 	msgForceRefresh  bool
+	msgDryRun        bool
 )
 
 // sanitizeCacheKey replaces non-alphanumeric chars so the key is safe as a filename component.
@@ -41,254 +41,137 @@ func sanitizeCacheKey(s string) string {
 }
 
 // invalidateMailboxCache removes all message-list cache entries for the given mailbox.
-// Call this after any mutation so subsequent list commands see fresh data.
 func invalidateMailboxCache(account, mailbox string) {
 	if c, err := cache.New(); err == nil {
 		prefix := fmt.Sprintf("msgs-%s-%s-", sanitizeCacheKey(account), sanitizeCacheKey(mailbox))
-		c.DeletePrefix(prefix)
+		_ = c.DeletePrefix(prefix)
 	}
 }
 
 var messagesCmd = &cobra.Command{
 	Use:   "messages",
-	Short: "Manage Mail.app messages",
-	Long:  `View and manage email messages in Mail.app.`,
+	Short: "List and act on messages in one mailbox",
+	Long: `List and act on messages. The account and mailbox come from --account
+and --mailbox, the config file, or defaults (the only account, INBOX).
+
+The single-message verbs here (show, mark, flag, archive, delete, move) are
+the 1.x spelling; the top-level show, seen, unseen, flag, unflag, archive,
+delete, and move commands do the same work and accept several IDs.`,
+	Annotations: map[string]string{
+		annotationCompatibility: "true",
+		annotationAgentNotes:    "Prefer the top-level verbs. 'messages list' is the one command that lists a specific mailbox with filters.",
+	},
 }
 
 var messagesListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List messages",
-	Long:  `List messages from a specific mailbox. Output is JSON format. Use jq for pretty printing: mail-app-cli messages list -a Account -m INBOX | jq`,
+	Short: "List messages in the mailbox in scope",
+	Annotations: map[string]string{
+		annotationAgentNotes: "Results are cached 5 minutes per query; pass --no-cache after a mutation from another tool. --with-content is slow; prefer show for one body.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
+		account, err := requireAccount()
+		if err != nil {
 			return err
 		}
+		mailbox := mailboxInScope()
 		var c *cache.Cache
 		var cacheErr error
 		if !msgNoCache {
 			c, cacheErr = cache.New()
 		}
-
-		// Build a cache key that encodes all query parameters so different queries
-		// get separate cache entries.
 		cacheKey := fmt.Sprintf("msgs-%s-%s-%d-%d-%v-%v-%s-%v",
-			sanitizeCacheKey(msgAccount),
-			sanitizeCacheKey(msgMailbox),
-			msgLimit, msgOffset,
-			msgUnread, msgFlaggedFilter,
-			sanitizeCacheKey(msgSince),
-			msgWithContent,
-		)
+			sanitizeCacheKey(account), sanitizeCacheKey(mailbox),
+			msgLimit, msgOffset, msgUnread, msgFlaggedFilter, sanitizeCacheKey(msgSince), msgWithContent)
 
-		// Try cache first (skip if content requested — content is per-user and typically large)
+		var messages []mail.Message
+		source := "live"
 		if !msgNoCache && !msgForceRefresh && !msgWithContent && cacheErr == nil {
 			c.SetTTL(messageCacheTTL)
-			var cached []mail.Message
-			found, err := c.Get(cacheKey, &cached)
-			if err == nil && found {
-				return printJSON(cached, "messages")
+			if found, err := c.Get(cacheKey, &messages); err == nil && found {
+				source = "cache"
 			}
 		}
-
-		client := mail.NewClient()
-		messages, err := client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, msgUnread, msgFlaggedFilter, msgWithContent, msgSince)
-		if err != nil {
-			return fmt.Errorf("failed to get messages: %w", err)
+		if source == "live" {
+			messages, err = mailClient.GetMessagesJSON(account, mailbox, msgLimit, msgOffset, msgUnread, msgFlaggedFilter, msgWithContent, msgSince)
+			if err != nil {
+				return fmt.Errorf("get messages: %w", err)
+			}
+			if !msgNoCache && !msgWithContent && cacheErr == nil {
+				c.SetTTL(messageCacheTTL)
+				_ = c.Set(cacheKey, messages)
+			}
 		}
-
-		// Populate cache (skip content results because content enrichment can be partial)
-		if !msgNoCache && !msgWithContent && cacheErr == nil {
-			c.SetTTL(messageCacheTTL)
-			c.Set(cacheKey, messages)
-		}
-
-		return printJSON(messages, "messages")
+		return writer.Write(output.Result{
+			Data:    messages,
+			Summary: fmt.Sprintf("%s in %s/%s", plural(len(messages), "message"), account, mailbox),
+			Meta:    map[string]any{"account": account, "mailbox": mailbox, "source": source},
+			Plain:   renderMessages(messages, false),
+		})
 	},
 }
 
 var messagesShowCmd = &cobra.Command{
-	Use:   "show [message-id]",
-	Short: "Show message details",
-	Long:  `Show full details of a specific message. Output is JSON format.`,
+	Use:   "show <message-id>",
+	Short: "Show message details (same as top-level show)",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		message, err := client.GetMessageDetailsJSON(msgAccount, msgMailbox, messageID)
-		if err != nil {
-			return fmt.Errorf("failed to get message: %w", err)
-		}
-		if message == nil {
-			return fmt.Errorf("message not found: %s", messageID)
-		}
-		_ = mail.RecordRecentMessage(*message, "show")
-
-		return printJSON(message, "message")
+		return showMessage(args[0], false)
 	},
 }
 
 var messagesMarkCmd = &cobra.Command{
-	Use:   "mark [message-id]",
-	Short: "Mark message as read/unread",
-	Long:  `Mark a message as read or unread.`,
+	Use:   "mark <message-id>",
+	Short: "Mark a message read (default) or unread with --read=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		err := client.MarkMessageAsRead(msgAccount, msgMailbox, messageID, msgRead)
-		if err != nil {
-			return fmt.Errorf("failed to mark message: %w", err)
-		}
-		invalidateMailboxCache(msgAccount, msgMailbox)
-
-		status := "unread"
-		if msgRead {
-			status = "read"
-		}
-		fmt.Printf("Message marked as %s\n", status)
-		return nil
+		return mutateByIDs(args, batchOptions{Action: "mark", Read: msgRead, DryRun: msgDryRun, Journal: true}, markMutator(msgRead))
 	},
 }
 
 var messagesFlagCmd = &cobra.Command{
-	Use:   "flag [message-id]",
-	Short: "Flag or unflag a message",
-	Long:  `Set or unset the flagged status of a message.`,
+	Use:   "flag <message-id>",
+	Short: "Flag a message (default) or unflag with --flagged=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		err := client.FlagMessage(msgAccount, msgMailbox, messageID, msgFlaggedSet)
-		if err != nil {
-			return fmt.Errorf("failed to flag message: %w", err)
-		}
-		invalidateMailboxCache(msgAccount, msgMailbox)
-
-		status := "unflagged"
-		if msgFlaggedSet {
-			status = "flagged"
-		}
-		fmt.Printf("Message %s\n", status)
-		return nil
+		return mutateByIDs(args, batchOptions{Action: "flag", Flagged: msgFlaggedSet, DryRun: msgDryRun, Journal: true}, flagMutator(msgFlaggedSet))
 	},
 }
 
 var messagesDeleteCmd = &cobra.Command{
-	Use:   "delete [message-id]",
-	Short: "Delete a message",
-	Long:  `Move a message to the trash.`,
+	Use:   "delete <message-id>",
+	Short: "Move a message to the trash",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		err := client.DeleteMessageResolved(msgAccount, msgMailbox, messageID)
-		if err != nil {
-			return fmt.Errorf("failed to delete message: %w", err)
-		}
-		invalidateMailboxCache(msgAccount, msgMailbox)
-		invalidateMailboxCache(msgAccount, "Archive")
-		invalidateMailboxCache(msgAccount, "All Mail")
-
-		fmt.Println("Message deleted")
-		return nil
+		return mutateByIDs(args, batchOptions{Action: "delete", DryRun: msgDryRun, Journal: true}, deleteMutator)
 	},
 }
 
 var messagesArchiveCmd = &cobra.Command{
-	Use:   "archive [message-id]",
+	Use:   "archive <message-id>",
 	Short: "Archive a message",
-	Long:  `Move a message to the Archive mailbox.`,
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		_ = client.RecordRecentEnvelope(msgAccount, msgMailbox, messageID, "archive")
-		archiveMailbox, err := client.ArchiveMessageWithDestination(msgAccount, msgMailbox, messageID)
-		if err != nil {
-			return fmt.Errorf("failed to archive message: %w", err)
-		}
-		_ = mail.UpdateRecentMessageLocation(msgAccount, messageID, archiveMailbox, "archive")
-		invalidateMailboxCache(msgAccount, msgMailbox)
-		// Also invalidate the archive mailbox (provider-dependent name)
-		invalidateMailboxCache(msgAccount, "Archive")
-		invalidateMailboxCache(msgAccount, "All Mail")
-
-		fmt.Println("Message archived")
-		return nil
+		return mutateByIDs(args, batchOptions{Action: "archive", DryRun: msgDryRun, Journal: true}, archiveMutator(true))
 	},
 }
 
 var messagesMoveCmd = &cobra.Command{
-	Use:   "move [message-id] [target-mailbox]",
+	Use:   "move <message-id> <target-mailbox>",
 	Short: "Move a message to another mailbox",
-	Long:  `Move a message to a different mailbox.`,
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messageID := args[0]
-		targetMailbox := args[1]
-		if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-			return err
-		}
-
-		client := mail.NewClient()
-		_ = client.RecordRecentEnvelope(msgAccount, msgMailbox, messageID, "move")
-		err := client.MoveMessage(msgAccount, msgMailbox, messageID, targetMailbox)
-		if err != nil {
-			return fmt.Errorf("failed to move message: %w", err)
-		}
-		_ = mail.UpdateRecentMessageLocation(msgAccount, messageID, targetMailbox, "move")
-		invalidateMailboxCache(msgAccount, msgMailbox)
-		invalidateMailboxCache(msgAccount, targetMailbox)
-
-		fmt.Printf("Message moved to %s\n", targetMailbox)
-		return nil
+		return mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Journal: true}, moveMutator(true))
 	},
 }
 
 // newUnifiedCmd returns a cobra.Command for a unified mailbox view.
-// mailboxType must match one of the types understood by GetUnifiedMessagesJSON.
 func newUnifiedCmd(use, short, mailboxType string) *cobra.Command {
 	return &cobra.Command{
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := mail.NewClient()
-			var messages []mail.Message
-			var err error
-			if msgAccount != "" || msgMailbox != "" {
-				if err := requireAccountAndMailbox(msgAccount, msgMailbox); err != nil {
-					return err
-				}
-				unreadOnly, flaggedOnly := scopedUnifiedFilters(mailboxType)
-				messages, err = client.GetMessagesJSON(msgAccount, msgMailbox, msgLimit, msgOffset, unreadOnly, flaggedOnly, msgWithContent, "")
-			} else {
-				messages, err = client.GetUnifiedMessagesJSON(mailboxType, msgLimit, msgOffset, msgWithContent)
-			}
-			if err != nil {
-				return fmt.Errorf("failed to get %s messages: %w", mailboxType, err)
-			}
-
-			return printJSON(messages, "messages")
+			return listUnified(mailboxType, msgLimit, msgOffset, msgWithContent)
 		},
 	}
 }
@@ -297,94 +180,44 @@ func scopedUnifiedFilters(mailboxType string) (bool, bool) {
 	return mailboxType == "unread", mailboxType == "flagged"
 }
 
-var messagesInboxCmd = newUnifiedCmd(
-	"inbox",
-	"List inbox messages across all accounts",
-	"inbox",
-)
-
-var messagesUnreadCmd = newUnifiedCmd(
-	"unread",
-	"List unread messages across all accounts",
-	"unread",
-)
-
-var messagesSentCmd = newUnifiedCmd(
-	"sent",
-	"List sent messages across all accounts",
-	"sent",
-)
-
-var messagesDraftsCmd = newUnifiedCmd(
-	"drafts",
-	"List draft messages across all accounts",
-	"drafts",
-)
-
-var messagesFlaggedCmd = newUnifiedCmd(
-	"flagged",
-	"List flagged messages across all accounts",
-	"flagged",
-)
-
-var messagesTrashCmd = newUnifiedCmd(
-	"trash",
-	"List trash messages across all accounts",
-	"trash",
-)
-
-var messagesJunkCmd = newUnifiedCmd(
-	"junk",
-	"List junk/spam messages across all accounts",
-	"junk",
-)
+var messagesInboxCmd = newUnifiedCmd("inbox", "List inbox messages across all accounts", "inbox")
+var messagesUnreadCmd = newUnifiedCmd("unread", "List unread messages across all accounts", "unread")
+var messagesSentCmd = newUnifiedCmd("sent", "List sent messages across all accounts", "sent")
+var messagesDraftsCmd = newUnifiedCmd("drafts", "List draft messages across all accounts", "drafts")
+var messagesFlaggedCmd = newUnifiedCmd("flagged", "List flagged messages across all accounts", "flagged")
+var messagesTrashCmd = newUnifiedCmd("trash", "List trash messages across all accounts", "trash")
+var messagesJunkCmd = newUnifiedCmd("junk", "List junk/spam messages across all accounts", "junk")
 
 func init() {
-	messagesCmd.AddCommand(messagesListCmd)
-	messagesCmd.AddCommand(messagesShowCmd)
-	messagesCmd.AddCommand(messagesMarkCmd)
-	messagesCmd.AddCommand(messagesFlagCmd)
-	messagesCmd.AddCommand(messagesDeleteCmd)
-	messagesCmd.AddCommand(messagesArchiveCmd)
-	messagesCmd.AddCommand(messagesMoveCmd)
-	// Unified view subcommands
-	messagesCmd.AddCommand(messagesInboxCmd)
-	messagesCmd.AddCommand(messagesUnreadCmd)
-	messagesCmd.AddCommand(messagesSentCmd)
-	messagesCmd.AddCommand(messagesDraftsCmd)
-	messagesCmd.AddCommand(messagesFlaggedCmd)
-	messagesCmd.AddCommand(messagesTrashCmd)
-	messagesCmd.AddCommand(messagesJunkCmd)
-	messagesCmd.AddCommand(messagesBatchCmd)
-	messagesCmd.AddCommand(messagesVIPCmd)
+	messagesCmd.AddCommand(
+		messagesListCmd, messagesShowCmd, messagesMarkCmd, messagesFlagCmd,
+		messagesDeleteCmd, messagesArchiveCmd, messagesMoveCmd,
+		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd, messagesDraftsCmd,
+		messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd,
+		messagesBatchCmd, messagesVIPCmd,
+	)
 
-	// Common flags for all message commands
-	messagesCmd.PersistentFlags().StringVarP(&msgAccount, "account", "a", "", "Account name (required)")
-	messagesCmd.PersistentFlags().StringVarP(&msgMailbox, "mailbox", "m", "", "Mailbox name (required)")
+	messagesListCmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum messages to return")
+	messagesListCmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Messages to skip (pagination)")
+	messagesListCmd.Flags().BoolVarP(&msgUnread, "unread", "u", false, "Only unread messages")
+	messagesListCmd.Flags().BoolVarP(&msgFlaggedFilter, "flagged", "f", false, "Only flagged messages")
+	messagesListCmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include bodies (slow)")
+	messagesListCmd.Flags().StringVarP(&msgSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
+	messagesListCmd.Flags().BoolVar(&msgNoCache, "no-cache", false, "Bypass the cache and read live")
+	messagesListCmd.Flags().BoolVar(&msgForceRefresh, "force-refresh", false, "Refresh the cache with a live read")
 
-	// List-specific flags
-	messagesListCmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum number of messages to display")
-	messagesListCmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Number of messages to skip (for pagination)")
-	messagesListCmd.Flags().BoolVarP(&msgUnread, "unread", "u", false, "Show only unread messages")
-	messagesListCmd.Flags().BoolVarP(&msgFlaggedFilter, "flagged", "f", false, "Show only flagged messages")
-	messagesListCmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include message content (slower but better for accessibility)")
-	messagesListCmd.Flags().StringVarP(&msgSince, "since", "s", "", "Show messages since date (format: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
-	messagesListCmd.Flags().BoolVar(&msgNoCache, "no-cache", false, "Bypass cache and fetch fresh data")
-	messagesListCmd.Flags().BoolVar(&msgForceRefresh, "force-refresh", false, "Force refresh cache with fresh data")
+	messagesMarkCmd.Flags().BoolVarP(&msgRead, "read", "r", true, "Mark read (default) or --read=false for unread")
+	messagesFlagCmd.Flags().BoolVarP(&msgFlaggedSet, "flagged", "f", true, "Flag (default) or --flagged=false to unflag")
+	for _, cmd := range []*cobra.Command{messagesMarkCmd, messagesFlagCmd, messagesDeleteCmd, messagesArchiveCmd, messagesMoveCmd} {
+		cmd.Flags().BoolVar(&msgDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+	}
 
-	// Mark-specific flags
-	messagesMarkCmd.Flags().BoolVarP(&msgRead, "read", "r", true, "Mark as read (default) or use --read=false for unread")
-
-	// Flag-specific flags
-	messagesFlagCmd.Flags().BoolVarP(&msgFlaggedSet, "flagged", "f", true, "Flag message (default) or use --flagged=false to unflag")
-
-	// Unified view flags (shared across all unified subcommands)
 	for _, cmd := range []*cobra.Command{
 		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd,
 		messagesDraftsCmd, messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd,
 	} {
-		cmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum number of messages to return")
-		cmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Number of messages to skip (pagination)")
-		cmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include message content")
+		cmd.Flags().IntVarP(&msgLimit, "limit", "l", 25, "Maximum messages to return")
+		cmd.Flags().IntVarP(&msgOffset, "offset", "o", 0, "Messages to skip (pagination)")
+		cmd.Flags().BoolVar(&msgWithContent, "with-content", false, "Include bodies (slow)")
 	}
 }

@@ -3,68 +3,78 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/cache"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 var (
-	mailboxAccount      string
 	mailboxNoCache      bool
 	mailboxForceRefresh bool
 )
 
 var mailboxesCmd = &cobra.Command{
 	Use:   "mailboxes",
-	Short: "Manage Mail.app mailboxes",
-	Long:  `View and manage your Mail.app mailboxes.`,
+	Short: "List mailboxes and unread counts",
 }
 
 var mailboxesListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all mailboxes",
-	Long:  `List all mailboxes across all accounts or for a specific account. Output is JSON format. Use jq for pretty printing: mail-app-cli mailboxes list | jq`,
+	Short: "List mailboxes for all accounts, or one with --account",
+	Annotations: map[string]string{
+		annotationAgentNotes: "Counts come from the Envelope Index when readable. 'name' is what --mailbox and 'move --to' expect. Gmail's archive is named 'All Mail'.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var mailboxes []mail.Mailbox
+		account := resolved.Account.Value
 		var c *cache.Cache
 		var cacheErr error
 		if !mailboxNoCache {
 			c, cacheErr = cache.New()
 		}
-
-		// Determine cache key based on whether account is specified
 		cacheKey := "mailboxes"
-		if mailboxAccount != "" {
-			cacheKey = fmt.Sprintf("mailboxes-%s", mailboxAccount)
+		if account != "" {
+			cacheKey = "mailboxes-" + sanitizeCacheKey(account)
 		}
-
-		// Try to get from cache if not disabled
+		var mailboxes []mail.Mailbox
+		fromCache := false
 		if !mailboxNoCache && !mailboxForceRefresh && cacheErr == nil {
-			found, err := c.Get(cacheKey, &mailboxes)
-			if err == nil && found {
-				return printJSON(mailboxes, "mailboxes")
+			if found, err := c.Get(cacheKey, &mailboxes); err == nil && found {
+				fromCache = true
 			}
 		}
-
-		// Get from Mail.app
-		client := mail.NewClient()
-		mailboxes, err := client.GetMailboxesJSON(mailboxAccount)
-		if err != nil {
-			return fmt.Errorf("failed to get mailboxes: %w", err)
+		if !fromCache {
+			var err error
+			mailboxes, err = mailClient.GetMailboxesJSON(account)
+			if err != nil {
+				return fmt.Errorf("get mailboxes: %w", err)
+			}
+			if !mailboxNoCache && cacheErr == nil {
+				_ = c.Set(cacheKey, mailboxes)
+			}
 		}
-
-		// Save to cache if not disabled
-		if !mailboxNoCache && cacheErr == nil {
-			c.Set(cacheKey, mailboxes)
+		source := "live"
+		if fromCache {
+			source = "cache"
 		}
-
-		return printJSON(mailboxes, "mailboxes")
+		return writer.Write(output.Result{
+			Data:    mailboxes,
+			Summary: plural(len(mailboxes), "mailbox"),
+			Meta:    map[string]any{"source": source, "account": accountOrAll(account)},
+			Plain:   renderMailboxes(mailboxes),
+		})
 	},
+}
+
+func accountOrAll(account string) string {
+	if account == "" {
+		return "all"
+	}
+	return account
 }
 
 func init() {
 	mailboxesCmd.AddCommand(mailboxesListCmd)
-	mailboxesListCmd.Flags().StringVarP(&mailboxAccount, "account", "a", "", "Filter by account name")
-	mailboxesListCmd.Flags().BoolVar(&mailboxNoCache, "no-cache", false, "Bypass cache and fetch fresh data")
-	mailboxesListCmd.Flags().BoolVar(&mailboxForceRefresh, "force-refresh", false, "Force refresh cache with fresh data")
+	mailboxesListCmd.Flags().BoolVar(&mailboxNoCache, "no-cache", false, "Bypass the cache and read from Mail.app")
+	mailboxesListCmd.Flags().BoolVar(&mailboxForceRefresh, "force-refresh", false, "Refresh the cache from Mail.app")
 }

@@ -4,15 +4,14 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 var (
-	syncAccount string
-	syncMailbox string
 	syncWait    bool
-	syncJSON    bool
 	syncTimeout int
 )
 
@@ -28,80 +27,70 @@ type syncResult struct {
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Force Mail.app to synchronize accounts",
-	Long: `Force Mail.app to synchronize one or all accounts with mail servers.
-Examples:
-  mail-app-cli sync
-  mail-app-cli sync --account "Gmail"
-  mail-app-cli sync --account "Gmail" --mailbox INBOX --wait --json`,
+	Short: "Ask Mail.app to check for new mail",
+	Long: `Ask Mail.app to check for new mail. Mail.app syncs every account
+regardless of --account; the flag only scopes --wait, which polls counts until
+they hold still for two samples.`,
 	Args: cobra.NoArgs,
+	Annotations: map[string]string{
+		annotationAgentNotes: "Mail.app has no per-account sync; actualScope says what happened. Use --wait before reading a mailbox you expect to have changed.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
+		account := resolved.Account.Value
+		mailbox := ""
+		if mailboxExplicit() {
+			mailbox = mailboxInScope()
+		}
 		result := syncResult{
-			Account:          syncAccount,
-			RequestedMailbox: syncMailbox,
+			Account:          account,
+			RequestedMailbox: mailbox,
 			ActualScope:      "all-accounts",
 			StartedAt:        time.Now().UTC(),
 			Status:           "running",
 		}
+		finish := func(status string, err error) error {
+			result.Status = status
+			result.EndedAt = time.Now().UTC()
+			if err != nil {
+				result.Error = err.Error()
+			}
+			summary := "Synced all accounts"
+			if account != "" {
+				summary = "Sync requested for " + account + " (Mail.app syncs globally)"
+			}
+			if status != "completed" {
+				summary = "Sync " + status
+			}
+			writeErr := writer.Write(output.Result{
+				Data:    result,
+				Summary: summary,
+				Meta:    map[string]any{"account": accountOrAll(account)},
+				Plain:   renderLine("%s", summary),
+			})
+			if err != nil {
+				return err
+			}
+			return writeErr
+		}
 
-		if syncAccount != "" {
+		if account != "" {
 			result.ActualScope = "account-requested; Mail.app may synchronize globally"
-			if err := client.SyncAccount(syncAccount); err != nil {
-				result.Status = "failed"
-				result.Error = err.Error()
-				result.EndedAt = time.Now().UTC()
-				if syncJSON {
-					_ = printJSON(result, "sync result")
-				}
-				return fmt.Errorf("failed to sync account %s: %w", syncAccount, err)
+			if err := mailClient.SyncAccount(account); err != nil {
+				return finish("failed", fmt.Errorf("sync account %s: %w", account, err))
 			}
-		} else {
-			if err := client.SyncAllAccounts(); err != nil {
-				result.Status = "failed"
-				result.Error = err.Error()
-				result.EndedAt = time.Now().UTC()
-				if syncJSON {
-					_ = printJSON(result, "sync result")
-				}
-				return fmt.Errorf("failed to sync accounts: %w", err)
-			}
+		} else if err := mailClient.SyncAllAccounts(); err != nil {
+			return finish("failed", fmt.Errorf("sync accounts: %w", err))
 		}
 
 		if syncWait {
 			if syncTimeout <= 0 {
-				result.Status = "timeout"
-				result.EndedAt = time.Now().UTC()
-				if syncJSON {
-					_ = printJSON(result, "sync result")
-				}
-				return fmt.Errorf("sync wait timed out")
+				return finish("timeout", clierr.New(clierr.CodeTimeout, "sync wait timed out"))
 			}
-			if err := waitForSyncStability(client, syncAccount, syncMailbox, time.Duration(syncTimeout)*time.Second); err != nil {
-				result.Status = "timeout"
-				result.Error = err.Error()
-				result.EndedAt = time.Now().UTC()
-				if syncJSON {
-					_ = printJSON(result, "sync result")
-				}
-				return err
+			if err := waitForSyncStability(mailClient, account, mailbox, time.Duration(syncTimeout)*time.Second); err != nil {
+				return finish("timeout", clierr.Wrap(clierr.CodeTimeout, err, err.Error()))
 			}
 		}
-
-		result.Status = "completed"
-		result.EndedAt = time.Now().UTC()
-		if syncJSON {
-			return printJSON(result, "sync result")
-		}
-		if syncAccount != "" {
-			fmt.Printf("Synced account request: %s (actual scope: %s)\n", syncAccount, result.ActualScope)
-		} else {
-			fmt.Println("Synced all accounts")
-		}
-		if syncMailbox != "" {
-			fmt.Printf("Requested mailbox: %s\n", syncMailbox)
-		}
-		return nil
+		return finish("completed", nil)
 	},
 }
 
@@ -133,7 +122,7 @@ func waitForSyncStability(client *mail.Client, account, mailbox string, timeout 
 func syncObservedCount(client *mail.Client, account, mailbox string) (int, error) {
 	if mailbox != "" {
 		if account == "" {
-			return 0, fmt.Errorf("--mailbox requires --account for sync wait")
+			return 0, clierr.Usage("--mailbox requires --account for sync wait")
 		}
 		boxes, err := client.GetMailboxesJSON(account)
 		if err != nil {
@@ -144,7 +133,7 @@ func syncObservedCount(client *mail.Client, account, mailbox string) (int, error
 				return box.TotalCount, nil
 			}
 		}
-		return 0, fmt.Errorf("mailbox not found: %s", mailbox)
+		return 0, clierr.New(clierr.CodeNotFound, "mailbox not found: "+mailbox)
 	}
 	if account != "" {
 		boxes, err := client.GetMailboxesJSON(account)
@@ -161,9 +150,6 @@ func syncObservedCount(client *mail.Client, account, mailbox string) (int, error
 }
 
 func init() {
-	syncCmd.Flags().StringVarP(&syncAccount, "account", "a", "", "Account to sync")
-	syncCmd.Flags().StringVarP(&syncMailbox, "mailbox", "m", "", "Requested mailbox scope")
-	syncCmd.Flags().BoolVar(&syncWait, "wait", false, "Wait briefly after triggering sync")
-	syncCmd.Flags().BoolVar(&syncJSON, "json", false, "Print structured sync result")
-	syncCmd.Flags().IntVar(&syncTimeout, "timeout", 60, "Maximum wait time in seconds")
+	syncCmd.Flags().BoolVar(&syncWait, "wait", false, "Poll until mailbox counts hold still")
+	syncCmd.Flags().IntVar(&syncTimeout, "timeout", 60, "Maximum --wait time in seconds")
 }

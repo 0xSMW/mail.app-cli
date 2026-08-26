@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -252,10 +253,10 @@ func parseMutationResult(output string, runErr error, name string) error {
 		return err
 	}
 	if result.Error != "" {
-		return fmt.Errorf(result.Error)
+		return errors.New(result.Error)
 	}
 	if !result.OK {
-		return fmt.Errorf("item not found: %s", name)
+		return notFound("item", name)
 	}
 	return nil
 }

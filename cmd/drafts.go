@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 var (
-	draftAccount  string
 	draftTo       []string
 	draftCc       []string
 	draftBcc      []string
@@ -22,25 +22,33 @@ var (
 
 var draftsCmd = &cobra.Command{
 	Use:   "drafts",
-	Short: "Create and manage Mail.app drafts",
+	Short: "Create and manage drafts",
+	Annotations: map[string]string{
+		annotationAgentNotes: "Drafts are the review-before-send lane: create, have a person look, then 'drafts send <id>'. Creating a draft takes about five seconds while Mail.app saves it.",
+	},
 }
 
 var draftsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List draft messages",
+	Short: "List drafts across accounts, or one with --account",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
+		account := resolved.Account.Value
 		var messages []mail.Message
 		var err error
-		if draftAccount != "" {
-			messages, err = client.GetMessagesJSON(draftAccount, "Drafts", draftLimit, 0, false, false, true, "")
+		if account != "" {
+			messages, err = mailClient.GetMessagesJSON(account, "Drafts", draftLimit, 0, false, false, true, "")
 		} else {
-			messages, err = client.GetUnifiedMessagesJSON("drafts", draftLimit, 0, true)
+			messages, err = mailClient.GetUnifiedMessagesJSON("drafts", draftLimit, 0, true)
 		}
 		if err != nil {
-			return fmt.Errorf("failed to list drafts: %w", err)
+			return fmt.Errorf("list drafts: %w", err)
 		}
-		return printJSON(messages, "drafts")
+		return writer.Write(output.Result{
+			Data:    messages,
+			Summary: plural(len(messages), "draft"),
+			Meta:    map[string]any{"account": accountOrAll(account)},
+			Plain:   renderMessages(messages, account == ""),
+		})
 	},
 }
 
@@ -48,50 +56,55 @@ var draftsCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a draft without sending it",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if draftAccount == "" {
-			return fmt.Errorf("--account is required")
+		account, err := requireAccount()
+		if err != nil {
+			return err
 		}
 		body, err := readBodyValue(draftBody, draftBodyFile)
 		if err != nil {
 			return err
 		}
-		input := mail.DraftInput{
-			Account: draftAccount,
-			Subject: draftSubject,
-			Body:    body,
-			To:      draftTo,
-			Cc:      draftCc,
-			Bcc:     draftBcc,
-		}
+		input := mail.DraftInput{Account: account, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc}
 		if draftDryRun {
-			return printJSON(map[string]any{"dryRun": true, "draft": input}, "draft dry-run")
+			return writer.Write(output.Result{
+				Data:    map[string]any{"dryRun": true, "draft": input},
+				Summary: "Dry run: would create draft " + input.Subject,
+				Plain:   renderLine("Dry run: would create draft %q for %v", input.Subject, input.To),
+			})
 		}
-		client := mail.NewClient()
-		message, err := client.CreateDraft(input)
+		message, err := mailClient.CreateDraft(input)
 		if err != nil {
-			return fmt.Errorf("failed to create draft: %w", err)
+			return fmt.Errorf("create draft: %w", err)
 		}
-		return printJSON(message, "draft")
+		return writer.Write(output.Result{
+			Data:    message,
+			Summary: "Created draft " + message.ID,
+			Meta:    map[string]any{"account": account},
+			Plain:   renderLine("Created draft %s (%s)", message.ID, message.Subject),
+		})
 	},
 }
 
 var draftsShowCmd = &cobra.Command{
-	Use:   "show [draft-id]",
+	Use:   "show <draft-id>",
 	Short: "Show a draft",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
-		message, err := client.GetDraft(draftAccount, args[0])
+		message, err := mailClient.GetDraft(resolved.Account.Value, args[0])
 		if err != nil {
 			return err
 		}
-		return printJSON(message, "draft")
+		return writer.Write(output.Result{
+			Data:    message,
+			Summary: "Draft " + message.ID + ": " + message.Subject,
+			Plain:   renderMessage(message, false),
+		})
 	},
 }
 
 var draftsUpdateCmd = &cobra.Command{
-	Use:   "update [draft-id]",
-	Short: "Update draft fields",
+	Use:   "update <draft-id>",
+	Short: "Update a draft's subject or body",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		body, err := readBodyValue(draftBody, draftBodyFile)
@@ -105,46 +118,67 @@ var draftsUpdateCmd = &cobra.Command{
 			BodySet:    cmd.Flags().Changed("body") || cmd.Flags().Changed("body-file"),
 		}
 		if draftDryRun {
-			return printJSON(map[string]any{"dryRun": true, "draftId": args[0], "updates": input}, "draft update dry-run")
+			return writer.Write(output.Result{
+				Data:    map[string]any{"dryRun": true, "draftId": args[0], "updates": input},
+				Summary: "Dry run: would update draft " + args[0],
+				Plain:   renderLine("Dry run: would update draft %s", args[0]),
+			})
 		}
-		client := mail.NewClient()
-		message, err := client.UpdateDraft(draftAccount, args[0], input)
+		message, err := mailClient.UpdateDraft(resolved.Account.Value, args[0], input)
 		if err != nil {
-			return fmt.Errorf("failed to update draft: %w", err)
+			return fmt.Errorf("update draft: %w", err)
 		}
-		return printJSON(message, "draft")
+		return writer.Write(output.Result{
+			Data:    message,
+			Summary: "Updated draft, now " + message.ID,
+			Plain:   renderLine("Updated draft; new id %s", message.ID),
+		})
 	},
 }
 
 var draftsSendCmd = &cobra.Command{
-	Use:   "send [draft-id]",
+	Use:   "send <draft-id>",
 	Short: "Send an existing draft",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if draftDryRun {
-			return printJSON(map[string]any{"dryRun": true, "draftId": args[0], "action": "send"}, "draft send dry-run")
+			return writer.Write(output.Result{
+				Data:    map[string]any{"dryRun": true, "draftId": args[0], "action": "send"},
+				Summary: "Dry run: would send draft " + args[0],
+				Plain:   renderLine("Dry run: would send draft %s", args[0]),
+			})
 		}
-		client := mail.NewClient()
-		if err := client.SendDraft(draftAccount, args[0]); err != nil {
-			return fmt.Errorf("failed to send draft: %w", err)
+		if err := mailClient.SendDraft(resolved.Account.Value, args[0]); err != nil {
+			return fmt.Errorf("send draft: %w", err)
 		}
-		return printJSON(map[string]any{"draftId": args[0], "sent": true}, "draft send result")
+		return writer.Write(output.Result{
+			Data:    map[string]any{"draftId": args[0], "sent": true},
+			Summary: "Sent draft " + args[0],
+			Plain:   renderLine("Sent draft %s", args[0]),
+		})
 	},
 }
 
 var draftsDeleteCmd = &cobra.Command{
-	Use:   "delete [draft-id]",
+	Use:   "delete <draft-id>",
 	Short: "Delete a draft",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if draftDryRun {
-			return printJSON(map[string]any{"dryRun": true, "draftId": args[0], "action": "delete"}, "draft delete dry-run")
+			return writer.Write(output.Result{
+				Data:    map[string]any{"dryRun": true, "draftId": args[0], "action": "delete"},
+				Summary: "Dry run: would delete draft " + args[0],
+				Plain:   renderLine("Dry run: would delete draft %s", args[0]),
+			})
 		}
-		client := mail.NewClient()
-		if err := client.DeleteDraft(draftAccount, args[0]); err != nil {
-			return fmt.Errorf("failed to delete draft: %w", err)
+		if err := mailClient.DeleteDraft(resolved.Account.Value, args[0]); err != nil {
+			return fmt.Errorf("delete draft: %w", err)
 		}
-		return printJSON(map[string]any{"draftId": args[0], "deleted": true}, "draft delete result")
+		return writer.Write(output.Result{
+			Data:    map[string]any{"draftId": args[0], "deleted": true},
+			Summary: "Deleted draft " + args[0],
+			Plain:   renderLine("Deleted draft %s", args[0]),
+		})
 	},
 }
 
@@ -161,19 +195,16 @@ func readBodyValue(inline, file string) (string, error) {
 
 func init() {
 	draftsCmd.AddCommand(draftsListCmd, draftsCreateCmd, draftsShowCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd)
-	for _, cmd := range []*cobra.Command{draftsListCmd, draftsCreateCmd, draftsShowCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd} {
-		cmd.Flags().StringVarP(&draftAccount, "account", "a", "", "Account name")
-	}
 	draftsListCmd.Flags().IntVarP(&draftLimit, "limit", "l", 25, "Maximum drafts")
 	for _, cmd := range []*cobra.Command{draftsCreateCmd, draftsUpdateCmd} {
 		cmd.Flags().StringVar(&draftSubject, "subject", "", "Draft subject")
 		cmd.Flags().StringVar(&draftBody, "body", "", "Draft body")
-		cmd.Flags().StringVar(&draftBodyFile, "body-file", "", "Read draft body from file")
-		cmd.Flags().BoolVar(&draftDryRun, "dry-run", false, "Show mutation without applying it")
+		cmd.Flags().StringVar(&draftBodyFile, "body-file", "", "Read the draft body from a file")
 	}
-	draftsCreateCmd.Flags().StringSliceVar(&draftTo, "to", []string{}, "To recipients")
-	draftsCreateCmd.Flags().StringSliceVar(&draftCc, "cc", []string{}, "Cc recipients")
-	draftsCreateCmd.Flags().StringSliceVar(&draftBcc, "bcc", []string{}, "Bcc recipients")
-	draftsSendCmd.Flags().BoolVar(&draftDryRun, "dry-run", false, "Show mutation without applying it")
-	draftsDeleteCmd.Flags().BoolVar(&draftDryRun, "dry-run", false, "Show mutation without applying it")
+	for _, cmd := range []*cobra.Command{draftsCreateCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd} {
+		cmd.Flags().BoolVar(&draftDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+	}
+	draftsCreateCmd.Flags().StringSliceVar(&draftTo, "to", []string{}, "To recipient (repeatable)")
+	draftsCreateCmd.Flags().StringSliceVar(&draftCc, "cc", []string{}, "Cc recipient (repeatable)")
+	draftsCreateCmd.Flags().StringSliceVar(&draftBcc, "bcc", []string{}, "Bcc recipient (repeatable)")
 }

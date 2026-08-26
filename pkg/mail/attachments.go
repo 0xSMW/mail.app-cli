@@ -110,7 +110,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }

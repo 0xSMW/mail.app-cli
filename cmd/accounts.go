@@ -3,8 +3,8 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/0xSMW/mail.app-cli/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -15,74 +15,55 @@ var (
 
 var accountsCmd = &cobra.Command{
 	Use:   "accounts",
-	Short: "Manage Mail.app accounts",
-	Long:  `View and manage your Mail.app accounts.`,
+	Short: "List Mail.app accounts",
 }
 
 var accountsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all accounts",
-	Long:  `List all Mail.app accounts. Output is JSON format. Use jq for pretty printing: mail-app-cli accounts list | jq`,
+	Annotations: map[string]string{
+		annotationAgentNotes: "Cached for 24h; pass --no-cache for a live read. 'name' is what --account expects.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var accounts []mail.Account
-		var c *cache.Cache
-		var cacheErr error
-		if !accountsNoCache {
-			c, cacheErr = cache.New()
-		}
-
-		// Try to get from cache if not disabled
-		if !accountsNoCache && !accountsForceRefresh && cacheErr == nil {
-			found, err := c.Get("accounts", &accounts)
-			if err == nil && found {
-				return printJSON(accounts, "accounts")
-			}
-		}
-
-		// Get from Mail.app
-		client := mail.NewClient()
-		accounts, err := client.GetAccountsJSON()
+		accounts, err := accountsCached(accountsNoCache, accountsForceRefresh)
 		if err != nil {
-			return fmt.Errorf("failed to get accounts: %w", err)
+			return fmt.Errorf("get accounts: %w", err)
 		}
-
-		// Save to cache if not disabled
-		if !accountsNoCache && cacheErr == nil {
-			c.Set("accounts", accounts)
-		}
-
-		return printJSON(accounts, "accounts")
+		return writer.Write(output.Result{
+			Data:    accounts,
+			Summary: plural(len(accounts), "account"),
+			Plain:   renderAccounts(accounts),
+		})
 	},
 }
 
 var accountsShowCmd = &cobra.Command{
-	Use:   "show [account-name]",
-	Short: "Show account details",
-	Long:  `Show detailed information about a specific account. Output is JSON format.`,
+	Use:   "show <account-name>",
+	Short: "Show one account",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		accountName := args[0]
-		client := mail.NewClient()
-		accounts, err := client.GetAccountsJSON()
+		accounts, err := accountsCached(false, false)
 		if err != nil {
-			return fmt.Errorf("failed to get accounts: %w", err)
+			return fmt.Errorf("get accounts: %w", err)
 		}
-
 		for _, acc := range accounts {
-			if acc.Name == accountName {
-				return printJSON(acc, "account")
+			if acc.Name == args[0] {
+				return writer.Write(output.Result{
+					Data:    acc,
+					Summary: acc.Name + " <" + acc.EmailAddress + ">",
+					Plain: renderKeyValueList([][2]string{
+						{"Name", acc.Name}, {"Email", acc.EmailAddress}, {"Type", acc.AccountType},
+						{"User", acc.UserName}, {"Enabled", fmt.Sprint(acc.Enabled)}, {"ID", acc.ID},
+					}),
+				})
 			}
 		}
-
-		return fmt.Errorf("account not found: %s", accountName)
+		return clierr.New(clierr.CodeNotFound, "account not found: "+args[0]).WithHint("run 'mail-app-cli accounts list' for names")
 	},
 }
 
 func init() {
-	accountsCmd.AddCommand(accountsListCmd)
-	accountsCmd.AddCommand(accountsShowCmd)
-
-	// Flags for accounts list
-	accountsListCmd.Flags().BoolVar(&accountsNoCache, "no-cache", false, "Bypass cache and fetch fresh data")
-	accountsListCmd.Flags().BoolVar(&accountsForceRefresh, "force-refresh", false, "Force refresh cache with fresh data")
+	accountsCmd.AddCommand(accountsListCmd, accountsShowCmd)
+	accountsListCmd.Flags().BoolVar(&accountsNoCache, "no-cache", false, "Bypass the cache and read from Mail.app")
+	accountsListCmd.Flags().BoolVar(&accountsForceRefresh, "force-refresh", false, "Refresh the cache from Mail.app")
 }

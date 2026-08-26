@@ -3,39 +3,53 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
 var signaturesCmd = &cobra.Command{
 	Use:   "signatures",
-	Short: "List and inspect Mail.app signatures",
+	Short: "List and show Mail.app signatures",
 }
 
 var signaturesListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List signatures",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
-		signatures, err := client.ListSignatures(false)
+		signatures, err := mailClient.ListSignatures(false)
 		if err != nil {
-			return fmt.Errorf("failed to list signatures: %w", err)
+			return fmt.Errorf("list signatures: %w", err)
 		}
-		return printJSON(signatures, "signatures")
+		rows := make([][]string, 0, len(signatures))
+		for _, s := range signatures {
+			rows = append(rows, []string{s.Name})
+		}
+		return writer.Write(output.Result{
+			Data:    signatures,
+			Summary: plural(len(signatures), "signature"),
+			Plain:   renderTable([]string{"NAME"}, rows, "no signatures"),
+		})
 	},
 }
 
 var signaturesShowCmd = &cobra.Command{
-	Use:   "show [name]",
-	Short: "Show a signature",
+	Use:   "show <name>",
+	Short: "Show a signature's content",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
-		signature, err := client.SignatureByName(args[0])
+		signature, err := mailClient.SignatureByName(args[0])
 		if err != nil {
 			return err
 		}
-		return printJSON(signature, "signature")
+		return writer.Write(output.Result{
+			Data:    signature,
+			Summary: "Signature " + signature.Name,
+			Plain: func(p *output.Printer) {
+				p.Line("%s", p.Bold(signature.Name))
+				p.Blank()
+				p.Line("%s", signature.Content)
+			},
+		})
 	},
 }
 

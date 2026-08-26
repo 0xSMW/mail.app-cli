@@ -1,0 +1,296 @@
+(root)
+(root) --account (-a)
+(root) --agent [hidden]
+(root) --count
+(root) --ids-only
+(root) --jq
+(root) --json
+(root) --mailbox (-m)
+(root) --no-color
+(root) --plain
+(root) --quiet (-q)
+accounts
+accounts list
+accounts list --force-refresh
+accounts list --no-cache
+accounts show
+agents
+archive
+archive --dry-run
+archive --verify
+attachments
+attachments list
+attachments save
+attachments save --output (-o)
+commands
+config
+config path
+config set
+config show
+config unset
+delete
+delete --dry-run
+delete --verify
+doctor
+drafts
+drafts create
+drafts create --bcc
+drafts create --body
+drafts create --body-file
+drafts create --cc
+drafts create --dry-run
+drafts create --subject
+drafts create --to
+drafts delete
+drafts delete --dry-run
+drafts list
+drafts list --limit (-l)
+drafts send
+drafts send --dry-run
+drafts show
+drafts update
+drafts update --body
+drafts update --body-file
+drafts update --dry-run
+drafts update --subject
+environment
+exit-codes
+export
+export attachments
+export attachments --flagged
+export attachments --limit (-l)
+export attachments --offset (-o)
+export attachments --output
+export attachments --since
+export attachments --unread
+export messages
+export messages --flagged
+export messages --format
+export messages --limit (-l)
+export messages --offset (-o)
+export messages --output
+export messages --since
+export messages --unread
+flag
+flag --dry-run
+flag --verify
+import
+import messages
+import messages --dry-run
+import messages --file
+import messages --format
+inbox
+inbox --limit (-l)
+inbox --offset (-o)
+inbox --unread (-u)
+inbox --with-content
+mailboxes
+mailboxes list
+mailboxes list --force-refresh
+mailboxes list --no-cache
+messages
+messages archive
+messages archive --dry-run
+messages batch
+messages batch archive
+messages batch archive --chunk-size
+messages batch archive --dry-run
+messages batch archive --limit (-l)
+messages batch archive --mark-read
+messages batch archive --progress
+messages batch archive --query
+messages batch archive --report-file
+messages batch archive --sender
+messages batch archive --sender-domain
+messages batch archive --stdin
+messages batch archive --verify
+messages batch archive --yes
+messages batch delete
+messages batch delete --chunk-size
+messages batch delete --dry-run
+messages batch delete --limit (-l)
+messages batch delete --mark-read
+messages batch delete --progress
+messages batch delete --query
+messages batch delete --report-file
+messages batch delete --sender
+messages batch delete --sender-domain
+messages batch delete --stdin
+messages batch delete --verify
+messages batch delete --yes
+messages batch flag
+messages batch flag --chunk-size
+messages batch flag --dry-run
+messages batch flag --flagged
+messages batch flag --limit (-l)
+messages batch flag --mark-read
+messages batch flag --progress
+messages batch flag --query
+messages batch flag --report-file
+messages batch flag --sender
+messages batch flag --sender-domain
+messages batch flag --stdin
+messages batch flag --verify
+messages batch flag --yes
+messages batch mark
+messages batch mark --chunk-size
+messages batch mark --dry-run
+messages batch mark --limit (-l)
+messages batch mark --mark-read
+messages batch mark --progress
+messages batch mark --query
+messages batch mark --read
+messages batch mark --report-file
+messages batch mark --sender
+messages batch mark --sender-domain
+messages batch mark --stdin
+messages batch mark --verify
+messages batch mark --yes
+messages batch move
+messages batch move --chunk-size
+messages batch move --dry-run
+messages batch move --limit (-l)
+messages batch move --mark-read
+messages batch move --progress
+messages batch move --query
+messages batch move --report-file
+messages batch move --sender
+messages batch move --sender-domain
+messages batch move --stdin
+messages batch move --verify
+messages batch move --yes
+messages delete
+messages delete --dry-run
+messages drafts
+messages drafts --limit (-l)
+messages drafts --offset (-o)
+messages drafts --with-content
+messages flag
+messages flag --dry-run
+messages flag --flagged (-f)
+messages flagged
+messages flagged --limit (-l)
+messages flagged --offset (-o)
+messages flagged --with-content
+messages inbox
+messages inbox --limit (-l)
+messages inbox --offset (-o)
+messages inbox --with-content
+messages junk
+messages junk --limit (-l)
+messages junk --offset (-o)
+messages junk --with-content
+messages list
+messages list --flagged (-f)
+messages list --force-refresh
+messages list --limit (-l)
+messages list --no-cache
+messages list --offset (-o)
+messages list --since (-s)
+messages list --unread (-u)
+messages list --with-content
+messages mark
+messages mark --dry-run
+messages mark --read (-r)
+messages move
+messages move --dry-run
+messages sent
+messages sent --limit (-l)
+messages sent --offset (-o)
+messages sent --with-content
+messages show
+messages trash
+messages trash --limit (-l)
+messages trash --offset (-o)
+messages trash --with-content
+messages unread
+messages unread --limit (-l)
+messages unread --offset (-o)
+messages unread --with-content
+messages vip
+messages vip --limit (-l)
+move
+move --dry-run
+move --to
+move --verify
+output
+recent
+recent clear
+recent search
+recent search --limit (-l)
+recent show
+rules
+rules apply
+rules apply --dry-run
+rules apply --limit (-l)
+rules apply --query
+rules create
+rules create --dry-run
+rules create --enabled
+rules create --from-domain
+rules create --mark-read
+rules create --move-to
+rules create --subject-contains
+rules delete
+rules delete --dry-run
+rules disable
+rules disable --dry-run
+rules enable
+rules enable --dry-run
+rules list
+rules show
+search
+search --allow-partial
+search --limit (-l)
+search --no-cache
+search --sender
+search --sender-domain
+search --since (-s)
+seen
+seen --dry-run
+seen --verify
+send
+send --attach
+send --bcc (-b)
+send --body
+send --body-file
+send --cc (-c)
+send --dry-run
+send --signature
+send --subject (-s)
+send --to (-t)
+show
+show --metadata-only
+signatures
+signatures list
+signatures show
+skill
+skill install
+skill path
+smart
+smart list
+smart query
+smart query --limit (-l)
+smart show
+sync
+sync --timeout
+sync --wait
+threads
+threads archive
+threads archive --dry-run
+threads archive --limit (-l)
+threads list
+threads list --limit (-l)
+threads show
+threads show --limit (-l)
+unflag
+unflag --dry-run
+unflag --verify
+unread
+unread --limit (-l)
+unread --offset (-o)
+unread --with-content
+unseen
+unseen --dry-run
+unseen --verify
+version

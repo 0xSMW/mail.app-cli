@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
@@ -23,57 +25,77 @@ type threadSummary struct {
 }
 
 var (
-	threadAccount string
-	threadMailbox string
-	threadLimit   int
-	threadDryRun  bool
+	threadLimit  int
+	threadDryRun bool
 )
 
 var threadsCmd = &cobra.Command{
 	Use:   "threads",
-	Short: "Group and act on message threads",
+	Short: "Group messages in one mailbox by subject",
+	Annotations: map[string]string{
+		annotationAgentNotes: "Threads are synthetic: grouped by normalized subject, not by Message-ID headers. 'synthetic: true' with count > 1 means the grouping is a guess, and 'threads archive' refuses it.",
+	},
+}
+
+func renderThreads(threads []threadSummary) func(*output.Printer) {
+	return func(p *output.Printer) {
+		rows := make([][]string, 0, len(threads))
+		for _, t := range threads {
+			subject := output.Truncate(t.Subject, 60)
+			if t.UnreadCount > 0 {
+				subject = p.Bold(subject)
+			}
+			rows = append(rows, []string{p.Dim(output.Truncate(t.ID, 40)), formatDate(t.LatestDate), fmt.Sprintf("%d/%d", t.UnreadCount, t.Count), subject, output.Truncate(strings.Join(t.Participants, ", "), 40)})
+		}
+		if len(rows) == 0 {
+			p.Line("%s", p.Dim("no threads"))
+			return
+		}
+		p.Table([]string{"THREAD", "LATEST", "UNREAD/ALL", "SUBJECT", "PARTICIPANTS"}, rows)
+	}
 }
 
 var threadsListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List message threads",
+	Short: "List threads in the mailbox in scope",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		threads, err := loadThreads()
+		threads, _, err := loadThreads()
 		if err != nil {
 			return err
 		}
-		return printJSON(threads, "threads")
+		return writer.Write(output.Result{Data: threads, Summary: plural(len(threads), "thread"), Plain: renderThreads(threads)})
 	},
 }
 
 var threadsShowCmd = &cobra.Command{
-	Use:   "show [thread-id]",
-	Short: "Show a message thread",
+	Use:   "show <thread-id>",
+	Short: "Show a thread's messages",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		threads, err := loadThreads()
+		threads, messages, err := loadThreads()
 		if err != nil {
 			return err
 		}
 		for _, thread := range threads {
 			if thread.ID == args[0] {
-				thread.Messages = messagesForThread(thread.MessageIDs, threadAccount, threadMailbox)
-				return printJSON(thread, "thread")
+				thread.Messages = messagesForThread(thread.MessageIDs, messages)
+				return writer.Write(output.Result{
+					Data:    thread,
+					Summary: fmt.Sprintf("Thread %q with %s", thread.Subject, plural(thread.Count, "message")),
+					Plain:   renderMessages(thread.Messages, false),
+				})
 			}
 		}
-		return fmt.Errorf("thread not found: %s", args[0])
+		return clierr.New(clierr.CodeNotFound, "thread not found: "+args[0])
 	},
 }
 
 var threadsArchiveCmd = &cobra.Command{
-	Use:   "archive [thread-id]",
+	Use:   "archive <thread-id>",
 	Short: "Archive every message in a thread",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireAccountAndMailbox(threadAccount, threadMailbox); err != nil {
-			return err
-		}
-		threads, err := loadThreads()
+		threads, messages, err := loadThreads()
 		if err != nil {
 			return err
 		}
@@ -82,33 +104,29 @@ var threadsArchiveCmd = &cobra.Command{
 				continue
 			}
 			if !threadArchiveAllowed(thread) {
-				return fmt.Errorf("refusing to archive synthetic subject-only thread %q; archive individual messages instead", thread.ID)
+				return clierr.Usagef("refusing to archive synthetic subject-only thread %q; archive individual messages instead", thread.ID)
 			}
-			oldAccount, oldMailbox, oldDryRun, oldYes := msgAccount, msgMailbox, batchDryRun, batchYes
-			msgAccount, msgMailbox, batchDryRun, batchYes = threadAccount, threadMailbox, threadDryRun, true
-			defer func() {
-				msgAccount, msgMailbox, batchDryRun, batchYes = oldAccount, oldMailbox, oldDryRun, oldYes
-			}()
-			return runMessageBatch("archive", thread.MessageIDs, "", func(client *mail.Client, item batchItem) error {
-				return client.ArchiveMessage(item.Account, item.SourceMailbox, item.ID)
-			})
+			items := make([]batchItem, 0, len(thread.MessageIDs))
+			for _, message := range messagesForThread(thread.MessageIDs, messages) {
+				items = append(items, batchItem{ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox, Subject: message.Subject})
+			}
+			opts := batchOptions{Action: "archive", DryRun: threadDryRun}
+			result, mutationErr := runMessageBatch(mailClient, opts, items, archiveMutator(false))
+			return writeReceipt(result, opts, nil, mutationErr, "")
 		}
-		return fmt.Errorf("thread not found: %s", args[0])
+		return clierr.New(clierr.CodeNotFound, "thread not found: "+args[0])
 	},
 }
 
-var lastLoadedThreadMessages []mail.Message
-
-func loadThreads() ([]threadSummary, error) {
-	if err := requireAccountAndMailbox(threadAccount, threadMailbox); err != nil {
-		return nil, err
-	}
-	client := mail.NewClient()
-	messages, err := client.GetMessagesJSON(threadAccount, threadMailbox, threadLimit, 0, false, false, false, "")
+func loadThreads() ([]threadSummary, []mail.Message, error) {
+	account, err := requireAccount()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	lastLoadedThreadMessages = messages
+	messages, err := mailClient.GetMessagesJSON(account, mailboxInScope(), threadLimit, 0, false, false, false, "")
+	if err != nil {
+		return nil, nil, err
+	}
 	byKey := map[string]*threadSummary{}
 	for _, message := range messages {
 		key := normalizeThreadSubject(message.Subject)
@@ -144,20 +162,20 @@ func loadThreads() ([]threadSummary, error) {
 	sort.Slice(threads, func(i, j int) bool {
 		return threads[i].LatestDate > threads[j].LatestDate
 	})
-	return threads, nil
+	return threads, messages, nil
 }
 
 func threadArchiveAllowed(thread threadSummary) bool {
 	return !thread.Synthetic || thread.Count <= 1
 }
 
-func messagesForThread(ids []string, account, mailbox string) []mail.Message {
+func messagesForThread(ids []string, loaded []mail.Message) []mail.Message {
 	idSet := map[string]bool{}
 	for _, id := range ids {
 		idSet[id] = true
 	}
 	var messages []mail.Message
-	for _, message := range lastLoadedThreadMessages {
+	for _, message := range loaded {
 		if idSet[message.ID] {
 			messages = append(messages, message)
 		}
@@ -207,9 +225,7 @@ func containsString(values []string, target string) bool {
 func init() {
 	threadsCmd.AddCommand(threadsListCmd, threadsShowCmd, threadsArchiveCmd)
 	for _, cmd := range []*cobra.Command{threadsListCmd, threadsShowCmd, threadsArchiveCmd} {
-		cmd.Flags().StringVarP(&threadAccount, "account", "a", "", "Account name")
-		cmd.Flags().StringVarP(&threadMailbox, "mailbox", "m", "", "Mailbox name")
 		cmd.Flags().IntVarP(&threadLimit, "limit", "l", 200, "Maximum messages to inspect")
 	}
-	threadsArchiveCmd.Flags().BoolVar(&threadDryRun, "dry-run", false, "Show mutation without applying it")
+	threadsArchiveCmd.Flags().BoolVar(&threadDryRun, "dry-run", false, "Report what would change without touching Mail.app")
 }

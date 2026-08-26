@@ -81,6 +81,10 @@ func normalizeMailboxAlias(name string) string {
 	return name
 }
 
+// IsArchiveAlias reports whether a mailbox name refers to Gmail's All Mail
+// or a generic Archive mailbox.
+func IsArchiveAlias(mailboxName string) bool { return isArchiveAlias(mailboxName) }
+
 func isArchiveAlias(mailboxName string) bool {
 	switch normalizeMailboxAlias(mailboxName) {
 	case "archive", "all mail", "[gmail]/all mail", "gmail/all mail":

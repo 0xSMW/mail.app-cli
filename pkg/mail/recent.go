@@ -418,7 +418,7 @@ func ResolveRecentMessage(selector, accountName, mailboxName string) (*RecentMes
 		return nil, err
 	}
 	if len(matches) == 0 {
-		return nil, fmt.Errorf("no recent message matched %q", selector)
+		return nil, notFound("recent message", selector)
 	}
 	match := matches[0]
 	for _, entry := range recent {
@@ -427,7 +427,7 @@ func ResolveRecentMessage(selector, accountName, mailboxName string) (*RecentMes
 			return &copy, nil
 		}
 	}
-	return nil, fmt.Errorf("no recent message matched %q", selector)
+	return nil, notFound("recent message", selector)
 }
 
 func recentMessageSince(entry RecentMessage, sinceUnix int64) bool {

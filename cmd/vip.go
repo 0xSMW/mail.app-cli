@@ -1,24 +1,22 @@
 package cmd
 
 import (
-	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
-var (
-	vipLimit int
-)
+var vipLimit int
 
 var messagesVIPCmd = &cobra.Command{
 	Use:   "vip",
 	Short: "List messages from VIP mailboxes when Mail.app exposes them",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
-		mailboxes, err := client.GetMailboxesJSON("")
+		mailboxes, err := mailClient.GetMailboxesJSON("")
 		if err != nil {
 			return err
 		}
@@ -39,13 +37,18 @@ var messagesVIPCmd = &cobra.Command{
 			}
 		}
 		if len(requests) == 0 {
-			return fmt.Errorf("no VIP mailbox exposed by Mail.app")
+			return clierr.New(clierr.CodeNotFound, "no VIP mailbox exposed by Mail.app")
 		}
-		messages, err := client.GetMessagesFromMultipleMailboxes(requests)
+		messages, err := mailClient.GetMessagesFromMultipleMailboxes(requests)
 		if err != nil {
 			return err
 		}
-		return printJSON(sortAndSliceMessages(messages, 0, vipLimit), "vip messages")
+		messages = sortAndSliceMessages(messages, 0, vipLimit)
+		return writer.Write(output.Result{
+			Data:    messages,
+			Summary: plural(len(messages), "VIP message"),
+			Plain:   renderMessages(messages, true),
+		})
 	},
 }
 

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
@@ -86,12 +88,63 @@ func diagnose(client doctorClient, cliVersion string, executable func() (string,
 	return result
 }
 
+func renderDoctor(r doctorResult) func(*output.Printer) {
+	return func(p *output.Printer) {
+		check := func(label string, ok bool, detail string) []string {
+			state := p.Green("ok")
+			if !ok {
+				state = p.Red("fail")
+			}
+			return []string{label, state, output.Truncate(detail, 80)}
+		}
+		rows := [][]string{
+			check("binary", r.CurrentBinaryAvailable, firstNonEmpty(r.CurrentBinaryError, r.CurrentBinary)),
+			check("Mail.app bundle", r.MailBridgeAvailable, r.MailBridgeError),
+			check("automation access", r.AutomationAccessAvailable, r.AutomationAccessError),
+			check("account access", r.AccountAccessAvailable, firstNonEmpty(r.AccountAccessError, plural(r.AccountCount, "account"))),
+			check("Envelope Index", r.EnvelopeIndexAvailable, firstNonEmpty(r.EnvelopeIndexError, "fast reads available")),
+			check("live probe", r.LiveProbeAvailable, r.LiveProbeError),
+		}
+		p.Table([]string{"CHECK", "STATUS", "DETAIL"}, rows)
+		p.Blank()
+		if r.Healthy {
+			p.Line("%s", p.Green("healthy"))
+		} else {
+			p.Line("%s", p.Red("not healthy"))
+		}
+		if !r.EnvelopeIndexAvailable {
+			p.Line("%s", p.Dim("Grant Full Disk Access to the app running mail-app-cli for fast index-backed reads and cross-mailbox search."))
+		}
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Check local Mail.app CLI health",
+	Short: "Check Mail.app access, permissions, and index availability",
+	Annotations: map[string]string{
+		annotationAgentNotes: "Run this first when any command exits 3. healthy=false with envelopeIndexAvailable=false means slow automation-only reads, not a broken install.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		client := mail.NewClient()
-		result := diagnose(client, rootCmd.Version, os.Executable)
-		return printJSON(result, "doctor")
+		result := diagnose(mailClient, version, os.Executable)
+		summary := "healthy"
+		if !result.Healthy {
+			summary = "not healthy"
+		}
+		if err := writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result)}); err != nil {
+			return err
+		}
+		if !result.Healthy {
+			return clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks above")
+		}
+		return nil
 	},
 }

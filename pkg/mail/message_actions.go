@@ -46,7 +46,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }
@@ -120,7 +120,7 @@ func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, message
 		return "", err
 	}
 	if strings.Contains(output, "Error") {
-		return "", fmt.Errorf(output)
+		return "", bridgeError(output)
 	}
 	return strings.TrimSpace(output), nil
 }
@@ -187,7 +187,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }

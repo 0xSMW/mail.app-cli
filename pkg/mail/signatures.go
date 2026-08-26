@@ -53,5 +53,5 @@ func (c *Client) SignatureByName(name string) (*Signature, error) {
 			return &signature, nil
 		}
 	}
-	return nil, fmt.Errorf("signature not found: %s", name)
+	return nil, notFound("signature", name)
 }

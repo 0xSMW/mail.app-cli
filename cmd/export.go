@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
@@ -29,8 +31,6 @@ type exportMetadata struct {
 }
 
 var (
-	exportAccount string
-	exportMailbox string
 	exportFormat  string
 	exportOutput  string
 	exportLimit   int
@@ -42,62 +42,68 @@ var (
 
 var exportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "Export Mail.app data",
+	Short: "Export messages and attachments",
 }
 
 var exportMessagesCmd = &cobra.Command{
 	Use:   "messages",
-	Short: "Export messages as JSON",
+	Short: "Export messages with bodies as JSON",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireAccountAndMailbox(exportAccount, exportMailbox); err != nil {
+		account, err := requireAccount()
+		if err != nil {
 			return err
 		}
+		mailbox := mailboxInScope()
 		if exportFormat != "json" {
-			return fmt.Errorf("export messages supports --format json; raw eml/mbox export is unsupported by this Mail.app scriptability layer")
+			return clierr.Usage("export messages supports --format json only; Mail.app's scripting layer does not expose raw eml/mbox")
 		}
-		client := mail.NewClient()
-		messages, err := client.GetMessagesJSON(exportAccount, exportMailbox, exportLimit, exportOffset, exportUnread, exportFlagged, true, exportSince)
+		messages, err := mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, true, exportSince)
 		if err != nil {
-			return fmt.Errorf("failed to export messages: %w", err)
+			return fmt.Errorf("export messages: %w", err)
 		}
 		payload := messageExport{
 			Metadata: exportMetadata{
-				Account:     exportAccount,
-				Mailbox:     exportMailbox,
-				Format:      exportFormat,
-				ExportedAt:  time.Now().UTC(),
-				Limit:       exportLimit,
-				Offset:      exportOffset,
-				Since:       exportSince,
-				UnreadOnly:  exportUnread,
-				FlaggedOnly: exportFlagged,
+				Account: account, Mailbox: mailbox, Format: exportFormat, ExportedAt: time.Now().UTC(),
+				Limit: exportLimit, Offset: exportOffset, Since: exportSince, UnreadOnly: exportUnread, FlaggedOnly: exportFlagged,
 			},
 			Messages: messages,
 		}
-		if exportOutput == "" || exportOutput == "-" {
-			return printJSON(payload, "message export")
+		if exportOutput != "" && exportOutput != "-" {
+			if err := writeJSONFile(exportOutput, payload); err != nil {
+				return err
+			}
+			return writer.Write(output.Result{
+				Data:    map[string]any{"path": exportOutput, "messages": len(messages), "account": account, "mailbox": mailbox},
+				Summary: fmt.Sprintf("Exported %s to %s", plural(len(messages), "message"), exportOutput),
+				Plain:   renderLine("Exported %s to %s", plural(len(messages), "message"), exportOutput),
+			})
 		}
-		return writeJSONFile(exportOutput, payload, "message export")
+		return writer.Write(output.Result{
+			Data:    payload,
+			Summary: fmt.Sprintf("Exported %s from %s/%s", plural(len(messages), "message"), account, mailbox),
+			Plain:   renderMessages(messages, false),
+		})
 	},
 }
 
 var exportAttachmentsCmd = &cobra.Command{
 	Use:   "attachments",
-	Short: "Export attachments from selected messages",
+	Short: "Save every attachment from selected messages into a directory",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireAccountAndMailbox(exportAccount, exportMailbox); err != nil {
+		account, err := requireAccount()
+		if err != nil {
 			return err
 		}
-		if exportOutput == "" {
-			return fmt.Errorf("--output directory is required")
+		mailbox := mailboxInScope()
+		if exportOutput == "" || exportOutput == "-" {
+			return clierr.Usage("--output directory is required")
 		}
 		if err := os.MkdirAll(exportOutput, 0o755); err != nil {
 			return err
 		}
-		client := mail.NewClient()
-		messages, err := client.GetMessagesJSON(exportAccount, exportMailbox, exportLimit, exportOffset, exportUnread, exportFlagged, false, exportSince)
+		messages, err := mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, false, exportSince)
 		if err != nil {
-			return fmt.Errorf("failed to select messages: %w", err)
+			return fmt.Errorf("select messages: %w", err)
 		}
 		type savedAttachment struct {
 			MessageID string `json:"messageId"`
@@ -106,11 +112,11 @@ var exportAttachmentsCmd = &cobra.Command{
 			Status    string `json:"status"`
 			Error     string `json:"error,omitempty"`
 		}
-		var saved []savedAttachment
+		saved := []savedAttachment{}
 		failed := 0
 		used := map[string]int{}
 		for _, message := range messages {
-			attachments, err := client.GetAttachmentsJSON(exportAccount, exportMailbox, message.ID)
+			attachments, err := mailClient.GetAttachmentsJSON(account, mailbox, message.ID)
 			if err != nil {
 				saved = append(saved, savedAttachment{MessageID: message.ID, Status: "failed", Error: err.Error()})
 				failed++
@@ -120,7 +126,7 @@ var exportAttachmentsCmd = &cobra.Command{
 				name := deterministicAttachmentName(message, attachment.Name, used)
 				path := filepath.Join(exportOutput, name)
 				item := savedAttachment{MessageID: message.ID, Name: attachment.Name, Path: path}
-				if err := client.SaveAttachmentByIndex(exportAccount, exportMailbox, message.ID, attachment.Name, attachment.Index, path); err != nil {
+				if err := mailClient.SaveAttachmentByIndex(account, mailbox, message.ID, attachment.Name, attachment.Index, path); err != nil {
 					item.Status = "failed"
 					item.Error = err.Error()
 					failed++
@@ -130,18 +136,26 @@ var exportAttachmentsCmd = &cobra.Command{
 				saved = append(saved, item)
 			}
 		}
-		if err := printJSON(saved, "attachment export"); err != nil {
+		rows := make([][]string, 0, len(saved))
+		for _, item := range saved {
+			rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
+		}
+		if err := writer.Write(output.Result{
+			Data:    saved,
+			Summary: fmt.Sprintf("Saved %d attachment(s) to %s, %d failed", len(saved)-failed, exportOutput, failed),
+			Plain:   renderTable([]string{"MESSAGE", "NAME", "STATUS", "PATH"}, rows, "no attachments"),
+		}); err != nil {
 			return err
 		}
 		if attachmentExportFailed(failed) {
-			return fmt.Errorf("failed to export %d attachment item(s)", failed)
+			return clierr.New(clierr.CodeMutationFailed, fmt.Sprintf("failed to export %d attachment item(s)", failed))
 		}
 		return nil
 	},
 }
 
-func writeJSONFile(path string, payload any, label string) error {
-	data, err := marshalIndentedJSON(payload, label)
+func writeJSONFile(path string, payload any) error {
+	data, err := marshalIndentedJSON(payload)
 	if err != nil {
 		return err
 	}
@@ -187,14 +201,11 @@ func sanitizeFilename(value string) string {
 }
 
 func init() {
-	exportCmd.AddCommand(exportMessagesCmd)
-	exportCmd.AddCommand(exportAttachmentsCmd)
+	exportCmd.AddCommand(exportMessagesCmd, exportAttachmentsCmd)
 	for _, cmd := range []*cobra.Command{exportMessagesCmd, exportAttachmentsCmd} {
-		cmd.Flags().StringVarP(&exportAccount, "account", "a", "", "Account name")
-		cmd.Flags().StringVarP(&exportMailbox, "mailbox", "m", "", "Mailbox name")
-		cmd.Flags().StringVar(&exportOutput, "output", "-", "Output file or directory")
+		cmd.Flags().StringVar(&exportOutput, "output", "-", "Output file (messages) or directory (attachments)")
 		cmd.Flags().IntVarP(&exportLimit, "limit", "l", 100, "Maximum messages to export")
-		cmd.Flags().IntVarP(&exportOffset, "offset", "o", 0, "Number of messages to skip")
+		cmd.Flags().IntVarP(&exportOffset, "offset", "o", 0, "Messages to skip")
 		cmd.Flags().StringVar(&exportSince, "since", "", "Only messages since date")
 		cmd.Flags().BoolVar(&exportUnread, "unread", false, "Only unread messages")
 		cmd.Flags().BoolVar(&exportFlagged, "flagged", false, "Only flagged messages")

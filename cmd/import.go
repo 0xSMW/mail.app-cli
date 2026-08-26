@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 var (
-	importAccount string
-	importMailbox string
-	importFormat  string
-	importFile    string
-	importDryRun  bool
+	importFormat string
+	importFile   string
+	importDryRun bool
 )
 
 var importCmd = &cobra.Command{
@@ -24,16 +24,17 @@ var importCmd = &cobra.Command{
 
 var importMessagesCmd = &cobra.Command{
 	Use:   "messages",
-	Short: "Validate exported message JSON before import",
+	Short: "Validate an exported message JSON file (validation only, nothing is written to Mail.app)",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := requireAccountAndMailbox(importAccount, importMailbox); err != nil {
+		account, err := requireAccount()
+		if err != nil {
 			return err
 		}
 		if importFormat != "json" {
-			return fmt.Errorf("import messages validates exported JSON only")
+			return clierr.Usage("import messages validates exported JSON only")
 		}
 		if importFile == "" {
-			return fmt.Errorf("--file is required")
+			return clierr.Usage("--file is required")
 		}
 		data, err := os.ReadFile(importFile)
 		if err != nil {
@@ -41,11 +42,11 @@ var importMessagesCmd = &cobra.Command{
 		}
 		messages, err := parseImportMessages(data)
 		if err != nil {
-			return err
+			return clierr.Wrap(clierr.CodeUsage, err, err.Error())
 		}
 		result := map[string]any{
-			"account":        importAccount,
-			"mailbox":        importMailbox,
+			"account":        account,
+			"mailbox":        mailboxInScope(),
 			"format":         importFormat,
 			"validated":      len(messages),
 			"implementation": "validation-only",
@@ -53,7 +54,11 @@ var importMessagesCmd = &cobra.Command{
 		if importDryRun {
 			result["dryRun"] = true
 		}
-		return printJSON(result, "import validation")
+		return writer.Write(output.Result{
+			Data:    result,
+			Summary: fmt.Sprintf("Validated %s in %s", plural(len(messages), "message"), importFile),
+			Plain:   renderLine("Validated %s in %s (nothing written to Mail.app)", plural(len(messages), "message"), importFile),
+		})
 	},
 }
 
@@ -62,7 +67,6 @@ func parseImportMessages(data []byte) ([]mail.Message, error) {
 	if err := json.Unmarshal(data, &direct); err == nil {
 		return direct, nil
 	}
-
 	var payload struct {
 		Messages []mail.Message `json:"messages"`
 	}
@@ -77,9 +81,7 @@ func parseImportMessages(data []byte) ([]mail.Message, error) {
 
 func init() {
 	importCmd.AddCommand(importMessagesCmd)
-	importMessagesCmd.Flags().StringVarP(&importAccount, "account", "a", "", "Target account")
-	importMessagesCmd.Flags().StringVarP(&importMailbox, "mailbox", "m", "", "Target mailbox")
 	importMessagesCmd.Flags().StringVar(&importFormat, "format", "json", "Import format: json")
 	importMessagesCmd.Flags().StringVar(&importFile, "file", "", "Export JSON file")
-	importMessagesCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Mark validation output as a dry run")
+	importMessagesCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Mark the validation output as a dry run")
 }

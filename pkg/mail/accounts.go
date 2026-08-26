@@ -15,7 +15,7 @@ func (c *Client) accountByName(accountName string) (*Account, error) {
 			return &account, nil
 		}
 	}
-	return nil, fmt.Errorf("account not found: %s", accountName)
+	return nil, notFound("account", accountName)
 }
 
 func (c *Client) GetAccounts() ([]Account, error) {
