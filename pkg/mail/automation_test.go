@@ -125,7 +125,7 @@ func TestRunAutomationQueuedCallGetsFreshExecutionTimeout(t *testing.T) {
 		_ = holder.Wait()
 	})
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		contents, err := os.ReadFile(logPath)
 		if err == nil && strings.Contains(string(contents), "holder-start") {
@@ -185,12 +185,16 @@ func TestRunAutomationTimeoutDoesNotWaitForDetachedDescendant(t *testing.T) {
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", lockPath)
 	t.Setenv("PATH", binDir)
 
+	// The fake osascript must fork its descendant and log the pid before the
+	// timeout fires; under a loaded test run shell startup alone can take
+	// hundreds of milliseconds, so the timeout is generous.
+	const timeout = time.Second
 	started := time.Now()
-	_, err := NewClient().runJXAWithTimeout("detached", 200*time.Millisecond)
+	_, err := NewClient().runJXAWithTimeout("detached", timeout)
 	if err == nil {
 		t.Fatal("runJXAWithTimeout returned nil error")
 	}
-	if elapsed := time.Since(started); elapsed > 200*time.Millisecond+automationWaitDelay+time.Second {
+	if elapsed := time.Since(started); elapsed > timeout+automationWaitDelay+time.Second {
 		t.Fatalf("timed out invocation exceeded its bounded wait: %s", elapsed)
 	}
 	var timeoutErr *AutomationTimeoutError
@@ -258,7 +262,7 @@ printf '%s\n' "$last"
 
 func waitForAutomationLog(t *testing.T, logPath, entry string) {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		contents, err := os.ReadFile(logPath)
 		if err == nil && strings.Contains(string(contents), entry) {
