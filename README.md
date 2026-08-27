@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.s
 Or with Go 1.24 or newer:
 
 ```bash
-go install github.com/0xSMW/mail.app-cli@latest
+go install github.com/0xSMW/mail.app-cli/v2@latest
 ```
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.

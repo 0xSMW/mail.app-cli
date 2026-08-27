@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/internal/config"
-	"github.com/0xSMW/mail.app-cli/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/internal/config"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 	"github.com/spf13/cobra"
 )
 

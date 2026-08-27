@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/internal/output"
-	"github.com/0xSMW/mail.app-cli/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
 

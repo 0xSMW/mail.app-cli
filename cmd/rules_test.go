@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
 func TestRulesCreateRejectsEmptySubjectBeforeDryRun(t *testing.T) {

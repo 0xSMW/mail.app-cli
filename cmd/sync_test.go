@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 )
 
 func TestSyncFailureWritesSingleFailedEnvelopeWithReceipt(t *testing.T) {

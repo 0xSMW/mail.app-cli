@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/itchyny/gojq"
 )
 

@@ -3,7 +3,7 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/0xSMW/mail.app-cli/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 	"github.com/spf13/cobra"
 )
 

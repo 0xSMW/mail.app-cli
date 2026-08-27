@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/internal/config"
-	"github.com/0xSMW/mail.app-cli/internal/output"
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/config"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )

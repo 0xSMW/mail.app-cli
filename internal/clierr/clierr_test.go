@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
 func TestClassifyMapsTypedErrors(t *testing.T) {

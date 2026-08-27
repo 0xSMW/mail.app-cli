@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-module="github.com/0xSMW/mail.app-cli"
+module="github.com/0xSMW/mail.app-cli/v2"
 version="${MAIL_APP_CLI_VERSION:-latest}"
 binary="mail-app-cli"
 

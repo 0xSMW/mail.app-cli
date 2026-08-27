@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
 // Code is the machine-readable category of a failure.

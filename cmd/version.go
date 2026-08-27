@@ -3,8 +3,8 @@ package cmd
 import (
 	"runtime"
 
-	"github.com/0xSMW/mail.app-cli/internal/output"
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
