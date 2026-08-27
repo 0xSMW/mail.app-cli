@@ -12,6 +12,7 @@ import (
 	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 const version = "2.0.0"
@@ -66,6 +67,12 @@ func Execute() {
 
 // Run executes args against the root command and returns the exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	// Cobra commands and their flags are package globals. Clear the previous
+	// invocation before parsing, and again on every return, so callers that use
+	// Run more than once get the same behavior as separate CLI processes.
+	resetCommandFlags(rootCmd)
+	defer resetCommandFlags(rootCmd)
+
 	writer = nil
 	rootCmd.SetArgs(args)
 	rootCmd.SetOut(stdout)
@@ -90,6 +97,24 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	w.Error(cerr)
 	return clierr.ExitCode(cerr.Code)
+}
+
+// resetCommandFlags restores every registered flag value and Changed bit on a
+// command tree. Cobra otherwise retains both across Execute calls.
+func resetCommandFlags(cmd *cobra.Command) {
+	reset := func(f *pflag.Flag) {
+		if slice, ok := f.Value.(pflag.SliceValue); ok {
+			_ = slice.Replace(nil)
+		} else {
+			_ = f.Value.Set(f.DefValue)
+		}
+		f.Changed = false
+	}
+	cmd.PersistentFlags().VisitAll(reset)
+	cmd.Flags().VisitAll(reset)
+	for _, sub := range cmd.Commands() {
+		resetCommandFlags(sub)
+	}
 }
 
 func wantsJSONArgs(args []string) bool {

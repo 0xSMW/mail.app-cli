@@ -190,7 +190,7 @@ mail-app-cli search "sample invoice" -a "Example Account" --since 2026-01-01 --s
 mail-app-cli search "sample invoice" -a "Example Account" -m "All Mail"
 ```
 
-Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` (an object, so `--ids-only` and `--count` do not apply). If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
+Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` in regular structured output. With `--ids-only` or `--count`, those list modifiers operate on `messages`. If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
 
 ## Other commands
 

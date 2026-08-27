@@ -10,30 +10,7 @@ import (
 
 	"github.com/0xSMW/mail.app-cli/internal/config"
 	"github.com/0xSMW/mail.app-cli/internal/output"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
-
-// resetFlags returns every flag on the tree to its default so one test's
-// arguments do not leak into the next.
-func resetFlags(cmd *cobra.Command) {
-	reset := func(f *pflag.Flag) {
-		if !f.Changed {
-			return
-		}
-		if slice, ok := f.Value.(pflag.SliceValue); ok {
-			_ = slice.Replace(nil)
-		} else {
-			_ = f.Value.Set(f.DefValue)
-		}
-		f.Changed = false
-	}
-	cmd.PersistentFlags().VisitAll(reset)
-	cmd.Flags().VisitAll(reset)
-	for _, sub := range cmd.Commands() {
-		resetFlags(sub)
-	}
-}
 
 func run(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
@@ -41,10 +18,8 @@ func run(t *testing.T, args ...string) (int, string, string) {
 	t.Setenv(config.EnvAccount, "")
 	t.Setenv(config.EnvMailbox, "")
 	t.Setenv(config.EnvOutput, "")
-	resetFlags(rootCmd)
 	var stdout, stderr bytes.Buffer
 	code := Run(args, &stdout, &stderr)
-	resetFlags(rootCmd)
 	return code, stdout.String(), stderr.String()
 }
 
@@ -100,12 +75,10 @@ func TestVersionEnvelope(t *testing.T) {
 func TestConfigRoundTripAndPrecedence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv(config.EnvConfigPath, path)
-	resetFlags(rootCmd)
 	var stdout, stderr bytes.Buffer
 	if code := Run([]string{"config", "set", "account", "Work", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("set exit = %d: %s", code, stderr.String())
 	}
-	resetFlags(rootCmd)
 	stdout.Reset()
 	if code := Run([]string{"config", "show", "--json"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("show exit = %d: %s", code, stderr.String())
@@ -122,7 +95,6 @@ func TestConfigRoundTripAndPrecedence(t *testing.T) {
 	if env.Data.Mailbox.Value != "INBOX" || env.Data.Mailbox.Source != config.SourceDefault {
 		t.Fatalf("mailbox = %+v", env.Data.Mailbox)
 	}
-	resetFlags(rootCmd)
 	stdout.Reset()
 	if code := Run([]string{"config", "show", "--json", "-a", "Other", "-m", "Archive"}, &stdout, &stderr); code != 0 {
 		t.Fatalf("show with flags exit = %d: %s", code, stderr.String())
@@ -133,12 +105,10 @@ func TestConfigRoundTripAndPrecedence(t *testing.T) {
 	if env.Data.Account.Value != "Other" || env.Data.Account.Source != config.SourceFlag || env.Data.Mailbox.Value != "Archive" {
 		t.Fatalf("flag precedence = %+v", env.Data)
 	}
-	resetFlags(rootCmd)
 	stdout.Reset()
 	if code := Run([]string{"config", "set", "output", "table", "--json"}, &stdout, &stderr); code != 1 {
 		t.Fatalf("invalid output value exit = %d", code)
 	}
-	resetFlags(rootCmd)
 }
 
 func TestConfigPathWorksWithMalformedConfig(t *testing.T) {
@@ -147,10 +117,8 @@ func TestConfigPathWorksWithMalformedConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(config.EnvConfigPath, path)
-	resetFlags(rootCmd)
 	var stdout, stderr bytes.Buffer
 	code := Run([]string{"config", "path", "--json"}, &stdout, &stderr)
-	resetFlags(rootCmd)
 	if code != 0 {
 		t.Fatalf("exit = %d: %s", code, stderr.String())
 	}
@@ -165,6 +133,54 @@ func TestConfigPathWorksWithMalformedConfig(t *testing.T) {
 	}
 	if env.Data.Path != path || !env.Data.Exists {
 		t.Fatalf("config path data = %+v, want existing %q", env.Data, path)
+	}
+}
+
+func TestRunResetsFlagsBetweenInvocations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv(config.EnvConfigPath, path)
+	t.Setenv(config.EnvAccount, "")
+	t.Setenv(config.EnvMailbox, "")
+	t.Setenv(config.EnvOutput, "")
+
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"config", "show", "--json", "--account", "Work", "--mailbox", "Archive"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("first exit = %d: %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"config", "show", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("second exit = %d: %s", code, stderr.String())
+	}
+	var env struct {
+		Data config.Resolved `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("second stdout is not an envelope: %v\n%s", err, stdout.String())
+	}
+	if env.Data.Account.Source != config.SourceDefault || env.Data.Account.Value != "" {
+		t.Fatalf("account leaked from prior invocation: %+v", env.Data.Account)
+	}
+	if env.Data.Mailbox.Source != config.SourceDefault || env.Data.Mailbox.Value != "INBOX" {
+		t.Fatalf("mailbox leaked from prior invocation: %+v", env.Data.Mailbox)
+	}
+}
+
+func TestRunResetsFlagsAfterError(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := Run([]string{"version", "--json", "--plain"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("error exit = %d: %s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := Run([]string{"version", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("next exit = %d: %s", code, stderr.String())
+	}
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil || !env.OK {
+		t.Fatalf("next stdout = %q, unmarshal error = %v", stdout.String(), err)
 	}
 }
 

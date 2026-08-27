@@ -125,6 +125,9 @@ func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, message
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
+		if classified := bridgeError(err.Error()); errors.Is(classified, ErrNotFound) {
+			return "", classified
+		}
 		return "", err
 	}
 	if strings.Contains(output, "Error") {
