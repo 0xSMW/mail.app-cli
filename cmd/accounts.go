@@ -5,6 +5,7 @@ import (
 
 	"github.com/0xSMW/mail.app-cli/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/internal/output"
+	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -42,7 +43,11 @@ var accountsShowCmd = &cobra.Command{
 	Short: "Show one account",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		accounts, err := accountsCached(false, false)
+		// Details and not-found responses must reflect Mail.app now. The
+		// account-list cache is intentionally long-lived, so use a separate
+		// client to bypass both its on-disk entry and any in-process cache
+		// primed from it.
+		accounts, err := mail.NewClient().GetAccountsJSON()
 		if err != nil {
 			return fmt.Errorf("get accounts: %w", err)
 		}

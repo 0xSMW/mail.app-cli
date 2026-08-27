@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/0xSMW/mail.app-cli/internal/config"
 	"github.com/0xSMW/mail.app-cli/internal/output"
+	"github.com/spf13/cobra"
 )
 
 type terminalBuffer struct{ bytes.Buffer }
@@ -346,6 +348,50 @@ func TestCountRefusedBeforeRunOnNonList(t *testing.T) {
 	code, stdout, stderr = run(t, "version", "--jq", ".data[")
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "invalid --jq") {
 		t.Fatalf("bad jq: exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+}
+
+func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
+	var jqOutput bytes.Buffer
+	jqWriter, err := output.New(output.FormatJSON, &jqOutput, io.Discard, false, "1 / 0", "test", 1)
+	if err != nil {
+		t.Fatalf("compile jq expression: %v", err)
+	}
+	if err := jqWriter.Write(output.Result{Data: map[string]any{"receipt": true}}); err == nil {
+		t.Fatal("1 / 0 did not fail when jq evaluated it")
+	}
+
+	ran := false
+	mutation := &cobra.Command{
+		Use:         "jq-mutation-preflight-test",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{annotationMutation: "true"},
+		RunE: func(*cobra.Command, []string) error {
+			ran = true
+			return nil
+		},
+	}
+	rootCmd.AddCommand(mutation)
+	t.Cleanup(func() { rootCmd.RemoveCommand(mutation) })
+
+	code, stdout, stderr := run(t, "jq-mutation-preflight-test", "--jq", "1 / 0")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--jq cannot be combined with a command that changes state") {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+	if ran {
+		t.Fatal("mutation RunE ran before the jq runtime failure was rejected")
+	}
+}
+
+func TestStateChangingCommandsRejectJQBeforeRun(t *testing.T) {
+	for _, cmd := range []*cobra.Command{
+		archiveCmd, sendCmd, attachmentsSaveCmd, configSetCmd, draftsCreateCmd,
+		exportMessagesCmd, importMessagesCmd, messagesBatchArchiveCmd, recentClearCmd,
+		rulesApplyCmd, skillInstallCmd, syncCmd, threadsArchiveCmd,
+	} {
+		if cmd.Annotations[annotationMutation] != "true" {
+			t.Fatalf("%s is not annotated as a mutation", cmd.CommandPath())
+		}
 	}
 }
 

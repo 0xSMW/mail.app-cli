@@ -33,6 +33,9 @@ const (
 	// annotationIDList marks list commands whose items carry an id, which also
 	// accept --ids-only.
 	annotationIDList = "idList"
+	// annotationMutation marks commands that can change Mail.app or local
+	// state. Their receipts must never be hidden by a post-action --jq error.
+	annotationMutation = "mutation"
 )
 
 var (
@@ -176,6 +179,10 @@ func prepare(cmd *cobra.Command, args []string) error {
 		return clierr.Usage("--ids-only only applies to lists whose items carry an id").
 			WithHint("use --count to count this list, or --jq to pick fields from its data")
 	}
+	if outFlags.JQ != "" && cmd.Annotations[annotationMutation] == "true" {
+		return clierr.Usage("--jq cannot be combined with a command that changes state").
+			WithHint("run the mutation without --jq so its receipt remains available")
+	}
 	color := output.ColorEnabled(format, tty, outFlags.NoColor, os.Getenv)
 	writer, err = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
 	if err != nil {
@@ -223,6 +230,18 @@ func markIDList(cmds ...*cobra.Command) {
 	markList(cmds...)
 	for _, cmd := range cmds {
 		cmd.Annotations[annotationIDList] = "true"
+	}
+}
+
+// markMutation tags commands that can make a state change. prepare uses the
+// annotation before RunE so an otherwise-valid jq expression cannot fail only
+// after a receipt-bearing action has succeeded.
+func markMutation(cmds ...*cobra.Command) {
+	for _, cmd := range cmds {
+		if cmd.Annotations == nil {
+			cmd.Annotations = map[string]string{}
+		}
+		cmd.Annotations[annotationMutation] = "true"
 	}
 }
 

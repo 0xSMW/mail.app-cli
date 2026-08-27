@@ -54,8 +54,9 @@ Shortcuts:
   --quiet       bare data with no envelope (the 1.x shape, with camelCase keys)
   --ids-only    one id per line from lists whose items carry an id
   --count       just the number of items
-  --jq EXPR     run a jq expression over the envelope (over data with --quiet);
-                strings print raw, like jq -r
+  --jq EXPR     on read commands, run a jq expression over the envelope (over
+                data with --quiet); strings print raw, like jq -r.
+                State-changing commands reject --jq before doing any work.
   --no-color    disable ANSI color; NO_COLOR=1 does the same
 
 Field names are camelCase everywhere: id, subject, sender, dateReceived, read,
