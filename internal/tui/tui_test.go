@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"errors"
 	"strconv"
 	"strings"
@@ -278,6 +280,44 @@ func TestReadsStartedDuringWriteAreDeferred(t *testing.T) {
 	m.list.cursor = len(m.list.messages)
 	if cmd := m.loadMore(); cmd != nil || m.pageLane.inFlight() {
 		t.Fatal("paging during a write was not deferred")
+	}
+}
+
+func TestSettledStateOutlivesLaggingRefresh(t *testing.T) {
+	m := loadedModel(t)
+	unread := m.list.messages[0] // row 1 is unread
+	m = press(m, "u")            // mark read
+	m = press(m, "j")
+	m = press(m, "e") // archive row 2
+	now := time.Now()
+	receipt := func(msg mail.Message) mail.BatchResult {
+		return mail.BatchResult{Items: []mail.BatchItem{{ID: msg.ID, Account: msg.Account, SourceMailbox: msg.Mailbox, Status: "succeeded"}}}
+	}
+	m.recordSettled(mutationDoneMsg{result: receipt(unread), opts: mail.BatchOptions{Action: "mark", Read: true}}, now)
+	archived := mail.Message{ID: "2", Account: "Work", Mailbox: "INBOX"}
+	m.recordSettled(mutationDoneMsg{result: receipt(archived), opts: mail.BatchOptions{Action: "archive"}, removed: map[string]bool{bodyKey(archived): true}}, now)
+
+	stale := []mail.Message{
+		{ID: "1", Account: "Work", Mailbox: "INBOX", Subject: "First", Read: false},
+		{ID: "2", Account: "Work", Mailbox: "INBOX", Subject: "Second", Read: true},
+		{ID: "3", Account: "Work", Mailbox: "INBOX", Subject: "Third", Read: true},
+	}
+	rows, lagging := m.reconcile(stale, now)
+	if !lagging || len(rows) != 2 || rows[0].ID != "1" || !rows[0].Read || rows[1].ID != "3" {
+		t.Fatalf("stale page was not reconciled: lagging=%v rows=%+v", lagging, rows)
+	}
+	caughtUp := []mail.Message{
+		{ID: "1", Account: "Work", Mailbox: "INBOX", Subject: "First", Read: true},
+		{ID: "3", Account: "Work", Mailbox: "INBOX", Subject: "Third", Read: true},
+	}
+	if rows, lagging := m.reconcile(caughtUp, now); lagging || len(rows) != 2 {
+		t.Fatalf("index that agrees was still treated as lagging: %v %+v", lagging, rows)
+	}
+	if _, held := m.settled[bodyKey(unread)]; held {
+		t.Fatal("agreed read state was not forgotten")
+	}
+	if rows, lagging := m.reconcile(stale, now.Add(settledTTL+time.Second)); lagging || len(rows) != 3 {
+		t.Fatalf("expired entries still applied: %v %+v", lagging, rows)
 	}
 }
 

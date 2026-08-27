@@ -93,6 +93,8 @@ type model struct {
 	// advanceAfterPage moves to the next row once a page the reader asked
 	// for at the loaded boundary arrives.
 	advanceAfterPage bool
+	// settled holds receipt-confirmed state the index has yet to report.
+	settled map[string]settled
 	// noAutoRead lists messages the reader must not mark read on its own:
 	// ones the user marked unread while reading, and ones whose automatic
 	// mark failed. Navigating the reader off a message lifts its entry.
@@ -658,7 +660,11 @@ func (m model) onPageLoaded(msg pageLoadedMsg) (tea.Model, tea.Cmd) {
 		m.advanceAfterPage = false
 		return m, cmd
 	}
-	m.list.appendPage(msg.messages, msg.pageSize)
+	messages, lagging := m.reconcile(msg.messages, time.Now())
+	m.list.appendPage(messages, msg.pageSize)
+	if lagging {
+		return m, m.scheduleRefresh()
+	}
 	if id := m.pendingOpen; id != "" {
 		return m, m.openPending(id, msg.source)
 	}
@@ -692,12 +698,16 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, cmd
 	}
-	m.list.setMessages(msg.messages, msg.silent, msg.source, msg.limit)
-	m.reader.syncFlags(msg.messages)
+	messages, lagging := m.reconcile(msg.messages, time.Now())
+	m.list.setMessages(messages, msg.silent, msg.source, msg.limit)
+	m.reader.syncFlags(messages)
 	if !strings.HasPrefix(m.notice, "slow mode") {
 		m.notice = ""
 	}
 	var cmds []tea.Cmd
+	if lagging {
+		cmds = append(cmds, m.scheduleRefresh())
+	}
 	if id := m.pendingOpen; id != "" {
 		cmds = append(cmds, m.openPending(id, msg.source))
 	}

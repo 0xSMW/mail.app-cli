@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"cmp"
 	"strings"
 
@@ -54,6 +56,8 @@ type mutationDoneMsg struct {
 	result mail.BatchResult
 	opts   mail.BatchOptions
 	keys   map[string]bool
+	// removed is the rows the optimistic update took off the screen.
+	removed map[string]bool
 }
 
 // handleActionKey runs the message actions shared by the list and the reader.
@@ -167,6 +171,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 	}
 
 	notice := m.deferPendingReads()
+	removed := map[string]bool{}
 	switch opts.Action {
 	case "archive", "delete", "move":
 		// Rows only leave the screen when the action removes them from the
@@ -195,6 +200,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 			// message matching, so rows stay until the search re-runs.
 			moving = map[string]bool{}
 		}
+		removed = moving
 		m.list.remove(moving)
 		m.reader.forget(moving)
 		if m.reader.open && m.list.current() == nil {
@@ -221,7 +227,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 	client := m.client.WithContext(m.writeCtx)
 	run := m.writes.push(func() tea.Msg {
 		result, err := mail.RunBatch(client, opts, items, mutate)
-		return mutationDoneMsg{err: err, result: result, opts: opts, keys: keys}
+		return mutationDoneMsg{err: err, result: result, opts: opts, keys: keys, removed: removed}
 	})
 	if m.reader.open && (opts.Action == "archive" || opts.Action == "delete" || opts.Action == "move") {
 		return tea.Batch(run, m.requestBody(), notice)
@@ -287,6 +293,7 @@ func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 			m.suppressAutoRead(failed)
 		}
 	}
+	m.recordSettled(msg, time.Now())
 	var cmds []tea.Cmd
 	switch {
 	case msg.err != nil && len(result.Items) == 0:

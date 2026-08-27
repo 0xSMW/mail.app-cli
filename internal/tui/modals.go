@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"time"
+
 	"strconv"
 	"strings"
 
@@ -223,7 +225,8 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	keepCursor := msg.silent && m.list.source.search == msg.query
-	m.list.setMessages(msg.result.Messages, keepCursor, listSource{search: msg.query}, 0)
+	messages, lagging := m.reconcile(msg.result.Messages, time.Now())
+	m.list.setMessages(messages, keepCursor, listSource{search: msg.query}, 0)
 	if !keepCursor {
 		m.list.clearSelection()
 	}
@@ -234,6 +237,9 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be searched"
 	case len(msg.result.Messages) >= searchLimit:
 		m.notice = "showing the newest " + strconv.Itoa(searchLimit) + " matches; narrow the query for older ones"
+	}
+	if lagging {
+		return m, m.scheduleRefresh()
 	}
 	return m, nil
 }
