@@ -234,10 +234,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onComposeDone(msg)
 
 	case refreshDueMsg:
-		if msg.id == m.refreshID {
-			return m, m.reloadList(true)
+		if msg.id != m.refreshID {
+			return m, nil
 		}
-		return m, nil
+		if m.writes.busy {
+			// A write started after the timer was set; refresh once it drains.
+			m.refreshWanted = true
+			return m, nil
+		}
+		return m, m.reloadList(true)
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)

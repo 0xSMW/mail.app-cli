@@ -180,6 +180,10 @@ func TestParseAddressListKeepsNamesTogether(t *testing.T) {
 	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
 		t.Fatalf("quoted name = %v", got)
 	}
+	got = parseAddressList(`"Doe; Jane" <jane@example.test>; bob@example.test`)
+	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
+		t.Fatalf("quoted name with semicolons = %v", got)
+	}
 }
 
 func TestSanitizeLineStripsEscapes(t *testing.T) {

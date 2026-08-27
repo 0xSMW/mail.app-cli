@@ -232,10 +232,10 @@ func (c *composeModal) updateInputs(msg tea.Msg) tea.Cmd {
 }
 
 // parseAddressList accepts an RFC 5322 list such as `"Doe, Jane" <j@x>, b@y`
-// and returns bare addresses. Input the parser rejects is split on commas
-// and semicolons instead, so a plain "a@x; b@y" still works.
+// with semicolons allowed as separators, and returns bare addresses. Input
+// the parser still rejects is split on separators outside quotes.
 func parseAddressList(value string) []string {
-	value = strings.TrimSpace(value)
+	value = strings.TrimSpace(semicolonsToCommas(value))
 	if value == "" {
 		return nil
 	}
@@ -247,7 +247,7 @@ func parseAddressList(value string) []string {
 		return out
 	}
 	var out []string
-	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
+	for _, part := range splitOutsideQuotes(value, ',') {
 		if part = strings.TrimSpace(part); part != "" {
 			if email := mail.ParseSender(part).Email; email != "" {
 				out = append(out, email)
@@ -255,6 +255,42 @@ func parseAddressList(value string) []string {
 		}
 	}
 	return out
+}
+
+// semicolonsToCommas turns separator semicolons into commas, leaving any
+// inside a quoted display name alone.
+func semicolonsToCommas(value string) string {
+	runes := []rune(value)
+	quoted := false
+	for i, r := range runes {
+		switch {
+		case r == '"' && (i == 0 || runes[i-1] != '\\'):
+			quoted = !quoted
+		case r == ';' && !quoted:
+			runes[i] = ','
+		}
+	}
+	return string(runes)
+}
+
+// splitOutsideQuotes splits on sep except inside double quotes.
+func splitOutsideQuotes(value string, sep rune) []string {
+	var parts []string
+	var current strings.Builder
+	quoted := false
+	for i, r := range value {
+		switch {
+		case r == '"' && (i == 0 || value[i-1] != '\\'):
+			quoted = !quoted
+			current.WriteRune(r)
+		case r == sep && !quoted:
+			parts = append(parts, current.String())
+			current.Reset()
+		default:
+			current.WriteRune(r)
+		}
+	}
+	return append(parts, current.String())
 }
 
 func (c *composeModal) fail(field int, status string) tea.Cmd {

@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/config"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 	"github.com/0xSMW/mail.app-cli/v2/internal/tui"
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
@@ -37,8 +38,9 @@ ctrl+r refresh, ? help, q quit.`,
 			MessageID: tuiMessage,
 			Color:     output.ColorEnabled(output.FormatPlain, true, outFlags.NoColor, os.Getenv),
 		}
-		if mailboxExplicit() {
-			// A mailbox only means something within an account.
+		if resolved.Mailbox.Source != config.SourceDefault {
+			// A mailbox, whether from the flag, the environment, or the config
+			// file, only means something within an account.
 			account, err := requireAccount()
 			if err != nil {
 				return err
