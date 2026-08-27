@@ -93,9 +93,11 @@ type model struct {
 	// advanceAfterPage moves to the next row once a page the reader asked
 	// for at the loaded boundary arrives.
 	advanceAfterPage bool
-	// markFailed remembers messages whose automatic mark-read failed, so
-	// the reader does not retry on every refresh; an explicit u clears it.
-	markFailed map[string]bool
+	// noAutoRead lists messages the reader must not mark read on its own:
+	// ones the user marked unread while reading, and ones whose automatic
+	// mark failed. Navigating the reader off a message lifts its entry.
+	noAutoRead map[string]bool
+	readerKey  string
 	notice     string
 	err        error
 	helpHidden bool
@@ -720,6 +722,10 @@ func (m *model) requestBody() tea.Cmd {
 	if key == "" {
 		return nil
 	}
+	if key != m.readerKey {
+		delete(m.noAutoRead, m.readerKey)
+		m.readerKey = key
+	}
 	if cached, ok := m.reader.cached(key); ok {
 		// A fetch still in flight for the previous row must not report
 		// against this one.
@@ -774,13 +780,23 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// autoMarkRead marks the message on screen read unless a previous attempt
-// failed, which would otherwise loop through the failure refresh.
+// autoMarkRead marks the message on screen read unless the user asked for
+// it to stay unread or a previous attempt failed, either of which would
+// otherwise be undone or retried by the next refresh.
 func (m *model) autoMarkRead() tea.Cmd {
-	if key := m.currentKey(); key != "" && m.markFailed[key] {
+	if key := m.currentKey(); key != "" && m.noAutoRead[key] {
 		return nil
 	}
 	return m.markCurrentRead()
+}
+
+func (m *model) suppressAutoRead(keys map[string]bool) {
+	if m.noAutoRead == nil {
+		m.noAutoRead = map[string]bool{}
+	}
+	for key := range keys {
+		m.noAutoRead[key] = true
+	}
 }
 
 func (m *model) openReader() tea.Cmd {

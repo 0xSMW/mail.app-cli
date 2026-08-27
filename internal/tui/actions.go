@@ -100,9 +100,18 @@ func (m *model) handleActionKey(key string) tea.Cmd {
 func (m *model) act(targets []mail.Message, opts mail.BatchOptions, mutate mail.Mutator) tea.Cmd {
 	m.list.clearSelection()
 	if opts.Action == "mark" {
-		// An explicit request lifts the automatic retry guard.
+		keys := make(map[string]bool, len(targets))
 		for _, t := range targets {
-			delete(m.markFailed, bodyKey(t))
+			keys[bodyKey(t)] = true
+		}
+		if opts.Read {
+			// An explicit mark-read lifts any guard.
+			for key := range keys {
+				delete(m.noAutoRead, key)
+			}
+		} else {
+			// An explicit mark-unread must survive the reader's own marking.
+			m.suppressAutoRead(keys)
 		}
 	}
 	return m.mutate(targets, opts, mutate)
@@ -252,12 +261,7 @@ func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 	if failed := failedKeys(result, msg.keys); len(failed) > 0 {
 		m.reader.forget(failed)
 		if msg.opts.Action == "mark" {
-			if m.markFailed == nil {
-				m.markFailed = map[string]bool{}
-			}
-			for key := range failed {
-				m.markFailed[key] = true
-			}
+			m.suppressAutoRead(failed)
 		}
 	}
 	var cmds []tea.Cmd

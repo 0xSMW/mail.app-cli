@@ -391,13 +391,32 @@ func TestFailedAutoMarkReadIsNotRetried(t *testing.T) {
 	m := loadedModel(t)
 	m.reader.open = true
 	key := m.currentKey()
-	m.markFailed = map[string]bool{key: true}
+	m.suppressAutoRead(map[string]bool{key: true})
 	if cmd := m.autoMarkRead(); cmd != nil {
 		t.Fatal("automatic mark-read retried after a failure")
 	}
-	m = press(m, "u")
-	if m.markFailed[key] {
-		t.Fatal("explicit u did not lift the retry guard")
+	m = press(m, "u") // row 1 is unread, so u marks it read and lifts the guard
+	if m.noAutoRead[key] {
+		t.Fatal("explicit mark-read did not lift the guard")
+	}
+}
+
+func TestExplicitUnreadSurvivesReaderRefresh(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "j") // row 2 is read
+	m.reader.open = true
+	_ = m.requestBody()
+	m = press(m, "u") // mark it unread while reading
+	if !m.noAutoRead[m.currentKey()] {
+		t.Fatal("marking unread did not suppress automatic mark-read")
+	}
+	if cmd := m.autoMarkRead(); cmd != nil {
+		t.Fatal("reader re-marked an explicitly unread message")
+	}
+	m = press(m, "j") // moving off the message lifts the suppression
+	_ = m.requestBody()
+	if len(m.noAutoRead) != 0 {
+		t.Fatalf("suppression did not lift on navigation: %v", m.noAutoRead)
 	}
 }
 
