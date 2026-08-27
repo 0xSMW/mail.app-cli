@@ -153,6 +153,11 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	if opts.DryRun {
 		// A preview shows the same sources and skips the real run would use.
 		for _, item := range items {
+			if item.Status == "failed" {
+				result.Failed++
+				result.Items = append(result.Items, item)
+				continue
+			}
 			item.Status = "dry-run"
 			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
@@ -171,6 +176,13 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			fmt.Fprintf(opts.Progress, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
 		}
 		for _, item := range items[start:end] {
+			if item.Status == "failed" {
+				// Source resolution already refused this one.
+				result.Attempted++
+				result.Failed++
+				result.Items = append(result.Items, item)
+				continue
+			}
 			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
 				item.Error = skip
@@ -242,12 +254,16 @@ func skipReason(client *Client, opts BatchOptions, item BatchItem) string {
 }
 
 // archiveSources rewrites each item's source to INBOX or its backing
-// mailbox so archive never strips a user label. Items the index cannot
-// locate keep the mailbox they were listed in.
+// mailbox so archive never strips a user label. An item listed under
+// anything other than INBOX or the archive that the index cannot place is
+// marked failed rather than archived from the label it was listed in.
 func (c *Client) archiveSources(items []BatchItem) []BatchItem {
+	needsLookup := func(item BatchItem) bool {
+		return !strings.EqualFold(item.SourceMailbox, "INBOX") && !IsArchiveAlias(item.SourceMailbox)
+	}
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
-		if !strings.EqualFold(item.SourceMailbox, "INBOX") {
+		if needsLookup(item) {
 			ids = append(ids, item.ID)
 		}
 	}
@@ -255,11 +271,19 @@ func (c *Client) archiveSources(items []BatchItem) []BatchItem {
 		return items
 	}
 	located, err := c.LocateMessages(ids)
-	if err != nil {
-		return items
-	}
 	for i, item := range items {
-		if loc, ok := located[item.ID]; ok && strings.EqualFold(loc.Account, item.Account) {
+		if !needsLookup(item) {
+			continue
+		}
+		loc, ok := located[item.ID]
+		switch {
+		case err != nil:
+			items[i].Status = "failed"
+			items[i].Error = fmt.Sprintf("cannot resolve a safe archive source without the Envelope Index (%v); archive from INBOX with --mailbox", err)
+		case !ok || !strings.EqualFold(loc.Account, item.Account):
+			items[i].Status = "failed"
+			items[i].Error = "message not in the Envelope Index; archive from INBOX with --mailbox"
+		default:
 			items[i].SourceMailbox = loc.ArchiveMailbox
 		}
 	}

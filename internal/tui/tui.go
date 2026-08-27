@@ -504,9 +504,12 @@ func (m *model) reloadList(silent bool) tea.Cmd {
 	if m.list.source.search != "" {
 		return m.runSearch(m.list.source.search, silent)
 	}
-	if m.searchLane.loading {
+	// A background refresh yields to a search still in flight; a mailbox
+	// the user chose supersedes it.
+	if m.searchLane.loading && silent {
 		return nil
 	}
+	m.searchLane.abandon()
 	source := m.sidebar.current().source()
 	m.pageLane.abandon()
 	id, ctx := m.listLane.begin(m.ctx, silent)
