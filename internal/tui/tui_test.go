@@ -2,6 +2,7 @@ package tui
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -383,6 +384,22 @@ func TestPickerSanitizesNames(t *testing.T) {
 	// Styling adds its own escapes; the name's clear-screen sequence must not survive.
 	if view := p.view(&m); strings.Contains(view, "\x1b[2J") {
 		t.Fatalf("picker rendered a control sequence: %q", view)
+	}
+}
+
+func TestBodyCacheStaysBounded(t *testing.T) {
+	r := newReader(newStyles(false))
+	shown := &mail.Message{ID: "shown", Account: "A", Mailbox: "M"}
+	r.remember(bodyKey(*shown), shown)
+	r.show(shown)
+	for i := 0; i < bodyCacheSize*3; i++ {
+		m := &mail.Message{ID: strconv.Itoa(i), Account: "A", Mailbox: "M"}
+		r.remember(bodyKey(*m), m)
+		// Revisit the displayed message each round, the pattern that used to leak.
+		r.remember(bodyKey(*shown), shown)
+	}
+	if len(r.cache) > bodyCacheSize || len(r.order) > bodyCacheSize {
+		t.Fatalf("cache = %d entries, order = %d, want at most %d", len(r.cache), len(r.order), bodyCacheSize)
 	}
 }
 
