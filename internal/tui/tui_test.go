@@ -176,6 +176,10 @@ func TestParseAddressListKeepsNamesTogether(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parseAddressList = %v", got)
 	}
+	got = parseAddressList(`"Doe, Jane" <Jane@Example.test>, bob@example.test`)
+	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
+		t.Fatalf("quoted name = %v", got)
+	}
 }
 
 func TestSanitizeLineStripsEscapes(t *testing.T) {

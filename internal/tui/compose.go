@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	netmail "net/mail"
 	"slices"
 	"strings"
 
@@ -230,8 +231,21 @@ func (c *composeModal) updateInputs(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// parseAddressList accepts "a@x, Name <b@y>; c@z" and returns bare addresses.
+// parseAddressList accepts an RFC 5322 list such as `"Doe, Jane" <j@x>, b@y`
+// and returns bare addresses. Input the parser rejects is split on commas
+// and semicolons instead, so a plain "a@x; b@y" still works.
 func parseAddressList(value string) []string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if parsed, err := netmail.ParseAddressList(value); err == nil {
+		out := make([]string, 0, len(parsed))
+		for _, addr := range parsed {
+			out = append(out, strings.ToLower(addr.Address))
+		}
+		return out
+	}
 	var out []string
 	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
 		if part = strings.TrimSpace(part); part != "" {
