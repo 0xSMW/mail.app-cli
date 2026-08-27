@@ -168,6 +168,11 @@ func TestArchiveFromLabelKeepsRowButFolderLosesIt(t *testing.T) {
 	if len(m.list.messages) != 3 {
 		t.Fatalf("archiving from a Gmail label removed the row: %d left", len(m.list.messages))
 	}
+	m.list.messages[0].Mailbox = "Spam"
+	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+	if len(m.list.messages) != 2 {
+		t.Fatalf("archiving from Gmail Spam should remove the row: %d left", len(m.list.messages))
+	}
 }
 
 func TestAccountPickerOpensCompose(t *testing.T) {

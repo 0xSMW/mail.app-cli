@@ -111,16 +111,24 @@ func (m *model) markCurrentRead() tea.Cmd {
 }
 
 // archiveRemovesFrom reports whether archiving takes the message out of the
-// mailbox it is listed under.
+// mailbox it is listed under. On Gmail only INBOX and the special folders
+// (Trash, Spam, Sent, Drafts) are real locations; anything else is a label
+// the message keeps.
 func (m *model) archiveRemovesFrom(t mail.Message) bool {
 	switch {
 	case strings.EqualFold(t.Mailbox, "INBOX"):
 		return true
 	case mail.IsArchiveAlias(t.Mailbox):
 		return false
-	default:
-		return !m.sidebar.isGmail(t.Account)
+	case !m.sidebar.isGmail(t.Account):
+		return true
 	}
+	for _, kind := range []string{"trash", "junk", "sent", "drafts"} {
+		if mail.IsSpecialMailboxName(kind, t.Mailbox) {
+			return true
+		}
+	}
+	return false
 }
 
 func sameAccount(targets []mail.Message) bool {

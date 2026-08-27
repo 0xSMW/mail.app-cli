@@ -128,6 +128,12 @@ func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int,
 	return sortAndSlice(messages, offset, limit), nil
 }
 
+// IsSpecialMailboxName reports whether a mailbox name is one of the
+// conventional names for the sent, drafts, trash, or junk folder.
+func IsSpecialMailboxName(mailboxType, mailboxName string) bool {
+	return isSpecialMailboxName(mailboxType, mailboxName)
+}
+
 func isSpecialMailboxName(mailboxType, mailboxName string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(mailboxName))
 	candidates := map[string][]string{
