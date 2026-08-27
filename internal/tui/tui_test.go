@@ -175,6 +175,15 @@ func TestArchiveFromLabelKeepsRowButFolderLosesIt(t *testing.T) {
 	}
 }
 
+func TestSearchResultsKeepRowsOnArchive(t *testing.T) {
+	m := loadedModel(t)
+	m.list.setMessages(m.list.messages, false, listSource{search: "first"}, 0)
+	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+	if len(m.list.messages) != 3 {
+		t.Fatalf("archiving a search hit removed the row: %d left", len(m.list.messages))
+	}
+}
+
 func TestAccountPickerOpensCompose(t *testing.T) {
 	m := loadedModel(t)
 	m.sidebar.accounts = append(m.sidebar.accounts, mail.Account{Name: "Personal", EmailAddress: "p@example.test", Enabled: true})
