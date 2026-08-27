@@ -167,6 +167,17 @@ func (s *sidebar) accountAddresses(name string) []string {
 	return nil
 }
 
+// adjustUnread moves a mailbox's unread count by delta, for optimistic
+// updates until the next mailbox reload.
+func (s *sidebar) adjustUnread(account, mailbox string, delta int) {
+	for i := range s.entries {
+		e := &s.entries[i]
+		if e.kind == entryMailbox && e.account == account && strings.EqualFold(e.mailbox, mailbox) {
+			e.unread = max(e.unread+delta, 0)
+		}
+	}
+}
+
 func (s *sidebar) mailboxesFor(account string) []string {
 	var names []string
 	for _, entry := range s.entries {

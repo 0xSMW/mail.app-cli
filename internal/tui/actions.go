@@ -132,12 +132,28 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 
 	switch opts.Action {
 	case "archive", "delete", "move":
+		for _, t := range targets {
+			if !t.Read {
+				m.sidebar.adjustUnread(t.Account, t.Mailbox, -1)
+				if opts.Action == "move" {
+					m.sidebar.adjustUnread(t.Account, opts.TargetMailbox, 1)
+				}
+			}
+		}
 		m.list.remove(keys)
 		m.reader.forget(keys)
 		if m.reader.open && m.list.current() == nil {
 			m.closeReader()
 		}
 	case "mark":
+		for _, t := range targets {
+			switch {
+			case t.Read && !opts.Read:
+				m.sidebar.adjustUnread(t.Account, t.Mailbox, 1)
+			case !t.Read && opts.Read:
+				m.sidebar.adjustUnread(t.Account, t.Mailbox, -1)
+			}
+		}
 		apply := func(msg *mail.Message) { msg.Read = opts.Read }
 		m.list.update(keys, apply)
 		m.touchCached(keys, apply)
@@ -190,11 +206,9 @@ func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 	case msg.opts.Action != "mark":
 		cmds = append(cmds, notify(summary))
 	}
-	// Read and flag toggles were applied on screen already; anything that
-	// moved a message needs the index's view of where things are now. The
-	// refresh itself waits until the write queue drains.
-	if msg.opts.Action != "mark" && msg.opts.Action != "flag" || result.Failed > 0 {
-		m.refreshWanted = true
-	}
+	// Every write is reconciled from the index once the queue drains: rows
+	// for moves, unread counts for read changes, and anything a failure
+	// left optimistic.
+	m.refreshWanted = true
 	return m, tea.Batch(cmds...)
 }

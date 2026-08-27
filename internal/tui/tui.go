@@ -254,7 +254,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshWanted = true
 			return m, nil
 		}
-		return m, m.reloadList(true)
+		// Mailbox counts come from the same index read; a silent mailbox
+		// reload keeps the sidebar's unread numbers honest.
+		return m, tea.Batch(m.reloadList(true), m.reloadMailboxes())
 
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
@@ -493,6 +495,13 @@ type mailboxesLoadedMsg struct {
 	requestResult
 	accounts  []mail.Account
 	mailboxes []mail.Mailbox
+}
+
+// reloadMailboxes refreshes counts without a spinner or a list reload.
+func (m *model) reloadMailboxes() tea.Cmd {
+	cmd := m.loadMailboxes(false)
+	m.mailboxLane.loading = false
+	return cmd
 }
 
 // loadMailboxes reads accounts and mailboxes. fresh bypasses the in-process

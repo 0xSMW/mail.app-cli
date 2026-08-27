@@ -129,6 +129,19 @@ func TestAutomaticMarkReadKeepsSelection(t *testing.T) {
 	}
 }
 
+func TestMarkReadAdjustsSidebarUnread(t *testing.T) {
+	m := loadedModel(t)
+	before := m.sidebar.entries[2].unread // Work/INBOX starts at 2
+	m = press(m, "u")                    // row 1 is unread; u marks it read
+	if got := m.sidebar.entries[2].unread; got != before-1 {
+		t.Fatalf("sidebar unread = %d, want %d", got, before-1)
+	}
+	m = press(m, "e") // archiving a read message leaves the count alone
+	if got := m.sidebar.entries[2].unread; got != before-1 {
+		t.Fatalf("sidebar unread after archive = %d, want %d", got, before-1)
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")
