@@ -132,8 +132,12 @@ func (c *composeModal) prefill(original *mail.Message, ownAddress string) {
 	switch c.mode {
 	case composeReply, composeReplyAll:
 		to := []string{sender.Email}
+		if sender.Email == ownAddress && len(original.ToRecipients) > 0 {
+			// Replying to a message the user sent goes back to its recipients.
+			to = others(original.ToRecipients, ownAddress)
+		}
 		if c.mode == composeReplyAll {
-			to = append(to, others(original.ToRecipients, ownAddress, sender.Email)...)
+			to = append(to, others(original.ToRecipients, append([]string{ownAddress}, to...)...)...)
 			c.inputs[fieldCc].SetValue(strings.Join(others(original.CcRecipients, ownAddress, sender.Email), ", "))
 		}
 		c.inputs[fieldTo].SetValue(strings.Join(to, ", "))

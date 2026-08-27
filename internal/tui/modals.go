@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 
 	"charm.land/bubbles/v2/textinput"
@@ -199,10 +200,14 @@ func (m *model) runSearch(query string, silent bool) tea.Cmd {
 	id, ctx := m.searchLane.begin(m.ctx, silent)
 	client := m.client.WithContext(ctx)
 	return func() tea.Msg {
-		result, err := client.Search(query, account, 100)
+		result, err := client.Search(query, account, searchLimit)
 		return searchDoneMsg{requestResult: requestResult{id, err}, query: query, result: result, silent: silent}
 	}
 }
+
+// searchLimit bounds a search. The index search has no offset, so the TUI
+// asks for a large page and says so when it fills.
+const searchLimit = 500
 
 func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	cmd, ok := m.searchLane.settle(msg.requestResult)
@@ -216,8 +221,11 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.focus = focusList
 	m.notice = ""
-	if !msg.result.Complete {
+	switch {
+	case !msg.result.Complete:
 		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be searched"
+	case len(msg.result.Messages) >= searchLimit:
+		m.notice = "showing the newest " + strconv.Itoa(searchLimit) + " matches; narrow the query for older ones"
 	}
 	return m, nil
 }

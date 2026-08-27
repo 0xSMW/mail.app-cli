@@ -186,6 +186,23 @@ func TestParseAddressListKeepsNamesTogether(t *testing.T) {
 	}
 }
 
+func TestReplyToOwnSentMessageTargetsRecipients(t *testing.T) {
+	original := &mail.Message{
+		Sender:       "Me <me@example.test>",
+		Subject:      "Ping",
+		ToRecipients: []string{"them@example.test", "other@example.test"},
+		Content:      "hi",
+	}
+	c := newComposeModal(composeReply, "Work", original, "me@example.test")
+	if got := c.inputs[fieldTo].Value(); got != "them@example.test, other@example.test" {
+		t.Fatalf("reply to own message: to = %q", got)
+	}
+	c = newComposeModal(composeReplyAll, "Work", original, "me@example.test")
+	if got := c.inputs[fieldTo].Value(); got != "them@example.test, other@example.test" {
+		t.Fatalf("reply-all to own message: to = %q", got)
+	}
+}
+
 func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)
