@@ -246,7 +246,7 @@ func init() {
 	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
 	_ = moveCmd.MarkFlagRequired("to")
 	archiveCmd.Annotations = map[string]string{
-		annotationAgentNotes: "Archiving a Gmail INBOX message moves it to All Mail. Archiving something already in All Mail is a no-op that still reports success. Mail.app assigns a moved message a new ID; find it again with search or recent.",
+		annotationAgentNotes: "Archiving a Gmail INBOX message moves it to All Mail. Archiving something already in All Mail changes nothing and is reported as skipped (\"already in All Mail\") with exit 0. Mail.app assigns a moved message a new ID; find it again with search or recent.",
 	}
 	deleteCmd.Annotations = map[string]string{
 		annotationAgentNotes: "delete moves to Trash through Mail.app; it does not purge. Preview with --dry-run. The message gets a new ID in Trash.",
