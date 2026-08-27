@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
 func TestScopedUnifiedFilters(t *testing.T) {
@@ -166,6 +168,26 @@ func TestParseImportMessagesAcceptsWrapperAndDirectArray(t *testing.T) {
 	}
 	if len(wrappedMessages) != 1 || wrappedMessages[0].ID != "2" {
 		t.Fatalf("wrapped messages = %+v", wrappedMessages)
+	}
+}
+
+func TestParseImportMessagesAcceptsExportStdoutEnvelope(t *testing.T) {
+	payload := messageExport{Messages: []mail.Message{{ID: "exported-1", Subject: "Exported"}}}
+	var stdout, stderr bytes.Buffer
+	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "export messages", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(output.Result{Data: payload}); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := parseImportMessages(stdout.Bytes())
+	if err != nil {
+		t.Fatalf("parseImportMessages export stdout returned error: %v\\n%s", err, stdout.String())
+	}
+	if len(messages) != 1 || messages[0].ID != "exported-1" {
+		t.Fatalf("messages = %+v", messages)
 	}
 }
 

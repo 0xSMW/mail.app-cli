@@ -4,14 +4,14 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 var (
 	searchLimit        int
-	searchAccount      string
-	searchMailbox      string
 	searchSince        string
 	searchSender       string
 	searchSenderDomain string
@@ -20,60 +20,93 @@ var (
 )
 
 var searchCmd = &cobra.Command{
-	Use:   "search [query]",
-	Short: "Search for messages",
-	Long: `Search for messages across mailboxes.
-The query matches all terms across subject, sender, and indexed message summaries.
-By default searches All Mail/Archive for a specific account, or INBOX across accounts.
-Use --mailbox with --account to narrow the search to a specific mailbox.
-Output is JSON format. Use jq for advanced filtering: mail-app-cli search "query" | jq '.[] | select(.read==false)'`,
+	Use:   "search <query>",
+	Short: "Search messages by subject, sender, and indexed summary",
+	Long: `Search messages. Every term must match somewhere in the subject, sender,
+or Mail's indexed summary. Without --mailbox the search covers every
+non-empty mailbox of each enabled account (or of the one named with
+--account); with --mailbox it is limited to that mailbox.`,
 	Args: cobra.ExactArgs(1),
+	Annotations: map[string]string{
+		annotationAgentNotes: "Fails closed with exit 5 when any mailbox could not be searched; add --allow-partial to accept incomplete results, which then arrive as {messages, complete, searchedMailboxes, failedMailboxes}. Needs Envelope Index access (Full Disk Access) for cross-mailbox queries.",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if searchMailbox != "" && searchAccount == "" {
-			return fmt.Errorf("--mailbox requires --account")
+		account := resolved.Account.Value
+		mailbox := ""
+		if mailboxExplicit() {
+			if account == "" {
+				return clierr.Usage("--mailbox requires --account")
+			}
+			mailbox = mailboxInScope()
 		}
 		query := args[0]
-		client := mail.NewClient()
-		result, err := client.SearchMessagesJSONSinceWithOptions(query, searchAccount, searchMailbox, searchLimit, searchSince, mail.SearchOptions{
+		result, err := mailClient.SearchMessagesJSONSinceWithOptions(query, account, mailbox, searchLimit, searchSince, mail.SearchOptions{
 			AllowPartial: searchAllowPartial,
 		})
 		if err != nil {
 			var partialErr *mail.PartialSearchError
 			if errors.As(err, &partialErr) {
-				return fmt.Errorf("failed to search messages: %w", err)
+				return err
 			}
 			if !searchNoCache {
-				recentMessages, recentErr := mail.SearchRecentMessages(query, searchAccount, searchMailbox, searchLimit, searchSince)
+				recentMessages, recentErr := mail.SearchRecentMessages(query, account, mailbox, searchLimit, searchSince)
 				if recentErr == nil {
 					recentMessages = filterMessagesBySender(recentMessages, searchSender, searchSenderDomain)
 					if len(recentMessages) > 0 {
-						return printJSON(recentMessages, "recent search results")
+						return writer.Write(output.Result{
+							Data:    recentMessages,
+							Summary: fmt.Sprintf("%s from the recent-message journal", plural(len(recentMessages), "match")),
+							Notices: []string{fmt.Sprintf("live search failed (%v); showing recently handled messages that match", err)},
+							Meta:    map[string]any{"source": "recent", "query": query},
+							Plain:   renderMessages(recentMessages, true),
+						})
 					}
 				}
 			}
-			return fmt.Errorf("failed to search messages: %w", err)
+			return fmt.Errorf("search messages: %w", err)
 		}
-		messages := result.Messages
-		messages = filterMessagesBySender(messages, searchSender, searchSenderDomain)
+		messages := filterMessagesBySender(result.Messages, searchSender, searchSenderDomain)
 		if result.Complete {
 			_ = mail.RecordRecentSearchResults(messages, query)
 		}
+		meta := map[string]any{"source": "index", "query": query, "complete": result.Complete, "searchedMailboxCount": len(result.SearchedMailboxes)}
 		if searchAllowPartial {
 			result.Messages = messages
-			return printJSON(result, "structured search results")
+			var notices []string
+			if !result.Complete {
+				notices = append(notices, fmt.Sprintf("%d mailbox(es) could not be searched", len(result.FailedMailboxes)))
+			}
+			return writer.Write(output.Result{
+				Data:    partialSearchOutputData(result, writer.Format),
+				Summary: fmt.Sprintf("%s for %q (complete: %v)", plural(len(messages), "match"), query, result.Complete),
+				Notices: notices,
+				Meta:    meta,
+				Plain:   renderMessages(messages, true),
+			})
 		}
-
-		return printJSON(messages, "search results")
+		return writer.Write(output.Result{
+			Data:    messages,
+			Summary: fmt.Sprintf("%s for %q", plural(len(messages), "match"), query),
+			Meta:    meta,
+			Plain:   renderMessages(messages, true),
+		})
 	},
 }
 
+// partialSearchOutputData preserves completeness metadata for regular search
+// output while allowing list modifiers to operate on the matched messages.
+func partialSearchOutputData(result mail.SearchResult, format output.Format) any {
+	if format == output.FormatCount || format == output.FormatIDs {
+		return result.Messages
+	}
+	return result
+}
+
 func init() {
-	searchCmd.Flags().IntVarP(&searchLimit, "limit", "l", 50, "Maximum number of results")
-	searchCmd.Flags().StringVarP(&searchAccount, "account", "a", "", "Limit search to specific account (optional)")
-	searchCmd.Flags().StringVarP(&searchMailbox, "mailbox", "m", "", "Limit search to specific mailbox (optional, requires --account)")
-	searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since date (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
-	searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only return messages from this exact sender/email")
-	searchCmd.Flags().StringVar(&searchSenderDomain, "sender-domain", "", "Only return messages from this sender domain")
+	searchCmd.Flags().IntVarP(&searchLimit, "limit", "l", 50, "Maximum results")
+	searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
+	searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only messages from this exact sender/email")
+	searchCmd.Flags().StringVar(&searchSenderDomain, "sender-domain", "", "Only messages from this sender domain")
 	searchCmd.Flags().BoolVar(&searchAllowPartial, "allow-partial", false, "Return partial cross-mailbox results with completeness metadata")
-	searchCmd.Flags().BoolVar(&searchNoCache, "no-cache", false, "Accepted for compatibility; search results are not cached")
+	searchCmd.Flags().BoolVar(&searchNoCache, "no-cache", false, "Do not fall back to the recent-message journal when live search fails")
 }

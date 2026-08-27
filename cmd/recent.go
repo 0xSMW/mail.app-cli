@@ -4,58 +4,83 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
-var (
-	recentAccount string
-	recentMailbox string
-	recentLimit   int
-)
+var recentLimit int
 
 var recentCmd = &cobra.Command{
 	Use:   "recent",
-	Short: "Inspect recently handled messages",
+	Short: "Reopen recently handled messages",
+	Annotations: map[string]string{
+		annotationAgentNotes: "A local journal of messages touched by show, search, archive, and move. Use it to get back to a message without a broad search. --account and --mailbox narrow it.",
+	},
 }
 
 var recentSearchCmd = &cobra.Command{
-	Use:   "search [query]",
-	Short: "Search recently handled messages",
+	Use:   "search <query>",
+	Short: "Search the recent-message journal",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		messages, err := mail.SearchRecentMessages(args[0], recentAccount, recentMailbox, recentLimit, "")
-		if err != nil {
-			return fmt.Errorf("failed to search recent messages: %w", err)
+		mailbox := ""
+		if mailboxExplicit() {
+			mailbox = mailboxInScope()
 		}
-		return printJSON(messages, "recent messages")
+		messages, err := mail.SearchRecentMessages(args[0], resolved.Account.Value, mailbox, recentLimit, "")
+		if err != nil {
+			return fmt.Errorf("search recent messages: %w", err)
+		}
+		return writer.Write(output.Result{
+			Data:    messages,
+			Summary: fmt.Sprintf("%s in the recent journal", plural(len(messages), "match")),
+			Meta:    map[string]any{"source": "recent"},
+			Plain:   renderMessages(messages, true),
+		})
 	},
 }
 
 var recentShowCmd = &cobra.Command{
-	Use:   "show [message-id-or-query]",
-	Short: "Show a recently handled message by id or query",
+	Use:   "show <message-id-or-query>",
+	Short: "Show a recently handled message by ID or query",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		entry, err := mail.ResolveRecentMessage(args[0], recentAccount, recentMailbox)
+		mailbox := ""
+		if mailboxExplicit() {
+			mailbox = mailboxInScope()
+		}
+		entry, err := mail.ResolveRecentMessage(args[0], resolved.Account.Value, mailbox)
 		if err != nil {
 			return err
 		}
-		client := mail.NewClient()
-		message, err := getRecentMessageDetails(client, entry)
+		message, err := getRecentMessageDetails(mailClient, entry)
 		if err != nil {
-			return fmt.Errorf("failed to get recent message: %w", err)
+			return fmt.Errorf("get recent message: %w", err)
 		}
 		_ = mail.RecordRecentMessage(*message, "recent-show")
-		return printJSON(message, "message")
+		return writer.Write(output.Result{
+			Data:    message,
+			Summary: fmt.Sprintf("%s from %s", output.Truncate(message.Subject, 60), displaySender(message.Sender)),
+			Meta:    map[string]any{"account": message.Account, "mailbox": message.Mailbox},
+			Plain:   renderMessage(message, false),
+		})
 	},
 }
 
 var recentClearCmd = &cobra.Command{
 	Use:   "clear",
-	Short: "Clear the recently handled message journal",
+	Short: "Clear the recent-message journal",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mail.ClearRecentMessages()
+		if err := mail.ClearRecentMessages(); err != nil {
+			return err
+		}
+		return writer.Write(output.Result{
+			Data:    map[string]any{"cleared": true},
+			Summary: "Cleared the recent-message journal",
+			Plain:   renderLine("Cleared the recent-message journal"),
+		})
 	},
 }
 
@@ -73,7 +98,7 @@ func getRecentMessageDetails(client *mail.Client, entry *mail.RecentMessage) (*m
 	if lastErr != nil {
 		return nil, lastErr
 	}
-	return nil, fmt.Errorf("message not found")
+	return nil, clierr.New(clierr.CodeNotFound, "message not found: "+entry.ID)
 }
 
 func recentMailboxCandidates(mailbox string) []string {
@@ -98,10 +123,6 @@ func recentMailboxCandidates(mailbox string) []string {
 }
 
 func init() {
-	recentCmd.AddCommand(recentSearchCmd)
-	recentCmd.AddCommand(recentShowCmd)
-	recentCmd.AddCommand(recentClearCmd)
-	recentCmd.PersistentFlags().StringVarP(&recentAccount, "account", "a", "", "Limit to account")
-	recentCmd.PersistentFlags().StringVarP(&recentMailbox, "mailbox", "m", "", "Limit to mailbox")
+	recentCmd.AddCommand(recentSearchCmd, recentShowCmd, recentClearCmd)
 	recentSearchCmd.Flags().IntVarP(&recentLimit, "limit", "l", 10, "Maximum recent messages")
 }

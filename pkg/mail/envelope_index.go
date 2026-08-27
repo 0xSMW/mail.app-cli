@@ -81,6 +81,10 @@ func normalizeMailboxAlias(name string) string {
 	return name
 }
 
+// IsArchiveAlias reports whether a mailbox name refers to Gmail's All Mail
+// or a generic Archive mailbox.
+func IsArchiveAlias(mailboxName string) bool { return isArchiveAlias(mailboxName) }
+
 func isArchiveAlias(mailboxName string) bool {
 	switch normalizeMailboxAlias(mailboxName) {
 	case "archive", "all mail", "[gmail]/all mail", "gmail/all mail":
@@ -109,7 +113,7 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 		if reason == "" {
 			reason = "unknown error"
 		}
-		fmt.Fprintf(os.Stderr, "mail-app-cli: Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.\n", reason)
+		Warn(fmt.Sprintf("Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.", reason))
 	})
 }
 

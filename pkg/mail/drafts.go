@@ -107,7 +107,7 @@ func (c *Client) GetDraft(accountName, draftID string) (*Message, error) {
 			break
 		}
 	}
-	return nil, fmt.Errorf("draft not found: %s", draftID)
+	return nil, notFound("draft", draftID)
 }
 
 func (c *Client) SendDraft(accountName, draftID string) error {
@@ -211,7 +211,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }

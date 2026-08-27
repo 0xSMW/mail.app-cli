@@ -1,8 +1,8 @@
 package mail
 
 import (
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -46,7 +46,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }
@@ -66,7 +66,7 @@ func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error
 	}
 	if err := RemoveRecentMessage(accountName, messageID); err != nil {
 		c.recentCleanupWarningOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "mail-app-cli: message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.\n", err)
+			Warn(fmt.Sprintf("message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.", err))
 		})
 	}
 	return nil
@@ -104,7 +104,15 @@ func deleteFallbackMailboxes(mailboxName string) []string {
 }
 
 func isMessageNotFoundError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Message not found")
+	if err == nil {
+		return false
+	}
+
+	var notFound *NotFoundError
+	if errors.As(err, &notFound) {
+		return strings.EqualFold(notFound.Kind, "message")
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "message not found")
 }
 
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {
@@ -117,10 +125,13 @@ func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, message
 
 	output, err := c.runAppleScript(script)
 	if err != nil {
+		if classified := bridgeError(err.Error()); errors.Is(classified, ErrNotFound) {
+			return "", classified
+		}
 		return "", err
 	}
 	if strings.Contains(output, "Error") {
-		return "", fmt.Errorf(output)
+		return "", bridgeError(output)
 	}
 	return strings.TrimSpace(output), nil
 }
@@ -187,7 +198,7 @@ try {
 		return err
 	}
 	if strings.Contains(output, "Error") {
-		return fmt.Errorf(output)
+		return bridgeError(output)
 	}
 	return nil
 }

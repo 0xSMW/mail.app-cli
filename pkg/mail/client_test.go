@@ -94,6 +94,35 @@ func TestArchiveMessageScriptEscapesInputs(t *testing.T) {
 	}
 }
 
+func TestArchiveMessageClassifiesAppleScriptNotFoundErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		output string
+		kind   string
+	}{
+		{name: "message", output: "execution error: Message not found", kind: "message"},
+		{name: "mailbox", output: "execution error: Mailbox not found: INBOX", kind: "mailbox"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			binDir := t.TempDir()
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("PATH", binDir)
+			if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\nprintf '%s\\n' '"+tt.output+"' >&2\nexit 1\n"), 0755); err != nil {
+				t.Fatalf("write fake osascript: %v", err)
+			}
+
+			_, err := NewClient().ArchiveMessageWithDestination("iCloud", "INBOX", "12345")
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("ArchiveMessageWithDestination error = %v, want ErrNotFound", err)
+			}
+			var notFound *NotFoundError
+			if !errors.As(err, &notFound) || notFound.Kind != tt.kind {
+				t.Fatalf("ArchiveMessageWithDestination error = %#v, want %s NotFoundError", err, tt.kind)
+			}
+		})
+	}
+}
+
 func TestDeleteFallbackMailboxes(t *testing.T) {
 	if got := deleteFallbackMailboxes("Newsletter"); len(got) != 2 || got[0] != "All Mail" || got[1] != "Archive" {
 		t.Fatalf("deleteFallbackMailboxes(Newsletter) = %v", got)
@@ -114,6 +143,29 @@ func TestDeleteMessageResolvedRetriesAllMail(t *testing.T) {
 			return nil
 		}
 		return errors.New("Error: Message not found")
+	})
+	if err != nil {
+		t.Fatalf("deleteMessageResolved returned error: %v", err)
+	}
+	want := []string{"Newsletter", "All Mail"}
+	if len(attempts) != len(want) {
+		t.Fatalf("attempts = %v, want %v", attempts, want)
+	}
+	for i := range want {
+		if attempts[i] != want[i] {
+			t.Fatalf("attempts = %v, want %v", attempts, want)
+		}
+	}
+}
+
+func TestDeleteMessageResolvedRetriesAllMailForTypedMessageNotFound(t *testing.T) {
+	var attempts []string
+	err := deleteMessageResolved("Newsletter", func(mailbox string) error {
+		attempts = append(attempts, mailbox)
+		if mailbox == "All Mail" {
+			return nil
+		}
+		return fmt.Errorf("delete message: %w", &NotFoundError{Kind: "message"})
 	})
 	if err != nil {
 		t.Fatalf("deleteMessageResolved returned error: %v", err)

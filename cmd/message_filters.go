@@ -3,7 +3,7 @@ package cmd
 import (
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
 func filterMessagesBySender(messages []mail.Message, sender, senderDomain string) []mail.Message {

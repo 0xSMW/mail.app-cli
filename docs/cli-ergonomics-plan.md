@@ -37,7 +37,7 @@ What we deliberately do not copy: keyring auth, the `.hey/config.json` trust pro
 - Flags are package-level globals. `threads archive` swaps `msgAccount`, `msgMailbox`, `batchDryRun`, `batchYes` in and out to reuse `runMessageBatch` (`cmd/threads.go:87-91`).
 - Errors always exit 1 and print twice (cobra usage plus `Execute`).
 - `--json` exists only on `sync`; `--dry-run` exists on batch, drafts, rules, and threads but not on single `messages archive|delete|move|mark|flag` or `send`.
-- Short flags collide: `-s` is `--since` on `messages list` and `--subject` on `send`.
+- Short flags collide: `-s` is `--since` on `messages list` and `--subject` on `send`; `-o` is `--offset` on lists and `--output` on `attachments save`. Left as-is in 2.0 because each is scoped to its own command; a later release can retire the shorthands.
 - The Envelope Index already gives us `messages.ROWID`, which is the same number Mail.app returns from `msg.id()`. A message can be located by ID alone with one SQL query (`join mailboxes mb on mb.ROWID = m.mailbox`), which is what makes `archive 123` possible.
 - osascript calls are serialized and cost 0.4s to 2s each; index reads cost about 0.1s. Anything that can be answered from the index should be.
 
@@ -48,7 +48,7 @@ What we deliberately do not copy: keyring auth, the `.hey/config.json` trust pro
 `internal/output`:
 
 - `Format` is one of `json`, `plain`, `quiet`, `ids`, `count`. Resolution order: `--count` > `--ids-only` > `--quiet` > `--json` / `--jq` / `--agent` > `--plain` > config `output` > env `MAIL_APP_CLI_OUTPUT` > auto. Auto is `plain` when stdout is a terminal, `json` otherwise.
-- `Writer` has `Data(v, opts)`, `Mutation(result, humanLine)`, `Error(err)`. Every command ends in exactly one `Data` or `Mutation` call. Nothing else in `cmd/` writes to stdout.
+- `Writer` has one `Write(Result)` for success and failure-with-data, and `Error(err)` for failures without data. Every command ends in exactly one `Write`. Nothing else in `cmd/` writes to stdout. The jq expression is compiled and `--ids-only`/`--count` are checked against a per-command list annotation in `PersistentPreRunE`, before any `RunE` can mutate Mail.app.
 - JSON envelope on stdout:
 
   ```json
@@ -62,12 +62,12 @@ What we deliberately do not copy: keyring auth, the `.hey/config.json` trust pro
   }
   ```
 
-  `data` is never `null`: nil slices become `[]`. `Message`, `Account`, `Mailbox`, and `Attachment` get camelCase json tags; `Message.MarshalJSON` normalizes nil recipient slices.
+  `data` is never `null`: nil slices become `[]`. `Message`, `Account`, `Mailbox`, and `Attachment` get camelCase json tags; `Message.MarshalJSON` normalizes nil recipient slices. `notices` is a list. A result that carries data but failed (a receipt with failed items, an unhealthy `doctor`) is written with `ok: false` plus `error`, `code`, `exitCode`, and `hint` in the same envelope, and the process exits with that code without a second envelope on stderr.
 - Errors on stderr: `{"ok": false, "schemaVersion": 1, "error": "...", "code": "not_found", "exitCode": 2, "hint": "..."}`.
 - `--jq EXPR` implies JSON, runs gojq over the envelope (or over `data` with `--quiet`), prints string results raw like `jq -r`, and refuses to combine with `--plain`.
 - `--ids-only` and `--count` require list data and error otherwise.
 - Plain mode: tables through `text/tabwriter`. Messages show `ID`, `DATE`, flags column (`•` unread, `⚑` flagged), `FROM`, `SUBJECT`. Mailboxes show `ACCOUNT`, `MAILBOX`, `UNREAD`, `TOTAL`. `show` prints a header block then the body. Mutations print one line ("Archived 2 messages to All Mail"). Color is ANSI-16 only, disabled by `NO_COLOR`, `--no-color`, or a non-TTY.
-- Warnings that `pkg/mail` writes to stderr (index fallback, content budget) stay on stderr; the writer also surfaces them as `notice` when the command can capture them.
+- Warnings from `pkg/mail` (index fallback, content budget, journal cleanup) go through a `mail.Warn` hook the writer owns, so they become `notices` in the envelope instead of loose stderr text. Plain mode prints them to stderr as they happen.
 
 ### Errors and exit codes
 
@@ -128,12 +128,15 @@ Mutation receipt, shared by single verbs, `messages batch`, and `threads archive
 {
   "action": "archive",
   "dryRun": false,
+  "startedAt": "...", "endedAt": "...", "chunks": 1,
   "matched": 2, "attempted": 2, "succeeded": 2, "failed": 0, "skipped": 0,
   "items": [
-    {"id": "123", "account": "Klu.ai", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}
+    {"id": "123", "account": "Klu.ai", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "subject": "...", "status": "succeeded", "verifyStatus": "absent-from-source"}
   ]
 }
 ```
+
+`--verify` proves an archive into All Mail by absence from the source, a move out of All Mail by presence in the destination, and any other move by either. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise, so a user label is never stripped; `move` and `delete` prefer a user label over All Mail so the operation targets what the user sees.
 
 `runMessageBatch` becomes `runMessageBatch(ctx, opts batchOptions, items []batchItem, mutate)` with no package globals. `threads archive` builds its items directly.
 
@@ -181,4 +184,4 @@ Reply and reply-all, RFC Message-ID identity, idempotent send, recipient search,
 | `messages mark ID --read=false` | `unseen ID` |
 | "Message archived" text | receipt JSON, or one line in plain mode |
 | exit 1 for everything | see `help exit-codes` |
-| `sync --json` | `sync` (global `--json`); the old flag is kept as a hidden alias |
+| `sync --json` | `sync` (the global `--json` covers it) |
