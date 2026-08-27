@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/internal/output"
 )
 
@@ -40,5 +43,52 @@ func TestSyncFailureWritesSingleFailedEnvelopeWithReceipt(t *testing.T) {
 	}
 	if errorText, _ := receipt["error"].(string); !strings.Contains(errorText, "sync accounts:") {
 		t.Fatalf("receipt error = %q", errorText)
+	}
+}
+
+func TestWaitForSyncStabilityPreservesObservationErrorClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code clierr.Code
+	}{
+		{
+			name: "not found",
+			err:  clierr.New(clierr.CodeNotFound, "mailbox not found: Archive"),
+			code: clierr.CodeNotFound,
+		},
+		{
+			name: "unavailable",
+			err:  clierr.New(clierr.CodeUnavailable, "Mail.app access is unavailable"),
+			code: clierr.CodeUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := waitForSyncStabilityWithObserver(time.Second, time.Millisecond, func() (int, error) {
+				return 0, tt.err
+			})
+			if !errors.Is(err, tt.err) {
+				t.Fatalf("error = %v, want original observation error %v", err, tt.err)
+			}
+			if got := clierr.Classify(err).Code; got != tt.code {
+				t.Fatalf("error code = %q, want %q", got, tt.code)
+			}
+		})
+	}
+}
+
+func TestWaitForSyncStabilityReturnsTimeoutOnlyAfterDeadline(t *testing.T) {
+	const timeout = 10 * time.Millisecond
+	started := time.Now()
+	err := waitForSyncStabilityWithObserver(timeout, time.Millisecond, func() (int, error) {
+		return int(time.Since(started).Nanoseconds()), nil
+	})
+	if got := clierr.Classify(err).Code; got != clierr.CodeTimeout {
+		t.Fatalf("error code = %q, want %q (error: %v)", got, clierr.CodeTimeout, err)
+	}
+	if elapsed := time.Since(started); elapsed < timeout {
+		t.Fatalf("returned after %s, before timeout %s", elapsed, timeout)
 	}
 }

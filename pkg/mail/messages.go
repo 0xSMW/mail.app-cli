@@ -340,6 +340,89 @@ JSON.stringify(result);
 	return &message, nil
 }
 
+// GetMessageDetailsForVerificationJSON reads a message for a post-mutation
+// verification. Unlike GetMessageDetailsJSON, it deliberately lets failures
+// resolving the account, mailbox, or message properties reach osascript. A
+// nil message is therefore proof that the message is absent, rather than a
+// catch-all result for an automation failure.
+func (c *Client) GetMessageDetailsForVerificationJSON(accountName, mailboxName, messageID string) (*Message, error) {
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+let result = null;
+const requestedMailbox = '%s';
+%s
+
+const acc = mail.accounts.byName('%s');
+// Force resolution so a missing account remains an automation error.
+acc.name();
+const mbox = %s;
+if (mbox === null) {
+	throw new Error('mailbox not found: ' + requestedMailbox);
+}
+// Force resolution so a stale mailbox object remains an automation error.
+mbox.name();
+
+// Enumerate strictly. This avoids treating any failed byId lookup as absence.
+const allIds = mbox.messages.id();
+const targetIdx = allIds.findIndex(id => String(id) === '%s');
+let msg = null;
+if (targetIdx >= 0) {
+	msg = mbox.messages.at(targetIdx);
+	msg.id();
+}
+
+if (msg !== null) {
+	const toRecipients = [];
+	const toRecs = msg.toRecipients();
+	for (let t = 0; t < toRecs.length; t++) {
+		toRecipients.push(toRecs[t].address());
+	}
+	const ccRecipients = [];
+	const ccRecs = msg.ccRecipients();
+	for (let c = 0; c < ccRecs.length; c++) {
+		ccRecipients.push(ccRecs[c].address());
+	}
+	const bccRecipients = [];
+	const bccRecs = msg.bccRecipients();
+	for (let b = 0; b < bccRecs.length; b++) {
+		bccRecipients.push(bccRecs[b].address());
+	}
+	result = {
+		id: String(msg.id()),
+		subject: msg.subject() || '',
+		sender: msg.sender() || '',
+		dateReceived: (msg.dateReceived() || new Date()).toISOString(),
+		dateSent: (msg.dateSent() || new Date()).toISOString(),
+		read: msg.readStatus(),
+		flagged: msg.flaggedStatus(),
+		messageSize: msg.messageSize(),
+		content: msg.content() || '',
+		mailbox: mbox.name(),
+		account: acc.name(),
+		toRecipients: toRecipients,
+		ccRecipients: ccRecipients,
+		bccRecipients: bccRecipients
+	};
+}
+
+JSON.stringify(result);
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
+
+	output, err := c.runJXA(script)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(output) == "null" {
+		return nil, nil
+	}
+
+	var message Message
+	if err := json.Unmarshal([]byte(output), &message); err != nil {
+		return nil, fmt.Errorf("failed to parse verification message JSON: %w", err)
+	}
+	return &message, nil
+}
+
 func (c *Client) parseMessages(_ string) ([]Message, error) {
 	// TODO: Implement proper parsing based on AppleScript record format
 	return []Message{}, nil

@@ -224,7 +224,7 @@ func invalidateBatchCaches(action string, items []batchItem) {
 
 func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem) (string, error) {
 	present := func(mailbox string) (bool, error) {
-		message, err := client.GetMessageDetailsJSON(item.Account, mailbox, item.ID)
+		message, err := client.GetMessageDetailsForVerificationJSON(item.Account, mailbox, item.ID)
 		if err != nil {
 			return false, err
 		}
@@ -278,7 +278,7 @@ func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem)
 		}
 		return "absent-from-source", nil
 	}
-	message, err := client.GetMessageDetailsJSON(item.Account, item.SourceMailbox, item.ID)
+	message, err := client.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
 	if err != nil {
 		return "verification-failed", err
 	}

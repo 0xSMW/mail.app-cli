@@ -75,7 +75,7 @@ func TestVerifyBatchMutationAcceptsActualMessageAbsence(t *testing.T) {
 func installBatchVerificationScript(t *testing.T, mode string) {
 	t.Helper()
 	binDir := t.TempDir()
-	script := "#!/bin/sh\ncase \"$MAIL_APP_CLI_BATCH_VERIFY_MODE\" in\nerror) echo 'verification read failed' >&2; exit 1 ;;\nabsent) printf null ;;\nesac\n"
+	script := "#!/bin/sh\ncase \"$MAIL_APP_CLI_BATCH_VERIFY_MODE\" in\nerror)\n  case \"$*\" in\n    *\"mailbox not found:\"*) echo 'verification read failed' >&2; exit 1 ;;\n    *) printf null ;;\n  esac ;;\nabsent) printf null ;;\nesac\n"
 	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake osascript: %v", err)
 	}

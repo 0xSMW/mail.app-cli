@@ -87,7 +87,11 @@ they hold still for two samples.`,
 				return finish("timeout", clierr.New(clierr.CodeTimeout, "sync wait timed out"))
 			}
 			if err := waitForSyncStability(mailClient, account, mailbox, time.Duration(syncTimeout)*time.Second); err != nil {
-				return finish("timeout", clierr.Wrap(clierr.CodeTimeout, err, err.Error()))
+				status := "failed"
+				if clierr.Classify(err).Code == clierr.CodeTimeout {
+					status = "timeout"
+				}
+				return finish(status, err)
 			}
 		}
 		return finish("completed", nil)
@@ -95,11 +99,21 @@ they hold still for two samples.`,
 }
 
 func waitForSyncStability(client *mail.Client, account, mailbox string, timeout time.Duration) error {
+	return waitForSyncStabilityWithObserver(timeout, 2*time.Second, func() (int, error) {
+		return syncObservedCount(client, account, mailbox)
+	})
+}
+
+func waitForSyncStabilityWithObserver(timeout, pollInterval time.Duration, observe func() (int, error)) error {
 	deadline := time.Now().Add(timeout)
 	lastCount := -1
 	stableSamples := 0
 	for {
-		count, err := syncObservedCount(client, account, mailbox)
+		if !time.Now().Before(deadline) {
+			return clierr.New(clierr.CodeTimeout, fmt.Sprintf("sync wait timed out after %s", timeout))
+		}
+
+		count, err := observe()
 		if err != nil {
 			return err
 		}
@@ -112,10 +126,11 @@ func waitForSyncStability(client *mail.Client, account, mailbox string, timeout 
 		if stableSamples >= 2 {
 			return nil
 		}
-		if time.Now().Add(2 * time.Second).After(deadline) {
-			return fmt.Errorf("sync wait timed out after %s", timeout)
+
+		wait := min(pollInterval, time.Until(deadline))
+		if wait > 0 {
+			time.Sleep(wait)
 		}
-		time.Sleep(2 * time.Second)
 	}
 }
 
