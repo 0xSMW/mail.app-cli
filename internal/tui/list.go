@@ -215,6 +215,7 @@ func (l *list) move(delta int) {
 }
 
 func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
+	m.advanceAfterPage = false
 	switch msg.String() {
 	case "j", "down":
 		l.move(1)

@@ -594,6 +594,7 @@ func (m *model) loadMore() tea.Cmd {
 func (m model) onPageLoaded(msg pageLoadedMsg) (tea.Model, tea.Cmd) {
 	cmd, ok := m.pageLane.settle(msg.requestResult)
 	if !ok || msg.source != m.list.source {
+		m.advanceAfterPage = false
 		return m, cmd
 	}
 	m.list.appendPage(msg.messages, msg.pageSize)
@@ -749,6 +750,7 @@ func (m *model) closeReader() {
 	m.reader.open = false
 	m.bodyLane.abandon()
 	m.pendingCompose = nil
+	m.advanceAfterPage = false
 	m.focus = focusList
 	m.layout()
 }

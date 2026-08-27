@@ -127,6 +127,8 @@ func (r *reader) render(msg *mail.Message) string {
 }
 
 func (r *reader) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
+	// Any key other than n cancels a step armed at the page boundary.
+	m.advanceAfterPage = false
 	switch msg.String() {
 	case "j", "down":
 		r.viewport.ScrollDown(1)
