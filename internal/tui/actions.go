@@ -132,14 +132,16 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 
 	switch opts.Action {
 	case "archive", "delete", "move":
-		// Targets already where the action would put them are no-ops in
-		// the engine; leave their rows in place.
+		// Rows only leave the screen when the action removes them from the
+		// mailbox being viewed: a move to the current mailbox is a no-op,
+		// and an archive only takes a message out of INBOX (the engine acts
+		// from INBOX or the backing mailbox, so a Gmail label keeps it).
 		moving := make(map[string]bool, len(targets))
 		for _, t := range targets {
 			if opts.Action == "move" && strings.EqualFold(t.Mailbox, opts.TargetMailbox) {
 				continue
 			}
-			if opts.Action == "archive" && mail.IsArchiveAlias(t.Mailbox) {
+			if opts.Action == "archive" && !strings.EqualFold(t.Mailbox, "INBOX") {
 				continue
 			}
 			moving[bodyKey(t)] = true

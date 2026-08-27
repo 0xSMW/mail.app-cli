@@ -154,6 +154,15 @@ func TestNoOpMoveKeepsRow(t *testing.T) {
 	}
 }
 
+func TestArchiveFromLabelKeepsRow(t *testing.T) {
+	m := loadedModel(t)
+	m.list.messages[0].Mailbox = "Receipts"
+	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+	if len(m.list.messages) != 3 {
+		t.Fatalf("archiving from a label removed the row: %d left", len(m.list.messages))
+	}
+}
+
 func TestComposeFromAllInboxesAsksForAccount(t *testing.T) {
 	m := loadedModel(t)
 	m.sidebar.accounts = append(m.sidebar.accounts, mail.Account{Name: "Personal", EmailAddress: "p@example.test", Enabled: true})
