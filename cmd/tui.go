@@ -1,15 +1,14 @@
 package cmd
 
 import (
+	"os"
+
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 	"github.com/0xSMW/mail.app-cli/v2/internal/tui"
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
-
-// runTUI is a seam so the command can be tested without a terminal.
-var runTUI = tui.Run
 
 var tuiMessage string
 
@@ -30,14 +29,18 @@ ctrl+r refresh, ? help, q quit.`,
 		if !output.IsTerminal(cmd.OutOrStdout()) {
 			return clierr.Usage("tui needs a terminal on stdout")
 		}
-		opts := tui.Options{Account: resolved.Account.Value, MessageID: tuiMessage}
-		if mailboxExplicit() {
-			opts.Mailbox = mailboxInScope()
-		}
 		if tuiMessage != "" && !isNumericID(tuiMessage) {
 			return clierr.Usagef("message ID %q is not numeric", tuiMessage)
 		}
-		return runTUI(mail.NewClient(), opts)
+		opts := tui.Options{
+			Account:   resolved.Account.Value,
+			MessageID: tuiMessage,
+			Color:     output.ColorEnabled(output.FormatPlain, true, outFlags.NoColor, os.Getenv),
+		}
+		if mailboxExplicit() {
+			opts.Mailbox = mailboxInScope()
+		}
+		return tui.Run(mail.NewClient(), opts)
 	},
 }
 

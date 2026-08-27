@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,27 +13,19 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The mutation engine lives in pkg/mail; these aliases keep the CLI layer
-// and its tests reading naturally.
+// The mutation engine lives in pkg/mail.
 type (
 	batchItem    = mail.BatchItem
 	batchResult  = mail.BatchResult
 	batchOptions = mail.BatchOptions
-	mutator      = mail.Mutator
-)
-
-var (
-	archiveMutator = mail.ArchiveMutator
-	deleteMutator  = mail.DeleteMutator
-	moveMutator    = mail.MoveMutator
-	markMutator    = mail.MarkMutator
-	flagMutator    = mail.FlagMutator
 )
 
 // runMessageBatch runs the engine and invalidates the message-list cache for
-// every mailbox the run touched.
-func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mutator) (batchResult, error) {
-	result, err := mail.RunBatch(context.Background(), client, opts, items, mutate)
+// every mailbox the run touched. An explicit --mailbox is trusted as the
+// source; otherwise archive resolves it through the Envelope Index.
+func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator) (batchResult, error) {
+	opts.TrustSource = mailboxExplicit()
+	result, err := mail.RunBatch(client, opts, items, mutate)
 	if !opts.DryRun {
 		invalidateBatchCaches(opts.Action, result.Items)
 	}
@@ -64,58 +55,9 @@ func invalidateBatchCaches(action string, items []batchItem) {
 	}
 }
 
-// receiptSummary is the one-line human description of a receipt.
-func receiptSummary(result batchResult, opts batchOptions) string {
-	verb := map[string]string{
-		"archive": "Archived", "delete": "Deleted", "move": "Moved", "mark": "Marked", "flag": "Flagged",
-	}[result.Action]
-	if result.Action == "mark" {
-		if opts.Read {
-			verb = "Marked read"
-		} else {
-			verb = "Marked unread"
-		}
-	}
-	if result.Action == "flag" && !opts.Flagged {
-		verb = "Unflagged"
-	}
-	count := plural(result.Matched, "message")
-	target := ""
-	if result.Action == "move" && opts.TargetMailbox != "" {
-		target = " to " + opts.TargetMailbox
-	}
-	if result.Action == "archive" {
-		destinations := map[string]bool{}
-		for _, item := range result.Items {
-			if item.TargetMailbox != "" {
-				destinations[item.TargetMailbox] = true
-			}
-		}
-		if len(destinations) == 1 {
-			for name := range destinations {
-				target = " to " + name
-			}
-		}
-	}
-	if result.DryRun {
-		return fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), count, target)
-	}
-	if result.Failed > 0 || result.Skipped > 0 {
-		summary := fmt.Sprintf("%s %d of %s%s", verb, result.Succeeded, count, target)
-		if result.Failed > 0 {
-			summary += fmt.Sprintf("; %d failed", result.Failed)
-		}
-		if result.Skipped > 0 {
-			summary += fmt.Sprintf("; %d already there", result.Skipped)
-		}
-		return summary
-	}
-	return fmt.Sprintf("%s %s%s", verb, count, target)
-}
-
 func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) {
 	return func(p *output.Printer) {
-		summary := receiptSummary(result, opts)
+		summary := result.Summary(opts)
 		if result.Failed > 0 {
 			p.Line("%s", p.Red(summary))
 		} else if result.DryRun {
@@ -173,7 +115,7 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 	}
 	if err := writer.Write(output.Result{
 		Data:    result,
-		Summary: receiptSummary(result, opts),
+		Summary: result.Summary(opts),
 		Notices: notices,
 		Meta:    map[string]any{"action": result.Action, "dryRun": result.DryRun},
 		Plain:   renderReceipt(result, opts),
@@ -194,16 +136,11 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 	return nil
 }
 
-// itemsFromRefs turns located messages into receipt items. Archive acts
-// from the INBOX-or-backing mailbox so it never strips a user label.
-func itemsFromRefs(refs []messageRef, action string) []batchItem {
+// itemsFromRefs turns located messages into receipt items.
+func itemsFromRefs(refs []messageRef) []batchItem {
 	items := make([]batchItem, 0, len(refs))
 	for _, ref := range refs {
-		source := ref.Mailbox
-		if action == "archive" && ref.ArchiveMailbox != "" {
-			source = ref.ArchiveMailbox
-		}
-		item := batchItem{ID: ref.ID, Account: ref.Account, SourceMailbox: source}
+		item := batchItem{ID: ref.ID, Account: ref.Account, SourceMailbox: ref.Mailbox}
 		if ref.Envelope != nil {
 			item.Subject = ref.Envelope.Subject
 		}
@@ -213,12 +150,12 @@ func itemsFromRefs(refs []messageRef, action string) []batchItem {
 }
 
 // mutateByIDs is the shared body of every ID-driven mutation verb.
-func mutateByIDs(ids []string, opts batchOptions, mutate mutator) error {
+func mutateByIDs(ids []string, opts batchOptions, mutate mail.Mutator) error {
 	refs, notices, err := locateMessages(ids)
 	if err != nil {
 		return err
 	}
-	result, mutationErr := runMessageBatch(mailClient, opts, itemsFromRefs(refs, opts.Action), mutate)
+	result, mutationErr := runMessageBatch(mailClient, opts, itemsFromRefs(refs), mutate)
 	return writeReceipt(result, opts, notices, mutationErr, "")
 }
 
@@ -254,7 +191,7 @@ var messagesBatchArchiveCmd = &cobra.Command{
 	Use:   "archive [message-id...]",
 	Short: "Archive selected messages",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("archive", args, "", archiveMutator(false))
+		return runSelectedBatch("archive", args, "", mail.ArchiveMutator(false))
 	},
 }
 
@@ -262,7 +199,7 @@ var messagesBatchDeleteCmd = &cobra.Command{
 	Use:   "delete [message-id...]",
 	Short: "Delete selected messages",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("delete", args, "", deleteMutator)
+		return runSelectedBatch("delete", args, "", mail.DeleteMutator)
 	},
 }
 
@@ -271,7 +208,7 @@ var messagesBatchMoveCmd = &cobra.Command{
 	Short: "Move selected messages",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("move", args[1:], args[0], moveMutator(false))
+		return runSelectedBatch("move", args[1:], args[0], mail.MoveMutator(false))
 	},
 }
 
@@ -279,7 +216,7 @@ var messagesBatchMarkCmd = &cobra.Command{
 	Use:   "mark [message-id...]",
 	Short: "Mark selected messages read or unread",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("mark", args, "", markMutator(batchRead))
+		return runSelectedBatch("mark", args, "", mail.MarkMutator(batchRead))
 	},
 }
 
@@ -287,7 +224,7 @@ var messagesBatchFlagCmd = &cobra.Command{
 	Use:   "flag [message-id...]",
 	Short: "Flag or unflag selected messages",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("flag", args, "", flagMutator(batchFlagged))
+		return runSelectedBatch("flag", args, "", mail.FlagMutator(batchFlagged))
 	},
 }
 
@@ -308,7 +245,7 @@ func batchOptionsFromFlags(action, target string) batchOptions {
 	return opts
 }
 
-func runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mutator) error {
+func runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mail.Mutator) error {
 	opts := batchOptionsFromFlags(action, targetMailbox)
 	bySelector := batchQuery != "" || batchSender != "" || batchSenderDomain != ""
 	if bySelector && (len(argIDs) > 0 || batchStdin) {
@@ -343,7 +280,7 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 			return err
 		}
 		notices = locateNotices
-		items = itemsFromRefs(refs, action)
+		items = itemsFromRefs(refs)
 	}
 	if len(items) == 0 {
 		return clierr.New(clierr.CodeNotFound, "no messages selected")

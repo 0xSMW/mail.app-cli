@@ -66,7 +66,7 @@ func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error
 	}
 	if err := RemoveRecentMessage(accountName, messageID); err != nil {
 		c.shared.recentCleanupWarningOnce.Do(func() {
-			Warn(fmt.Sprintf("message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.", err))
+			c.warn(fmt.Sprintf("message was deleted, but recent-message history could not be updated (%v). Run mail-app-cli recent clear to remove stale entries.", err))
 		})
 	}
 	return nil

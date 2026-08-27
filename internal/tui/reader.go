@@ -5,70 +5,101 @@ import (
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
+
+// bodyCacheSize bounds the fetched bodies kept in memory.
+const bodyCacheSize = 64
 
 type reader struct {
 	open     bool
 	message  *mail.Message
 	viewport viewport.Model
 	cache    map[string]*mail.Message
+	order    []string
 	width    int
 	height   int
 	status   string
 	styles   styles
 }
 
-func newReader() reader {
-	return reader{viewport: viewport.New(), cache: map[string]*mail.Message{}}
+func newReader(s styles) reader {
+	return reader{viewport: viewport.New(), cache: map[string]*mail.Message{}, styles: s}
 }
 
-func (r *reader) resize(width, height int) {
-	r.width, r.height = width, height
-	r.viewport.SetWidth(width)
-	r.viewport.SetHeight(height)
-	if r.message != nil {
-		r.viewport.SetContent(r.render(r.message, r.status))
+func (r *reader) cached(key string) (*mail.Message, bool) {
+	msg, ok := r.cache[key]
+	return msg, ok
+}
+
+// remember keeps a fetched body, evicting the oldest beyond bodyCacheSize.
+func (r *reader) remember(key string, msg *mail.Message) {
+	if _, ok := r.cache[key]; !ok {
+		r.order = append(r.order, key)
+	}
+	r.cache[key] = msg
+	for len(r.order) > bodyCacheSize {
+		oldest := r.order[0]
+		r.order = r.order[1:]
+		if r.message == nil || bodyKey(*r.message) != oldest {
+			delete(r.cache, oldest)
+		}
 	}
 }
 
-func (r *reader) show(msg *mail.Message, s styles) {
+func (r *reader) forget(keys map[string]bool) {
+	for key := range keys {
+		delete(r.cache, key)
+	}
+}
+
+func (r *reader) resize(width, height int) {
+	rewrap := width != r.width
+	r.width, r.height = width, height
+	r.viewport.SetWidth(width)
+	r.viewport.SetHeight(height)
+	if rewrap && r.message != nil {
+		r.viewport.SetContent(r.render(r.message))
+	}
+}
+
+func (r *reader) show(msg *mail.Message) {
+	if r.message == msg && r.status == "" {
+		return
+	}
 	r.message = msg
 	r.status = ""
-	r.styles = s
-	r.viewport.SetContent(r.render(msg, ""))
+	r.viewport.SetContent(r.render(msg))
 	r.viewport.SetYOffset(0)
 }
 
-func (r *reader) showPlaceholder(msg *mail.Message, s styles) {
+func (r *reader) showPlaceholder(msg *mail.Message) {
 	if msg == nil {
 		return
 	}
 	r.message = msg
 	r.status = "loading body…"
-	r.styles = s
-	r.viewport.SetContent(r.render(msg, r.status))
+	r.viewport.SetContent(r.render(msg))
 	r.viewport.SetYOffset(0)
 }
 
-func (r *reader) showError(err error, s styles) {
+func (r *reader) showError(err error) {
 	r.status = sanitizeLine("could not load body: " + err.Error())
-	r.styles = s
 	if r.message != nil {
-		r.viewport.SetContent(r.render(r.message, r.status))
+		r.viewport.SetContent(r.render(r.message))
 	}
 }
 
-func (r *reader) render(msg *mail.Message, status string) string {
+func (r *reader) render(msg *mail.Message) string {
 	s := r.styles
 	width := max(r.width, 20)
 	var b strings.Builder
 	line := func(label, value string) {
-		if value == "" {
-			return
+		if value != "" {
+			b.WriteString(s.muted.Render(pad(label, 9)) + truncate(sanitizeLine(value), width-10) + "\n")
 		}
-		b.WriteString(s.muted.Render(pad(label, 9)) + truncate(sanitizeLine(value), width-10) + "\n")
 	}
 	b.WriteString(s.title.Render(truncate(sanitizeLine(msg.Subject), width)) + "\n")
 	line("From", msg.Sender)
@@ -77,58 +108,22 @@ func (r *reader) render(msg *mail.Message, status string) string {
 	line("Date", formatLongDate(msg.DateReceived))
 	line("In", msg.Account+" / "+msg.Mailbox+"  id "+msg.ID)
 	b.WriteString(s.chrome.Render(strings.Repeat("─", width)) + "\n")
-	if status != "" {
-		b.WriteString(s.muted.Render(status) + "\n")
+	if r.status != "" {
+		b.WriteString(s.muted.Render(r.status) + "\n")
 	}
-	if msg.Content != "" {
+	switch {
+	case msg.Content != "":
 		for _, l := range strings.Split(sanitizeBody(msg.Content), "\n") {
+			wrapped := ansi.Wrap(l, width, "")
 			if strings.HasPrefix(l, ">") {
-				b.WriteString(s.bodyQuote.Render(wrap(l, width)) + "\n")
-				continue
+				wrapped = s.muted.Render(wrapped)
 			}
-			b.WriteString(wrap(l, width) + "\n")
+			b.WriteString(wrapped + "\n")
 		}
-	} else if status == "" {
+	case r.status == "":
 		b.WriteString(s.muted.Render("(no text content)") + "\n")
 	}
 	return b.String()
-}
-
-// wrap breaks a line at spaces to fit width; long tokens are cut.
-func wrap(line string, width int) string {
-	if width <= 0 {
-		return line
-	}
-	words := strings.Fields(line)
-	if len(words) == 0 {
-		return ""
-	}
-	var out []string
-	current := ""
-	for _, word := range words {
-		for len([]rune(word)) > width {
-			if current != "" {
-				out = append(out, current)
-				current = ""
-			}
-			runes := []rune(word)
-			out = append(out, string(runes[:width]))
-			word = string(runes[width:])
-		}
-		switch {
-		case current == "":
-			current = word
-		case len([]rune(current))+1+len([]rune(word)) <= width:
-			current += " " + word
-		default:
-			out = append(out, current)
-			current = word
-		}
-	}
-	if current != "" {
-		out = append(out, current)
-	}
-	return strings.Join(out, "\n")
 }
 
 func (r *reader) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
@@ -163,19 +158,7 @@ func (r *reader) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 
 func (r *reader) view(m *model) string {
 	if r.message == nil {
-		lines := []string{m.styles.muted.Render(fit("select a message", r.width))}
-		for len(lines) < r.height {
-			lines = append(lines, strings.Repeat(" ", r.width))
-		}
-		return strings.Join(lines, "\n")
+		return block([]string{m.styles.muted.Render("select a message")}, r.width, r.height)
 	}
-	content := r.viewport.View()
-	lines := strings.Split(content, "\n")
-	for i := range lines {
-		lines[i] = fit(lines[i], r.width)
-	}
-	for len(lines) < r.height {
-		lines = append(lines, strings.Repeat(" ", r.width))
-	}
-	return strings.Join(lines[:r.height], "\n")
+	return block(strings.Split(r.viewport.View(), "\n"), r.width, r.height)
 }

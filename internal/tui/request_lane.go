@@ -6,8 +6,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// requestResult is embedded in every response message so the lane that
-// asked can tell a current answer from one the user has since moved past.
+// requestResult is embedded in every read response so the lane that asked
+// can tell a current answer from one the user has since moved past.
 type requestResult struct {
 	requestID uint64
 	err       error
@@ -21,18 +21,19 @@ type requestLane struct {
 	loading bool
 }
 
-func (l *requestLane) begin(parent context.Context) (uint64, context.Context) {
+// begin supersedes the read in flight. silent reads (refreshes after a
+// mutation) do not show the spinner.
+func (l *requestLane) begin(parent context.Context, silent bool) (uint64, context.Context) {
 	if l.cancel != nil {
 		l.cancel()
 	}
 	l.id++
 	ctx, cancel := context.WithCancel(parent)
 	l.cancel = cancel
-	l.loading = true
+	l.loading = !silent
 	return l.id, ctx
 }
 
-// accepts reports whether a response answers the read in flight.
 func (l *requestLane) accepts(result requestResult) bool {
 	return result.requestID == l.id
 }

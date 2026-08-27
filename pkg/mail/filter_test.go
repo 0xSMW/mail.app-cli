@@ -39,13 +39,13 @@ func TestFilterBySender(t *testing.T) {
 }
 
 func TestNormalizedChunkSize(t *testing.T) {
-	if got := NormalizedChunkSize(12, 5); got != 5 {
+	if got := normalizedChunkSize(12, 5); got != 5 {
 		t.Fatalf("chunk size = %d, want 5", got)
 	}
-	if got := NormalizedChunkSize(12, 0); got != 12 {
+	if got := normalizedChunkSize(12, 0); got != 12 {
 		t.Fatalf("default chunk size = %d, want 12", got)
 	}
-	if got := NormalizedChunkSize(3, 10); got != 3 {
+	if got := normalizedChunkSize(3, 10); got != 3 {
 		t.Fatalf("large chunk size = %d, want 3", got)
 	}
 }

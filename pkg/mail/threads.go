@@ -1,7 +1,7 @@
 package mail
 
 import (
-	"sort"
+	"slices"
 	"strings"
 	"unicode"
 )
@@ -48,16 +48,16 @@ func GroupThreads(messages []Message) []ThreadSummary {
 			thread.LatestDate = message.DateReceived
 		}
 		thread.MessageIDs = append(thread.MessageIDs, message.ID)
-		if message.Sender != "" && !containsString(thread.Participants, message.Sender) {
+		if message.Sender != "" && !slices.Contains(thread.Participants, message.Sender) {
 			thread.Participants = append(thread.Participants, message.Sender)
 		}
 	}
 	threads := make([]ThreadSummary, 0, len(byKey))
 	for _, thread := range byKey {
-		sort.Strings(thread.Participants)
+		slices.Sort(thread.Participants)
 		threads = append(threads, *thread)
 	}
-	sort.Slice(threads, func(i, j int) bool { return threads[i].LatestDate > threads[j].LatestDate })
+	slices.SortFunc(threads, func(a, b ThreadSummary) int { return strings.Compare(b.LatestDate, a.LatestDate) })
 	return threads
 }
 
@@ -111,13 +111,4 @@ func NormalizeThreadSubject(subject string) string {
 		b.WriteRune(r)
 	}
 	return strings.TrimSpace(b.String())
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }

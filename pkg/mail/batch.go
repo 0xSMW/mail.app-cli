@@ -1,10 +1,9 @@
 package mail
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,10 +53,12 @@ type BatchOptions struct {
 	Journal bool
 	// Progress receives per-chunk and per-message lines when non-nil.
 	Progress io.Writer
+	// TrustSource keeps each item's SourceMailbox as given. Otherwise an
+	// archive looks each message up in the Envelope Index and acts from
+	// INBOX or the backing mailbox, never from a user label, and skips
+	// messages that are already archived.
+	TrustSource bool
 }
-
-// ErrBatchFailed wraps a run in which at least one item failed.
-var ErrBatchFailed = errors.New("batch failed")
 
 // BatchFailedError reports how many items failed.
 type BatchFailedError struct {
@@ -69,8 +70,6 @@ type BatchFailedError struct {
 func (e *BatchFailedError) Error() string {
 	return fmt.Sprintf("%s failed for %d of %d message(s)", e.Action, e.Failed, e.Attempted)
 }
-
-func (e *BatchFailedError) Unwrap() error { return ErrBatchFailed }
 
 // Mutator applies one action to one message and may update the item, for
 // example to record the mailbox an archive landed in.
@@ -131,9 +130,9 @@ func FlagMutator(flagged bool) Mutator {
 
 // RunBatch applies mutate to every item and returns the receipt. The error
 // is a *BatchFailedError when at least one item failed; the receipt is
-// always complete. Cancelling ctx stops the run between items.
-func RunBatch(ctx context.Context, client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (BatchResult, error) {
-	client = client.WithContext(ctx)
+// always complete. Cancelling the client's context stops the run between
+// items.
+func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (BatchResult, error) {
 	result := BatchResult{
 		Action:    opts.Action,
 		DryRun:    opts.DryRun,
@@ -146,7 +145,7 @@ func RunBatch(ctx context.Context, client *Client, opts BatchOptions, items []Ba
 			items[i].TargetMailbox = opts.TargetMailbox
 		}
 	}
-	chunkSize := NormalizedChunkSize(len(items), opts.ChunkSize)
+	chunkSize := normalizedChunkSize(len(items), opts.ChunkSize)
 	result.Chunks = (len(items) + chunkSize - 1) / chunkSize
 	if opts.DryRun {
 		for _, item := range items {
@@ -157,6 +156,9 @@ func RunBatch(ctx context.Context, client *Client, opts BatchOptions, items []Ba
 		result.EndedAt = time.Now().Format(time.RFC3339)
 		return result, nil
 	}
+	if opts.Action == "archive" && !opts.TrustSource {
+		items = client.archiveSources(items)
+	}
 
 	for start := 0; start < len(items); start += chunkSize {
 		end := min(start+chunkSize, len(items))
@@ -164,16 +166,9 @@ func RunBatch(ctx context.Context, client *Client, opts BatchOptions, items []Ba
 			fmt.Fprintf(opts.Progress, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
 		}
 		for _, item := range items[start:end] {
-			if err := ctx.Err(); err != nil {
+			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
-				item.Error = "cancelled"
-				result.Skipped++
-				result.Items = append(result.Items, item)
-				continue
-			}
-			if opts.Action == "move" && strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
-				item.Status = "skipped"
-				item.Error = "already in " + item.TargetMailbox
+				item.Error = skip
 				result.Skipped++
 				result.Items = append(result.Items, item)
 				continue
@@ -220,6 +215,105 @@ func RunBatch(ctx context.Context, client *Client, opts BatchOptions, items []Ba
 		return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Attempted: result.Attempted}
 	}
 	return result, nil
+}
+
+// skipReason says why an item is not attempted: the run was cancelled, or
+// the message is already where the action would put it.
+func skipReason(client *Client, opts BatchOptions, item BatchItem) string {
+	if client.Done() != nil {
+		return "cancelled"
+	}
+	switch opts.Action {
+	case "move":
+		if strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
+			return "already in " + item.TargetMailbox
+		}
+	case "archive":
+		if IsArchiveAlias(item.SourceMailbox) {
+			return "already in " + item.SourceMailbox
+		}
+	}
+	return ""
+}
+
+// archiveSources rewrites each item's source to INBOX or its backing
+// mailbox so archive never strips a user label. Items the index cannot
+// locate keep the mailbox they were listed in.
+func (c *Client) archiveSources(items []BatchItem) []BatchItem {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if !strings.EqualFold(item.SourceMailbox, "INBOX") {
+			ids = append(ids, item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return items
+	}
+	located, err := c.LocateMessages(ids)
+	if err != nil {
+		return items
+	}
+	for i, item := range items {
+		if loc, ok := located[item.ID]; ok && strings.EqualFold(loc.Account, item.Account) {
+			items[i].SourceMailbox = loc.ArchiveMailbox
+		}
+	}
+	return items
+}
+
+// Summary is the one-line human description of a receipt.
+func (r BatchResult) Summary(opts BatchOptions) string {
+	verb := map[string]string{"archive": "Archived", "delete": "Deleted", "move": "Moved", "mark": "Marked", "flag": "Flagged"}[r.Action]
+	switch r.Action {
+	case "mark":
+		verb = "Marked read"
+		if !opts.Read {
+			verb = "Marked unread"
+		}
+	case "flag":
+		if !opts.Flagged {
+			verb = "Unflagged"
+		}
+	}
+	count := countNoun(r.Matched, "message")
+	target := ""
+	if r.Action == "move" && opts.TargetMailbox != "" {
+		target = " to " + opts.TargetMailbox
+	}
+	if r.Action == "archive" {
+		destinations := map[string]bool{}
+		for _, item := range r.Items {
+			if item.TargetMailbox != "" && item.Status == "succeeded" {
+				destinations[item.TargetMailbox] = true
+			}
+		}
+		if len(destinations) == 1 {
+			for name := range destinations {
+				target = " to " + name
+			}
+		}
+	}
+	if r.DryRun {
+		return fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), count, target)
+	}
+	if r.Failed == 0 && r.Skipped == 0 {
+		return fmt.Sprintf("%s %s%s", verb, count, target)
+	}
+	summary := fmt.Sprintf("%s %d of %s%s", verb, r.Succeeded, count, target)
+	if r.Failed > 0 {
+		summary += fmt.Sprintf("; %d failed", r.Failed)
+	}
+	if r.Skipped > 0 {
+		summary += fmt.Sprintf("; %d already there", r.Skipped)
+	}
+	return summary
+}
+
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return strconv.Itoa(n) + " " + noun + "s"
 }
 
 // VerifyMutation re-reads a message after a mutation and reports whether
@@ -302,8 +396,7 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 	return "unchecked", nil
 }
 
-// NormalizedChunkSize clamps a requested chunk size to the item count.
-func NormalizedChunkSize(total, requested int) int {
+func normalizedChunkSize(total, requested int) int {
 	if total <= 0 {
 		return 1
 	}

@@ -20,6 +20,7 @@ type Options struct {
 	Account   string
 	Mailbox   string
 	MessageID string
+	Color     bool
 }
 
 type focusPane int
@@ -32,16 +33,14 @@ const (
 
 type errMsg struct{ err error }
 
-func (e errMsg) Error() string { return e.err.Error() }
-
 type spinnerTickMsg struct{}
+type ctrlCResetMsg struct{}
+type refreshDueMsg struct{ id uint64 }
+type bodyDebounceMsg struct{ key string }
 
 // warnMsg carries a pkg/mail warning (index fallback, content budget) that
 // would otherwise be printed over the screen.
 type warnMsg struct{ text string }
-type ctrlCResetMsg struct{}
-type refreshDueMsg struct{ id uint64 }
-type bodyDebounceMsg struct{ key string }
 
 // modal is whatever is open over the panes and holds every key while it is.
 type modal interface {
@@ -78,7 +77,7 @@ type model struct {
 	writeCtx  context.Context
 	stopWrite context.CancelFunc
 
-	loading      bool
+	spinning     bool
 	spinnerFrame int
 	notice       string
 	err          error
@@ -102,20 +101,17 @@ func newModel(client *mail.Client, opts Options) model {
 	ctx, cancel := context.WithCancel(context.Background())
 	writeCtx, stopWrite := context.WithCancel(context.Background())
 	m := model{
-		client:    client,
-		ctx:       ctx,
-		cancel:    cancel,
-		writeCtx:  writeCtx,
-		stopWrite: stopWrite,
-		opts:      opts,
-		styles:    newStyles(),
-		focus:     focusList,
-		loading:   true,
+		client:      client,
+		ctx:         ctx,
+		cancel:      cancel,
+		writeCtx:    writeCtx,
+		stopWrite:   stopWrite,
+		opts:        opts,
+		styles:      newStyles(opts.Color),
+		focus:       focusList,
+		pendingOpen: opts.MessageID,
 	}
-	m.sidebar = newSidebar()
-	m.list = newList()
-	m.reader = newReader()
-	m.pendingOpen = opts.MessageID
+	m.reader = newReader(m.styles)
 	m.initCmd = m.loadMailboxes()
 	return m
 }
@@ -124,9 +120,7 @@ func newModel(client *mail.Client, opts Options) model {
 func Run(client *mail.Client, opts Options) error {
 	m := newModel(client, opts)
 	p := tea.NewProgram(m)
-	previousWarn := mail.Warn
-	mail.Warn = func(text string) { p.Send(warnMsg{text: text}) }
-	defer func() { mail.Warn = previousWarn }()
+	client.SetWarn(func(text string) { p.Send(warnMsg{text: text}) })
 	_, err := p.Run()
 	m.cancel()
 	m.stopWrite()
@@ -153,8 +147,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinnerTickMsg:
 		m.spinnerFrame++
 		if m.anyLoading() {
+			m.spinning = true
 			return m, spinnerTick()
 		}
+		m.spinning = false
 		return m, nil
 
 	case ctrlCResetMsg:
@@ -189,12 +185,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case bodyDebounceMsg:
 		if m.reader.open && m.currentKey() == msg.key {
-			return m, m.loadBody()
+			return m, m.spin(m.loadBody())
 		}
 		return m, nil
 
 	case bodyLoadedMsg:
 		return m.onBodyLoaded(msg)
+
+	case writeDoneMsg:
+		// The queue advances here, once, whatever the write reported.
+		next := m.writes.next()
+		if next == nil && m.quitting {
+			return m, tea.Quit
+		}
+		updated, cmd := m.Update(msg.inner)
+		return updated, tea.Batch(next, cmd)
 
 	case mutationDoneMsg:
 		return m.onMutationDone(msg)
@@ -227,7 +232,13 @@ func (m *model) anyLoading() bool {
 	return m.mailboxLane.loading || m.listLane.loading || m.bodyLane.loading || m.searchLane.loading || m.writes.busy
 }
 
-func (m *model) startSpinner(cmd tea.Cmd) tea.Cmd {
+// spin starts the spinner chain if a load is now in flight and no chain is
+// already running.
+func (m *model) spin(cmd tea.Cmd) tea.Cmd {
+	if m.spinning || !m.anyLoading() {
+		return cmd
+	}
+	m.spinning = true
 	return tea.Batch(cmd, spinnerTick())
 }
 
@@ -253,57 +264,38 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	if m.modal != nil {
-		cmd, open := m.modal.handleKey(&m, msg)
+	var cmd tea.Cmd
+	switch {
+	case m.modal != nil:
+		var open bool
+		cmd, open = m.modal.handleKey(&m, msg)
 		if !open {
 			m.modal = nil
 			m.layout()
 		}
-		return m, m.startSpinner(cmd)
-	}
-
-	switch key {
-	case "?":
+	case key == "?":
 		m.helpHidden = !m.helpHidden
 		m.layout()
-		return m, nil
-	case "ctrl+r":
-		return m, m.startSpinner(tea.Batch(m.loadMailboxes(), m.reloadList(false)))
-	case "tab":
+	case key == "ctrl+r":
+		cmd = tea.Batch(m.loadMailboxes(), m.reloadList(false))
+	case key == "tab":
 		m.cycleFocus(1)
-		return m, nil
-	case "shift+tab":
+	case key == "shift+tab":
 		m.cycleFocus(-1)
-		return m, nil
-	case "/":
-		m.modal = newSearchModal(m.styles)
-		return m, nil
-	case "c":
-		return m, m.openCompose(composeNew)
-	}
-
-	if idx, ok := digitShortcut(key); ok && m.focus != focusReader {
-		if cmd := m.sidebar.jumpTo(&m, idx); cmd != nil {
-			return m, m.startSpinner(cmd)
-		}
-		return m, nil
-	}
-
-	switch m.focus {
-	case focusSidebar:
-		return m, m.startSpinner(m.sidebar.handleKey(&m, msg))
-	case focusReader:
-		return m, m.startSpinner(m.reader.handleKey(&m, msg))
+	case key == "/":
+		m.modal = newSearchModal()
+	case key == "c":
+		cmd = m.openCompose(composeNew)
+	case m.focus != focusReader && len(key) == 1 && key[0] >= '1' && key[0] <= '9':
+		cmd = m.sidebar.jumpTo(&m, int(key[0]-'1'))
+	case m.focus == focusSidebar:
+		cmd = m.sidebar.handleKey(&m, msg)
+	case m.focus == focusReader:
+		cmd = m.reader.handleKey(&m, msg)
 	default:
-		return m, m.startSpinner(m.list.handleKey(&m, msg))
+		cmd = m.list.handleKey(&m, msg)
 	}
-}
-
-func digitShortcut(key string) (int, bool) {
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		return int(key[0] - '1'), true
-	}
-	return 0, false
+	return m, m.spin(cmd)
 }
 
 func (m *model) cycleFocus(delta int) {
@@ -341,13 +333,12 @@ func (m *model) threePane() bool {
 
 // contentHeight is what is left after the header, its rule, the footer
 // rule, and the help bar.
-func (m *model) contentHeight() int {
-	h := m.height - 3 - lipgloss.Height(m.helpView())
-	return max(h, 3)
+func contentHeight(height int, help string) int {
+	return max(height-3-lipgloss.Height(help), 3)
 }
 
 func (m *model) layout() {
-	height := m.contentHeight()
+	height := contentHeight(m.height, m.helpView())
 	listWidth := m.width
 	if m.sidebarVisible() {
 		listWidth -= sidebarWidth + 1
@@ -368,27 +359,22 @@ func (m model) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("")
 	}
-	var b strings.Builder
-	b.WriteString(m.headerView())
-	b.WriteString("\n")
-	b.WriteString(m.styles.chrome.Render(strings.Repeat("─", m.width)))
-	b.WriteString("\n")
+	help := m.helpView()
+	height := contentHeight(m.height, help)
+	rule := m.styles.chrome.Render(strings.Repeat("─", m.width))
 
-	content := m.contentView()
+	content := m.contentView(height)
 	if m.modal != nil {
-		content = overlay(content, m.modal.view(&m), m.width, m.contentHeight())
+		content = overlay(content, m.modal.view(&m), m.width, height)
 	}
 	if m.err != nil {
-		content = overlay(content, m.errorBox(), m.width, m.contentHeight())
+		content = overlay(content, m.errorBox(), m.width, height)
 	}
 	if toast := m.toastView(); toast != "" {
-		content = overlayAt(content, toast, max(m.width-lipgloss.Width(toast)-1, 0), 0, m.width, m.contentHeight())
+		content = overlayAt(content, toast, max(m.width-lipgloss.Width(toast)-1, 0), 0, m.width, height)
 	}
-	b.WriteString(content)
-	b.WriteString("\n" + m.styles.chrome.Render(strings.Repeat("─", m.width)))
-	b.WriteString("\n" + m.helpView())
 
-	v := tea.NewView(b.String())
+	v := tea.NewView(m.headerView() + "\n" + rule + "\n" + content + "\n" + rule + "\n" + help)
 	v.AltScreen = true
 	return v
 }
@@ -396,8 +382,7 @@ func (m model) View() tea.View {
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
 func (m model) headerView() string {
-	title := m.styles.title.Render("mail")
-	where := m.styles.muted.Render(m.list.title())
+	left := m.styles.title.Render("mail") + "  " + m.styles.muted.Render(m.list.title())
 	right := ""
 	if m.anyLoading() {
 		right = m.styles.active.Render(spinnerFrames[m.spinnerFrame%len(spinnerFrames)])
@@ -405,37 +390,30 @@ func (m model) headerView() string {
 	if m.notice != "" {
 		right = m.styles.error.Render(truncate(m.notice, m.width/2)) + " " + right
 	}
-	left := title + "  " + where
-	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right)
-	if gap < 1 {
-		gap = 1
-	}
+	gap := max(m.width-lipgloss.Width(left)-lipgloss.Width(right), 1)
 	return left + strings.Repeat(" ", gap) + right
 }
 
-func (m model) contentView() string {
-	panes := []string{}
+func (m model) contentView(height int) string {
+	rule := m.styles.chrome.Render(strings.TrimRight(strings.Repeat("│\n", height), "\n"))
+	var panes []string
 	if m.sidebarVisible() {
-		panes = append(panes, m.sidebar.view(&m), m.verticalRule())
+		panes = append(panes, m.sidebar.view(&m), rule)
 	}
 	if m.reader.open && !m.threePane() {
 		panes = append(panes, m.reader.view(&m))
 	} else {
 		panes = append(panes, m.list.view(&m))
 		if m.reader.open {
-			panes = append(panes, m.verticalRule(), m.reader.view(&m))
+			panes = append(panes, rule, m.reader.view(&m))
 		}
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, panes...)
 }
 
-func (m model) verticalRule() string {
-	return m.styles.chrome.Render(strings.TrimRight(strings.Repeat("│\n", m.contentHeight()), "\n"))
-}
-
 func (m model) errorBox() string {
 	text := m.styles.error.Render("Error") + "\n\n" + truncate(sanitizeLine(m.err.Error()), max(m.width-10, 20)) + "\n\n" + m.styles.muted.Render("esc to dismiss")
-	return m.styles.frame.BorderForeground(m.styles.palette.alert).Render(text)
+	return m.styles.errorFrame.Render(text)
 }
 
 func overlay(base, layer string, width, height int) string {
@@ -463,14 +441,14 @@ type mailboxesLoadedMsg struct {
 }
 
 func (m *model) loadMailboxes() tea.Cmd {
-	id, ctx := m.mailboxLane.begin(m.ctx)
-	client := m.client
+	id, ctx := m.mailboxLane.begin(m.ctx, false)
+	client := m.client.WithContext(ctx)
 	return func() tea.Msg {
-		accounts, err := client.Accounts(ctx)
+		accounts, err := client.Accounts()
 		if err != nil {
 			return mailboxesLoadedMsg{requestResult: requestResult{id, err}}
 		}
-		mailboxes, err := client.Mailboxes(ctx, "")
+		mailboxes, err := client.Mailboxes("")
 		return mailboxesLoadedMsg{requestResult: requestResult{id, err}, accounts: accounts, mailboxes: mailboxes}
 	}
 }
@@ -478,15 +456,13 @@ func (m *model) loadMailboxes() tea.Cmd {
 func (m model) onMailboxesLoaded(msg mailboxesLoadedMsg) (tea.Model, tea.Cmd) {
 	cmd, ok := m.mailboxLane.settle(msg.requestResult)
 	if !ok {
-		m.loading = false
 		return m, cmd
 	}
 	first := len(m.sidebar.entries) == 0
 	m.sidebar.setData(msg.accounts, msg.mailboxes)
 	if first {
 		m.sidebar.selectInitial(m.opts.Account, m.opts.Mailbox)
-		m.loading = false
-		return m, m.startSpinner(m.reloadList(false))
+		return m, m.spin(m.reloadList(false))
 	}
 	return m, nil
 }
@@ -495,35 +471,32 @@ type messagesLoadedMsg struct {
 	requestResult
 	messages []mail.Message
 	silent   bool
-	source   sidebarEntry
+	source   listSource
 }
 
 // reloadList fetches the current mailbox or re-runs the current search.
 // silent refreshes keep the cursor and show no spinner; they follow a
 // mutation.
 func (m *model) reloadList(silent bool) tea.Cmd {
-	if m.list.mode == listSearch {
-		return m.runSearch(m.list.query, silent)
+	if m.list.source.search != "" {
+		return m.runSearch(m.list.source.search, silent)
 	}
 	if m.searchLane.loading {
 		return nil
 	}
-	entry := m.sidebar.current()
-	id, ctx := m.listLane.begin(m.ctx)
-	if silent {
-		m.listLane.loading = false
-	}
-	client := m.client
+	source := m.sidebar.current().source()
+	id, ctx := m.listLane.begin(m.ctx, silent)
+	client := m.client.WithContext(ctx)
 	limit := m.list.pageSize()
 	return func() tea.Msg {
 		var messages []mail.Message
 		var err error
-		if entry.unified {
-			messages, err = client.ListUnified(ctx, "inbox", limit, 0, false)
+		if source.unified {
+			messages, err = client.ListUnified("inbox", limit)
 		} else {
-			messages, err = client.ListMessages(ctx, mail.ListOptions{Account: entry.account, Mailbox: entry.mailbox, Limit: limit})
+			messages, err = client.ListMessages(mail.MailboxListRequest{AccountName: source.account, MailboxName: source.mailbox, Limit: limit})
 		}
-		return messagesLoadedMsg{requestResult: requestResult{id, err}, messages: messages, silent: silent, source: entry}
+		return messagesLoadedMsg{requestResult: requestResult{id, err}, messages: messages, silent: silent, source: source}
 	}
 }
 
@@ -537,13 +510,12 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 	}
 	var cmds []tea.Cmd
-	if m.pendingOpen != "" {
-		if m.list.jumpToID(m.pendingOpen) {
-			m.pendingOpen = ""
+	if id := m.pendingOpen; id != "" {
+		m.pendingOpen = ""
+		if m.list.jumpToID(id) {
 			cmds = append(cmds, m.openReader())
 		} else {
-			m.pendingOpen = ""
-			cmds = append(cmds, notify("message "+m.opts.MessageID+" is not in the first page of "+msg.source.label()))
+			cmds = append(cmds, notifyProblem("message "+id+" is not in the first page of "+msg.source.label()))
 		}
 	}
 	if m.reader.open {
@@ -579,11 +551,11 @@ func (m *model) requestBody() tea.Cmd {
 	if key == "" {
 		return nil
 	}
-	if cached, ok := m.reader.cache[key]; ok {
-		m.reader.show(cached, m.styles)
+	if cached, ok := m.reader.cached(key); ok {
+		m.reader.show(cached)
 		return nil
 	}
-	m.reader.showPlaceholder(m.list.current(), m.styles)
+	m.reader.showPlaceholder(m.list.current())
 	return tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg { return bodyDebounceMsg{key: key} })
 }
 
@@ -593,13 +565,13 @@ func (m *model) loadBody() tea.Cmd {
 		return nil
 	}
 	key := bodyKey(*current)
-	id, ctx := m.bodyLane.begin(m.ctx)
-	client := m.client
-	msg := *current
+	id, ctx := m.bodyLane.begin(m.ctx, false)
+	client := m.client.WithContext(ctx)
+	account, mailbox, msgID := current.Account, current.Mailbox, current.ID
 	return func() tea.Msg {
-		details, err := client.MessageDetails(ctx, msg.Account, msg.Mailbox, msg.ID)
+		details, err := client.MessageDetails(account, mailbox, msgID)
 		if err == nil && details == nil {
-			err = fmt.Errorf("message %s is no longer in %s/%s", msg.ID, msg.Account, msg.Mailbox)
+			err = fmt.Errorf("message %s is no longer in %s/%s", msgID, account, mailbox)
 		}
 		return bodyLoadedMsg{requestResult: requestResult{id, err}, key: key, message: details}
 	}
@@ -615,10 +587,10 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 			m.pendingCompose = nil
 			return m, notifyError("could not load the message to quote", msg.err)
 		}
-		m.reader.showError(msg.err, m.styles)
+		m.reader.showError(msg.err)
 		return m, nil
 	}
-	m.reader.cache[msg.key] = msg.message
+	m.reader.remember(msg.key, msg.message)
 	if pending := m.pendingCompose; pending != nil {
 		m.pendingCompose = nil
 		if pending.key == msg.key && m.modal == nil {
@@ -626,7 +598,7 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.reader.open && m.currentKey() == msg.key {
-		m.reader.show(msg.message, m.styles)
+		m.reader.show(msg.message)
 		if !msg.message.Read {
 			// Reading marks read, the way every mail client does.
 			return m, m.markCurrentRead()

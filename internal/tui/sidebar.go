@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -8,21 +9,58 @@ import (
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
+// listSource is what the list shows: the unified inbox, one mailbox, or a
+// search.
+type listSource struct {
+	unified bool
+	account string
+	mailbox string
+	search  string
+}
+
+func (s listSource) label() string {
+	switch {
+	case s.search != "":
+		return "search: " + sanitizeLine(s.search)
+	case s.unified:
+		return "All inboxes"
+	default:
+		return sanitizeLine(s.account + " / " + s.mailbox)
+	}
+}
+
+// showsLocation reports whether rows span mailboxes and need a location column.
+func (s listSource) showsLocation() bool {
+	return s.unified || s.search != ""
+}
+
+type entryKind int
+
+const (
+	entryUnified entryKind = iota
+	entryHeading
+	entryMailbox
+)
+
 // sidebarEntry is one row: the unified inbox, an account heading, or a mailbox.
 type sidebarEntry struct {
-	unified bool
-	heading bool
+	kind    entryKind
 	account string
 	mailbox string
 	unread  int
-	total   int
+}
+
+func (e sidebarEntry) selectable() bool { return e.kind != entryHeading }
+
+func (e sidebarEntry) source() listSource {
+	return listSource{unified: e.kind == entryUnified, account: e.account, mailbox: e.mailbox}
 }
 
 func (e sidebarEntry) label() string {
-	switch {
-	case e.unified:
+	switch e.kind {
+	case entryUnified:
 		return "All inboxes"
-	case e.heading:
+	case entryHeading:
 		return e.account
 	default:
 		return e.mailbox
@@ -33,14 +71,9 @@ type sidebar struct {
 	entries  []sidebarEntry
 	cursor   int
 	selected int
-	offset   int
 	width    int
 	height   int
 	accounts []mail.Account
-}
-
-func newSidebar() sidebar {
-	return sidebar{}
 }
 
 func (s *sidebar) resize(width, height int) {
@@ -52,19 +85,18 @@ func (s *sidebar) resize(width, height int) {
 func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) {
 	s.accounts = accounts
 	previous := s.current()
-	entries := []sidebarEntry{{unified: true}}
+	entries := []sidebarEntry{{kind: entryUnified}}
 	for _, account := range accounts {
 		if !account.Enabled {
 			continue
 		}
-		entries = append(entries, sidebarEntry{heading: true, account: account.Name})
-		var inbox []sidebarEntry
-		var rest []sidebarEntry
+		entries = append(entries, sidebarEntry{kind: entryHeading, account: account.Name})
+		var inbox, rest []sidebarEntry
 		for _, mb := range mailboxes {
 			if mb.Account != account.Name || mb.Name == "" {
 				continue
 			}
-			entry := sidebarEntry{account: mb.Account, mailbox: mb.Name, unread: mb.UnreadCount, total: mb.TotalCount}
+			entry := sidebarEntry{kind: entryMailbox, account: mb.Account, mailbox: mb.Name, unread: mb.UnreadCount}
 			if strings.EqualFold(mb.Name, "INBOX") {
 				inbox = append(inbox, entry)
 			} else {
@@ -77,36 +109,32 @@ func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) {
 	s.entries = entries
 	s.selected = 0
 	for i, entry := range entries {
-		if entry.account == previous.account && entry.mailbox == previous.mailbox && entry.unified == previous.unified {
+		if entry.source() == previous.source() {
 			s.selected = i
 		}
 	}
-	if s.cursor >= len(entries) {
-		s.cursor = max(len(entries)-1, 0)
-	}
+	s.cursor = min(s.cursor, max(len(entries)-1, 0))
 }
 
 func (s *sidebar) selectInitial(account, mailbox string) {
+	s.selected, s.cursor = 0, 0
 	if account == "" {
-		s.selected, s.cursor = 0, 0
 		return
 	}
-	target := mailbox
-	if target == "" {
-		target = "INBOX"
+	if mailbox == "" {
+		mailbox = "INBOX"
 	}
 	for i, entry := range s.entries {
-		if !entry.heading && !entry.unified && strings.EqualFold(entry.account, account) && strings.EqualFold(entry.mailbox, target) {
+		if entry.kind == entryMailbox && strings.EqualFold(entry.account, account) && strings.EqualFold(entry.mailbox, mailbox) {
 			s.selected, s.cursor = i, i
 			return
 		}
 	}
-	s.selected, s.cursor = 0, 0
 }
 
 func (s *sidebar) current() sidebarEntry {
 	if s.selected < 0 || s.selected >= len(s.entries) {
-		return sidebarEntry{unified: true}
+		return sidebarEntry{kind: entryUnified}
 	}
 	return s.entries[s.selected]
 }
@@ -125,7 +153,7 @@ func (s *sidebar) accountEmail(name string) string {
 func (s *sidebar) mailboxesFor(account string) []string {
 	var names []string
 	for _, entry := range s.entries {
-		if !entry.heading && !entry.unified && entry.account == account {
+		if entry.kind == entryMailbox && entry.account == account {
 			names = append(names, entry.mailbox)
 		}
 	}
@@ -133,48 +161,32 @@ func (s *sidebar) mailboxesFor(account string) []string {
 }
 
 func (s *sidebar) move(delta int) {
-	if len(s.entries) == 0 {
-		return
-	}
-	next := s.cursor
-	for {
-		next += delta
-		if next < 0 || next >= len(s.entries) {
-			return
-		}
-		if !s.entries[next].heading {
+	for next := s.cursor + delta; next >= 0 && next < len(s.entries); next += delta {
+		if s.entries[next].selectable() {
 			s.cursor = next
 			return
 		}
 	}
 }
 
-// selectableIndex maps a digit shortcut to the nth selectable entry.
-func (s *sidebar) selectableIndex(n int) int {
+// jumpTo selects the nth selectable entry, for the digit shortcuts.
+func (s *sidebar) jumpTo(m *model, n int) tea.Cmd {
 	count := 0
 	for i, entry := range s.entries {
-		if entry.heading {
+		if !entry.selectable() {
 			continue
 		}
 		if count == n {
-			return i
+			s.cursor = i
+			return s.choose(m)
 		}
 		count++
 	}
-	return -1
-}
-
-func (s *sidebar) jumpTo(m *model, n int) tea.Cmd {
-	idx := s.selectableIndex(n)
-	if idx < 0 {
-		return nil
-	}
-	s.cursor = idx
-	return s.choose(m)
+	return nil
 }
 
 func (s *sidebar) choose(m *model) tea.Cmd {
-	if s.cursor < 0 || s.cursor >= len(s.entries) || s.entries[s.cursor].heading {
+	if s.cursor < 0 || s.cursor >= len(s.entries) || !s.entries[s.cursor].selectable() {
 		return nil
 	}
 	s.selected = s.cursor
@@ -194,10 +206,8 @@ func (s *sidebar) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	case "g", "home":
 		s.cursor = 0
 	case "G", "end":
-		s.cursor = len(s.entries) - 1
-		if s.cursor > 0 && s.entries[s.cursor].heading {
-			s.move(-1)
-		}
+		s.cursor = len(s.entries)
+		s.move(-1)
 	case "enter", "l", "right":
 		return s.choose(m)
 	case "q":
@@ -207,63 +217,48 @@ func (s *sidebar) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 }
 
 func (s *sidebar) view(m *model) string {
-	inner := s.width
-	if s.cursor < s.offset {
-		s.offset = s.cursor
-	}
-	if s.cursor >= s.offset+s.height {
-		s.offset = s.cursor - s.height + 1
-	}
+	offset := max(s.cursor-s.height+1, 0)
 	var lines []string
 	digit := 0
-	for i := 0; i < len(s.entries); i++ {
-		entry := s.entries[i]
-		shortcut := ""
-		if !entry.heading {
+	for i, entry := range s.entries {
+		shortcut := " "
+		if entry.selectable() {
 			digit++
 			if digit <= 9 {
-				shortcut = itoa(digit)
+				shortcut = strconv.Itoa(digit)
 			}
 		}
-		if i < s.offset || i >= s.offset+s.height {
+		if i < offset || i >= offset+s.height {
 			continue
 		}
-		var line string
-		switch {
-		case entry.heading:
-			line = m.styles.title.Render(fit(sanitizeLine(entry.label()), inner))
-		default:
-			count := ""
-			if entry.unread > 0 {
-				count = itoa(entry.unread)
-			}
-			indent := "  "
-			if entry.unified {
-				indent = ""
-			}
-			// marker + shortcut + indent + label + space + count == inner
-			labelWidth := inner - 2 - len(indent) - 1 - len(count)
-			label := indent + fit(sanitizeLine(entry.label()), max(labelWidth, 4))
-			marker := " "
-			if i == s.selected {
-				marker = "▸"
-			}
-			text := marker + pad(shortcut, 1) + label + " " + count
-			switch {
-			case i == s.cursor && m.focus == focusSidebar:
-				line = m.styles.cursor.Render(text)
-			case i == s.selected:
-				line = m.styles.active.Render(text)
-			case entry.unread > 0:
-				line = m.styles.unread.Render(text)
-			default:
-				line = text
-			}
+		if entry.kind == entryHeading {
+			lines = append(lines, m.styles.title.Render(fit(sanitizeLine(entry.label()), s.width)))
+			continue
 		}
-		lines = append(lines, fit(line, inner))
+		count := ""
+		if entry.unread > 0 {
+			count = strconv.Itoa(entry.unread)
+		}
+		indent := "  "
+		if entry.kind == entryUnified {
+			indent = ""
+		}
+		marker := " "
+		if i == s.selected {
+			marker = "▸"
+		}
+		// marker + shortcut + indent + label + space + count == width
+		label := fit(sanitizeLine(entry.label()), max(s.width-2-len(indent)-1-len(count), 4))
+		text := marker + shortcut + indent + label + " " + count
+		switch {
+		case i == s.cursor && m.focus == focusSidebar:
+			text = m.styles.title.Render(text)
+		case i == s.selected:
+			text = m.styles.active.Render(text)
+		case entry.unread > 0:
+			text = m.styles.unread.Render(text)
+		}
+		lines = append(lines, text)
 	}
-	for len(lines) < s.height {
-		lines = append(lines, strings.Repeat(" ", inner))
-	}
-	return strings.Join(lines, "\n")
+	return block(lines, s.width, s.height)
 }

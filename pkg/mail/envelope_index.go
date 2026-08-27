@@ -114,7 +114,7 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 		if reason == "" {
 			reason = "unknown error"
 		}
-		Warn(fmt.Sprintf("Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.", reason))
+		c.warn(fmt.Sprintf("Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.", reason))
 	})
 }
 

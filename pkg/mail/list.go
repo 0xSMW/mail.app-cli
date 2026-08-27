@@ -1,49 +1,38 @@
 package mail
 
-import "context"
-
-// ListOptions selects messages from one mailbox.
-type ListOptions struct {
-	Account     string
-	Mailbox     string
-	Limit       int
-	Offset      int
-	UnreadOnly  bool
-	FlaggedOnly bool
-	WithContent bool
-	Since       string
-}
+// These are the option-struct entry points a caller with a context-bound
+// client uses; see WithContext. They forward to the positional methods the
+// rest of the package still uses.
 
 // ListMessages lists one mailbox, newest first, from the Envelope Index when
-// it is readable and from Mail.app otherwise. Cancelling ctx stops any
-// automation subprocess the read is waiting on.
-func (c *Client) ListMessages(ctx context.Context, opts ListOptions) ([]Message, error) {
-	return c.WithContext(ctx).GetMessagesJSON(opts.Account, opts.Mailbox, opts.Limit, opts.Offset, opts.UnreadOnly, opts.FlaggedOnly, opts.WithContent, opts.Since)
+// it is readable and from Mail.app otherwise.
+func (c *Client) ListMessages(req MailboxListRequest) ([]Message, error) {
+	return c.GetMessagesJSON(req.AccountName, req.MailboxName, req.Limit, req.Offset, req.UnreadOnly, req.FlaggedOnly, req.WithContent, req.Since)
 }
 
 // ListUnified lists an inbox-style view (inbox, unread, flagged, sent, drafts,
 // trash, junk) merged across every enabled account.
-func (c *Client) ListUnified(ctx context.Context, kind string, limit, offset int, withContent bool) ([]Message, error) {
-	return c.WithContext(ctx).GetUnifiedMessagesJSON(kind, limit, offset, withContent)
+func (c *Client) ListUnified(kind string, limit int) ([]Message, error) {
+	return c.GetUnifiedMessagesJSON(kind, limit, 0, false)
 }
 
 // MessageDetails fetches one message with its body through Mail.app.
-func (c *Client) MessageDetails(ctx context.Context, account, mailbox, id string) (*Message, error) {
-	return c.WithContext(ctx).GetMessageDetailsJSON(account, mailbox, id)
+func (c *Client) MessageDetails(account, mailbox, id string) (*Message, error) {
+	return c.GetMessageDetailsJSON(account, mailbox, id)
 }
 
 // Mailboxes lists mailboxes for one account, or every account when account is empty.
-func (c *Client) Mailboxes(ctx context.Context, account string) ([]Mailbox, error) {
-	return c.WithContext(ctx).GetMailboxesJSON(account)
+func (c *Client) Mailboxes(account string) ([]Mailbox, error) {
+	return c.GetMailboxesJSON(account)
 }
 
 // Accounts lists Mail.app accounts.
-func (c *Client) Accounts(ctx context.Context) ([]Account, error) {
-	return c.WithContext(ctx).GetAccountsJSON()
+func (c *Client) Accounts() ([]Account, error) {
+	return c.GetAccountsJSON()
 }
 
-// Search runs the standard search within an account and optional mailbox.
-// Partial results are returned rather than refused; check Complete.
-func (c *Client) Search(ctx context.Context, query, account, mailbox string, limit int) (SearchResult, error) {
-	return c.WithContext(ctx).SearchMessagesJSONSinceWithOptions(query, account, mailbox, limit, "", SearchOptions{AllowPartial: true})
+// Search runs the standard search within an account (every account when
+// empty). Partial results are returned rather than refused; check Complete.
+func (c *Client) Search(query, account string, limit int) (SearchResult, error) {
+	return c.SearchMessagesJSONSinceWithOptions(query, account, "", limit, "", SearchOptions{AllowPartial: true})
 }

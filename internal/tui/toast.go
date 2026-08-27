@@ -31,8 +31,12 @@ func notify(text string) tea.Cmd {
 	return func() tea.Msg { return notifyMsg{text: text} }
 }
 
+func notifyProblem(text string) tea.Cmd {
+	return func() tea.Msg { return notifyMsg{text: text, kind: toastError} }
+}
+
 func notifyError(what string, err error) tea.Cmd {
-	return func() tea.Msg { return notifyMsg{text: what + ": " + err.Error(), kind: toastError} }
+	return notifyProblem(what + ": " + err.Error())
 }
 
 func (m *model) showToast(msg notifyMsg) tea.Cmd {
@@ -50,12 +54,9 @@ func (m model) toastView() string {
 	if m.toast.text == "" {
 		return ""
 	}
-	style := m.styles.frame
-	text := m.styles.positive
+	frame, text := m.styles.frame, m.styles.positive
 	if m.toast.kind == toastError {
-		style = style.BorderForeground(m.styles.palette.alert)
-		text = m.styles.error
+		frame, text = m.styles.errorFrame, m.styles.error
 	}
-	body := truncate(sanitizeLine(m.toast.text), max(m.width/2, 20))
-	return style.Render(text.Render(body))
+	return frame.Render(text.Render(truncate(sanitizeLine(m.toast.text), max(m.width/2, 20))))
 }

@@ -40,39 +40,62 @@ func (c *confirmModal) helpBindings() []helpBinding {
 	return []helpBinding{{"y", "confirm"}, {"n", "cancel"}}
 }
 
+// --- a single text input, shared by the picker and the search box ---
+
+type inputBox struct {
+	input textinput.Model
+}
+
+func newInputBox(prompt, placeholder string) inputBox {
+	input := textinput.New()
+	input.Prompt = prompt
+	input.Placeholder = placeholder
+	input.Focus()
+	return inputBox{input: input}
+}
+
+func (b *inputBox) handleMsg(_ *model, msg tea.Msg) (tea.Cmd, bool) {
+	var cmd tea.Cmd
+	b.input, cmd = b.input.Update(msg)
+	return cmd, cmd != nil
+}
+
+func (b *inputBox) update(msg tea.Msg) tea.Cmd {
+	var cmd tea.Cmd
+	b.input, cmd = b.input.Update(msg)
+	return cmd
+}
+
 // --- mailbox picker ---
 
 type mailboxPicker struct {
+	inputBox
 	title   string
 	names   []string
-	filter  textinput.Model
+	lowered []string
 	cursor  int
 	choose  func(*model, string) tea.Cmd
-	height  int
 	visible []string
 }
 
-func newMailboxPicker(s styles, title string, names []string, choose func(*model, string) tea.Cmd) *mailboxPicker {
-	input := textinput.New()
-	input.Prompt = "› "
-	input.Placeholder = "type to filter"
-	input.Focus()
-	p := &mailboxPicker{title: title, names: names, filter: input, choose: choose, height: 12}
+func newMailboxPicker(title string, names []string, choose func(*model, string) tea.Cmd) *mailboxPicker {
+	p := &mailboxPicker{inputBox: newInputBox("› ", "type to filter"), title: title, names: names, choose: choose}
+	for _, name := range names {
+		p.lowered = append(p.lowered, strings.ToLower(name))
+	}
 	p.refilter()
 	return p
 }
 
 func (p *mailboxPicker) refilter() {
-	needle := strings.ToLower(strings.TrimSpace(p.filter.Value()))
+	needle := strings.ToLower(strings.TrimSpace(p.input.Value()))
 	p.visible = p.visible[:0]
-	for _, name := range p.names {
-		if needle == "" || strings.Contains(strings.ToLower(name), needle) {
+	for i, name := range p.names {
+		if needle == "" || strings.Contains(p.lowered[i], needle) {
 			p.visible = append(p.visible, name)
 		}
 	}
-	if p.cursor >= len(p.visible) {
-		p.cursor = max(len(p.visible)-1, 0)
-	}
+	p.cursor = min(p.cursor, max(len(p.visible)-1, 0))
 }
 
 func (p *mailboxPicker) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) {
@@ -85,42 +108,29 @@ func (p *mailboxPicker) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool)
 		}
 		return nil, true
 	case "down", "ctrl+n":
-		if p.cursor < len(p.visible)-1 {
-			p.cursor++
-		}
+		p.cursor = min(p.cursor+1, max(len(p.visible)-1, 0))
 		return nil, true
 	case "up", "ctrl+p":
-		if p.cursor > 0 {
-			p.cursor--
-		}
+		p.cursor = max(p.cursor-1, 0)
 		return nil, true
 	}
-	var cmd tea.Cmd
-	p.filter, cmd = p.filter.Update(msg)
+	cmd := p.update(msg)
 	p.refilter()
 	return cmd, true
 }
 
-func (p *mailboxPicker) handleMsg(_ *model, msg tea.Msg) (tea.Cmd, bool) {
-	var cmd tea.Cmd
-	p.filter, cmd = p.filter.Update(msg)
-	return cmd, cmd != nil
-}
+const pickerRows = 12
 
 func (p *mailboxPicker) view(m *model) string {
 	var b strings.Builder
-	b.WriteString(m.styles.title.Render(p.title) + "\n")
-	b.WriteString(p.filter.View() + "\n\n")
-	start := 0
-	if p.cursor >= p.height {
-		start = p.cursor - p.height + 1
-	}
-	for i := start; i < len(p.visible) && i < start+p.height; i++ {
-		line := "  " + truncate(p.visible[i], 40)
+	b.WriteString(m.styles.title.Render(p.title) + "\n" + p.input.View() + "\n\n")
+	start := max(p.cursor-pickerRows+1, 0)
+	for i := start; i < len(p.visible) && i < start+pickerRows; i++ {
 		if i == p.cursor {
-			line = m.styles.cursor.Render("▸ " + truncate(p.visible[i], 40))
+			b.WriteString(m.styles.title.Render("▸ "+truncate(p.visible[i], 40)) + "\n")
+		} else {
+			b.WriteString("  " + truncate(p.visible[i], 40) + "\n")
 		}
-		b.WriteString(line + "\n")
 	}
 	if len(p.visible) == 0 {
 		b.WriteString(m.styles.muted.Render("  no mailbox matches") + "\n")
@@ -135,7 +145,7 @@ func (p *mailboxPicker) helpBindings() []helpBinding {
 // --- search ---
 
 type searchModal struct {
-	input textinput.Model
+	inputBox
 }
 
 type searchDoneMsg struct {
@@ -145,12 +155,8 @@ type searchDoneMsg struct {
 	silent bool
 }
 
-func newSearchModal(s styles) *searchModal {
-	input := textinput.New()
-	input.Prompt = "/ "
-	input.Placeholder = "words to find in subject, sender, or summary"
-	input.Focus()
-	return &searchModal{input: input}
+func newSearchModal() *searchModal {
+	return &searchModal{inputBox: newInputBox("/ ", "words to find in subject, sender, or summary")}
 }
 
 func (sm *searchModal) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) {
@@ -164,21 +170,13 @@ func (sm *searchModal) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) 
 		}
 		return m.runSearch(query, false), false
 	}
-	var cmd tea.Cmd
-	sm.input, cmd = sm.input.Update(msg)
-	return cmd, true
-}
-
-func (sm *searchModal) handleMsg(_ *model, msg tea.Msg) (tea.Cmd, bool) {
-	var cmd tea.Cmd
-	sm.input, cmd = sm.input.Update(msg)
-	return cmd, cmd != nil
+	return sm.update(msg), true
 }
 
 func (sm *searchModal) view(m *model) string {
 	sm.input.SetWidth(max(min(m.width-10, 70), 20))
 	scope := "all accounts"
-	if entry := m.sidebar.current(); !entry.unified {
+	if entry := m.sidebar.current(); entry.kind != entryUnified {
 		scope = entry.account
 	}
 	return m.styles.frame.Render(m.styles.title.Render("Search "+scope) + "\n" + sm.input.View())
@@ -191,20 +189,17 @@ func (sm *searchModal) helpBindings() []helpBinding {
 // runSearch searches the account in scope. silent re-runs keep the cursor.
 func (m *model) runSearch(query string, silent bool) tea.Cmd {
 	account := ""
-	if entry := m.sidebar.current(); !entry.unified {
+	if entry := m.sidebar.current(); entry.kind != entryUnified {
 		account = entry.account
 	}
 	if !silent {
 		m.closeReader()
 	}
 	m.listLane.abandon()
-	id, ctx := m.searchLane.begin(m.ctx)
-	if silent {
-		m.searchLane.loading = false
-	}
-	client := m.client
+	id, ctx := m.searchLane.begin(m.ctx, silent)
+	client := m.client.WithContext(ctx)
 	return func() tea.Msg {
-		result, err := client.Search(ctx, query, account, "", 100)
+		result, err := client.Search(query, account, 100)
 		return searchDoneMsg{requestResult: requestResult{id, err}, query: query, result: result, silent: silent}
 	}
 }
@@ -214,17 +209,15 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, cmd
 	}
-	if msg.silent && m.list.mode == listSearch && m.list.query == msg.query {
-		m.list.setMessages(msg.result.Messages, true, m.list.source)
-		m.list.partial = len(msg.result.FailedMailboxes)
-	} else {
-		m.list.enterSearch(msg.query, msg.result.Messages, len(msg.result.FailedMailboxes))
+	keepCursor := msg.silent && m.list.source.search == msg.query
+	m.list.setMessages(msg.result.Messages, keepCursor, listSource{search: msg.query})
+	if !keepCursor {
+		m.list.clearSelection()
 	}
 	m.focus = focusList
+	m.notice = ""
 	if !msg.result.Complete {
 		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be searched"
-	} else {
-		m.notice = ""
 	}
 	return m, nil
 }

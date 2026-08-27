@@ -187,7 +187,7 @@ func showMessage(id string, metadataOnly bool) error {
 	})
 }
 
-func newIDVerb(use, short, action string, build func() (batchOptions, mutator)) *cobra.Command {
+func newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutator)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use + " <message-id>...",
 		Short: short,
@@ -206,32 +206,32 @@ func newIDVerb(use, short, action string, build func() (batchOptions, mutator)) 
 	return cmd
 }
 
-var seenCmd = newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mutator) {
-	return batchOptions{Read: true}, markMutator(true)
+var seenCmd = newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Read: true}, mail.MarkMutator(true)
 })
 
-var unseenCmd = newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mutator) {
-	return batchOptions{Read: false}, markMutator(false)
+var unseenCmd = newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Read: false}, mail.MarkMutator(false)
 })
 
-var flagCmd = newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mutator) {
-	return batchOptions{Flagged: true}, flagMutator(true)
+var flagCmd = newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Flagged: true}, mail.FlagMutator(true)
 })
 
-var unflagCmd = newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mutator) {
-	return batchOptions{Flagged: false}, flagMutator(false)
+var unflagCmd = newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Flagged: false}, mail.FlagMutator(false)
 })
 
-var archiveCmd = newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mutator) {
-	return batchOptions{}, archiveMutator(true)
+var archiveCmd = newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mail.Mutator) {
+	return batchOptions{}, mail.ArchiveMutator(true)
 })
 
-var deleteCmd = newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mutator) {
-	return batchOptions{}, deleteMutator
+var deleteCmd = newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mail.Mutator) {
+	return batchOptions{}, mail.DeleteMutator
 })
 
-var moveCmd = newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mutator) {
-	return batchOptions{TargetMailbox: verbMoveTo}, moveMutator(true)
+var moveCmd = newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mail.Mutator) {
+	return batchOptions{TargetMailbox: verbMoveTo}, mail.MoveMutator(true)
 })
 
 func init() {

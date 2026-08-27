@@ -17,7 +17,7 @@ func (m model) helpView() string {
 	}
 	var parts []string
 	for _, b := range m.helpBindings() {
-		parts = append(parts, m.styles.helpKey.Render(b.key)+" "+m.styles.helpDesc.Render(b.desc))
+		parts = append(parts, m.styles.helpKey.Render(b.key)+" "+m.styles.chrome.Render(b.desc))
 	}
 	line := strings.Join(parts, m.styles.muted.Render("  "))
 	if m.width > 0 {
@@ -45,7 +45,7 @@ func (m model) helpBindings() []helpBinding {
 		{"j/k", "move"}, {"enter", "read"}, {"space", "select"}, {"e", "archive"}, {"#", "trash"}, {"m", "move"}, {"u", "read/unread"}, {"!", "flag"},
 		{"/", "search"}, {"c", "compose"}, {"r", "reply"}, {"1-9", "mailbox"}, {"tab", "sidebar"}, {"ctrl+r", "refresh"}, {"q", "quit"},
 	}
-	if m.list.mode == listSearch {
+	if m.list.source.search != "" {
 		bindings = append([]helpBinding{{"esc", "leave search"}}, bindings...)
 	}
 	return bindings

@@ -269,8 +269,8 @@ func prepare(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	mail.Warn = writer.AddNotice
 	mailClient = mail.NewClient()
+	mailClient.SetWarn(writer.AddNotice)
 	return nil
 }
 

@@ -95,13 +95,10 @@ func accountExplicit() bool {
 
 // messageRef is a message ID with the account and mailbox it can be reached in.
 type messageRef struct {
-	ID      string
-	Account string
-	Mailbox string
-	// ArchiveMailbox is the mailbox archive should act from (INBOX or the
-	// backing mailbox), never a user label.
-	ArchiveMailbox string
-	Envelope       *mail.Message
+	ID       string
+	Account  string
+	Mailbox  string
+	Envelope *mail.Message
 }
 
 // locateMessages resolves IDs to accounts and mailboxes. An explicit
@@ -125,7 +122,7 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		}
 		refs := make([]messageRef, 0, len(ids))
 		for _, id := range ids {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope(), ArchiveMailbox: mailboxInScope()})
+			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
 		}
 		return refs, nil, nil
 	}
@@ -156,7 +153,7 @@ func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocatio
 				notices = append(notices, fmt.Sprintf("message %s is in account %q, not the configured %q", id, location.Account, configured))
 			}
 			envelope := location.Envelope
-			refs = append(refs, messageRef{ID: id, Account: location.Account, Mailbox: location.Mailbox, ArchiveMailbox: location.ArchiveMailbox, Envelope: &envelope})
+			refs = append(refs, messageRef{ID: id, Account: location.Account, Mailbox: location.Mailbox, Envelope: &envelope})
 			continue
 		}
 		missing = append(missing, id)
@@ -171,7 +168,7 @@ func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocatio
 			return nil, nil, accountErr
 		}
 		for _, id := range missing {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope(), ArchiveMailbox: mailboxInScope()})
+			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
 		}
 	}
 	return refs, notices, nil

@@ -14,6 +14,7 @@ type clientState struct {
 	indexFallbackWarningOnce sync.Once
 	contentWarningOnce       sync.Once
 	recentCleanupWarningOnce sync.Once
+	warn                     func(string)
 }
 
 // Client talks to Mail.app through osascript and to Mail's Envelope Index
@@ -43,4 +44,9 @@ func (c *Client) Context() context.Context {
 		return context.Background()
 	}
 	return c.ctx
+}
+
+// Done reports whether the client's context has been cancelled.
+func (c *Client) Done() error {
+	return c.Context().Err()
 }

@@ -125,7 +125,7 @@ var messagesMarkCmd = &cobra.Command{
 	Short: "Mark a message read (default) or unread with --read=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "mark", Read: msgRead, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, markMutator(msgRead))
+		return mutateByIDs(args, batchOptions{Action: "mark", Read: msgRead, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.MarkMutator(msgRead))
 	},
 }
 
@@ -134,7 +134,7 @@ var messagesFlagCmd = &cobra.Command{
 	Short: "Flag a message (default) or unflag with --flagged=false",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "flag", Flagged: msgFlaggedSet, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, flagMutator(msgFlaggedSet))
+		return mutateByIDs(args, batchOptions{Action: "flag", Flagged: msgFlaggedSet, DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.FlagMutator(msgFlaggedSet))
 	},
 }
 
@@ -143,7 +143,7 @@ var messagesDeleteCmd = &cobra.Command{
 	Short: "Move a message to the trash",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "delete", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, deleteMutator)
+		return mutateByIDs(args, batchOptions{Action: "delete", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.DeleteMutator)
 	},
 }
 
@@ -152,7 +152,7 @@ var messagesArchiveCmd = &cobra.Command{
 	Short: "Archive a message",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args, batchOptions{Action: "archive", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, archiveMutator(true))
+		return mutateByIDs(args, batchOptions{Action: "archive", DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.ArchiveMutator(true))
 	},
 }
 
@@ -161,7 +161,7 @@ var messagesMoveCmd = &cobra.Command{
 	Short: "Move a message to another mailbox",
 	Args:  cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Verify: msgVerify, Journal: true}, moveMutator(true))
+		return mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.MoveMutator(true))
 	},
 }
 

@@ -1,35 +1,21 @@
 package tui
 
 import (
-	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
-type listMode int
-
-const (
-	listMailbox listMode = iota
-	listSearch
-)
-
 type list struct {
-	messages []mail.Message
-	cursor   int
-	offset   int
-	selected map[string]bool
-	width    int
-	height   int
-	mode     listMode
-	query    string
-	source   sidebarEntry
-	partial  int
-}
-
-func newList() list {
-	return list{selected: map[string]bool{}}
+	messages  []mail.Message
+	cursor    int
+	selected  map[string]bool
+	width     int
+	height    int
+	source    listSource
+	dateWidth int
 }
 
 func (l *list) resize(width, height int) {
@@ -41,43 +27,44 @@ func (l *list) pageSize() int {
 }
 
 func (l *list) title() string {
-	switch {
-	case l.mode == listSearch:
-		return "search: " + sanitizeLine(l.query) + "  (" + plural(len(l.messages), "match") + ")"
-	case l.source.unified:
-		return "All inboxes  (" + plural(len(l.messages), "message") + ")"
-	default:
-		return sanitizeLine(l.source.account+" / "+l.source.mailbox) + "  (" + plural(len(l.messages), "message") + ")"
+	noun := "message"
+	if l.source.search != "" {
+		noun = "match"
 	}
+	return l.source.label() + "  (" + plural(len(l.messages), noun) + ")"
 }
 
-func (l *list) setMessages(messages []mail.Message, keepCursor bool, source sidebarEntry) {
+func (l *list) setMessages(messages []mail.Message, keepCursor bool, source listSource) {
 	currentID := ""
 	if current := l.current(); current != nil {
 		currentID = current.ID
 	}
 	l.messages = messages
 	l.source = source
-	if !keepCursor {
-		l.cursor, l.offset = 0, 0
-		return
-	}
 	l.cursor = 0
-	for i, m := range messages {
-		if m.ID == currentID {
-			l.cursor = i
+	if keepCursor {
+		for i, m := range messages {
+			if m.ID == currentID {
+				l.cursor = i
+			}
 		}
 	}
-	l.clampCursor()
+	// Old years need the full date; this year fits "Jan 02".
+	l.dateWidth = 6
+	now := time.Now()
+	for _, m := range messages {
+		if len(formatDate(m.DateReceived, now)) > 6 {
+			l.dateWidth = 10
+			break
+		}
+	}
+	if l.selected == nil {
+		l.selected = map[string]bool{}
+	}
 }
 
 func (l *list) clampCursor() {
-	if l.cursor >= len(l.messages) {
-		l.cursor = len(l.messages) - 1
-	}
-	if l.cursor < 0 {
-		l.cursor = 0
-	}
+	l.cursor = min(max(l.cursor, 0), max(len(l.messages)-1, 0))
 }
 
 func (l *list) current() *mail.Message {
@@ -153,73 +140,59 @@ func (l *list) update(keys map[string]bool, apply func(*mail.Message)) {
 	}
 }
 
-func (l *list) enterSearch(query string, messages []mail.Message, failed int) {
-	l.mode = listSearch
-	l.query = query
-	l.partial = failed
-	l.messages = messages
-	l.cursor, l.offset = 0, 0
+func (l *list) enterSearch(query string, messages []mail.Message) {
+	l.setMessages(messages, false, listSource{search: query})
 	l.clearSelection()
 }
 
 func (l *list) leaveSearch() {
-	if l.mode != listSearch {
+	if l.source.search == "" {
 		return
 	}
-	l.mode = listMailbox
-	l.query = ""
-	l.messages = nil
-	l.cursor, l.offset = 0, 0
+	l.setMessages(nil, false, listSource{})
 	l.clearSelection()
 }
 
 func (l *list) move(delta int) {
-	if len(l.messages) == 0 {
-		return
-	}
-	l.cursor = min(max(l.cursor+delta, 0), len(l.messages)-1)
+	l.cursor += delta
+	l.clampCursor()
 }
 
 func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		l.move(1)
-		return m.previewIfOpen()
 	case "k", "up":
 		l.move(-1)
-		return m.previewIfOpen()
 	case "g", "home":
 		l.cursor = 0
-		return m.previewIfOpen()
 	case "G", "end":
-		l.cursor = max(len(l.messages)-1, 0)
-		return m.previewIfOpen()
+		l.cursor = len(l.messages) - 1
+		l.clampCursor()
 	case "pgdown", "ctrl+d":
 		l.move(l.height - 1)
-		return m.previewIfOpen()
 	case "pgup", "ctrl+u":
 		l.move(-(l.height - 1))
-		return m.previewIfOpen()
 	case "enter", "l", "right":
 		return m.openReader()
 	case "space":
 		l.toggleSelected()
 		l.move(1)
+		return nil
 	case "esc":
-		if l.mode == listSearch {
+		switch {
+		case l.source.search != "":
 			l.leaveSearch()
 			m.closeReader()
 			return m.reloadList(false)
-		}
-		if len(l.selected) > 0 {
+		case len(l.selected) > 0:
 			l.clearSelection()
-			return nil
-		}
-		if m.reader.open {
+		case m.reader.open:
 			m.closeReader()
 		}
+		return nil
 	case "q":
-		if l.mode == listSearch {
+		if l.source.search != "" {
 			l.leaveSearch()
 			m.closeReader()
 			return m.reloadList(false)
@@ -229,14 +202,11 @@ func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 		if m.sidebarVisible() {
 			m.focus = focusSidebar
 		}
+		return nil
 	default:
 		return m.handleActionKey(msg.String())
 	}
-	return nil
-}
-
-// previewIfOpen refreshes the reader when it is showing beside the list.
-func (m *model) previewIfOpen() tea.Cmd {
+	// A cursor move refreshes the reader when it is showing beside the list.
 	if m.reader.open {
 		return m.requestBody()
 	}
@@ -244,53 +214,34 @@ func (m *model) previewIfOpen() tea.Cmd {
 }
 
 func (l *list) view(m *model) string {
-	if l.cursor < l.offset {
-		l.offset = l.cursor
-	}
-	if l.cursor >= l.offset+l.height {
-		l.offset = l.cursor - l.height + 1
-	}
 	if len(l.messages) == 0 {
 		text := "no messages"
-		if m.listLane.loading {
+		switch {
+		case m.listLane.loading || m.searchLane.loading:
 			text = "loading…"
-		}
-		if l.mode == listSearch {
+		case l.source.search != "":
 			text = "no matches"
 		}
-		lines := []string{m.styles.muted.Render(fit(text, l.width))}
-		for len(lines) < l.height {
-			lines = append(lines, strings.Repeat(" ", l.width))
-		}
-		return strings.Join(lines, "\n")
+		return block([]string{m.styles.muted.Render(text)}, l.width, l.height)
 	}
 
-	showLocation := l.source.unified || l.mode == listSearch
-	dateWidth := 6
-	for _, msg := range l.messages {
-		if len(formatDate(msg.DateReceived)) > dateWidth {
-			dateWidth = 10
-			break
-		}
-	}
+	showLocation := l.source.showsLocation()
 	fromWidth := min(max(l.width/4, 12), 26)
 	locWidth := 0
 	if showLocation {
-		locWidth = min(max(l.width/5, 10), 24)
+		locWidth = min(max(l.width/5, 10), 24) + 1
 	}
-	// marker(1) + flags(2) + date + from + subject + location, with single-space gaps
-	subjectWidth := l.width - 1 - 2 - dateWidth - fromWidth - locWidth - 4
-	if showLocation {
-		subjectWidth--
-	}
-	subjectWidth = max(subjectWidth, 8)
+	// marker(1) + flags(2) + gaps + date + from + subject + location
+	subjectWidth := max(l.width-1-2-l.dateWidth-fromWidth-locWidth-4, 8)
+	offset := max(l.cursor-l.height+1, 0)
+	now := time.Now()
 
 	var lines []string
-	for i := l.offset; i < len(l.messages) && i < l.offset+l.height; i++ {
+	for i := offset; i < len(l.messages) && i < offset+l.height; i++ {
 		msg := l.messages[i]
 		marker := " "
 		if l.selected[bodyKey(msg)] {
-			marker = m.styles.selected.Render("✓")
+			marker = m.styles.active.Render("✓")
 		} else if i == l.cursor {
 			marker = "▸"
 		}
@@ -306,29 +257,26 @@ func (l *list) view(m *model) string {
 		if subject == "" {
 			subject = "(no subject)"
 		}
-		if msg.Snippet != "" && subjectWidth > 40 {
-			subject = fit(subject, min(len([]rune(subject)), subjectWidth))
-			remaining := subjectWidth - len([]rune(subject)) - 2
-			if remaining > 8 {
-				subject += " " + m.styles.muted.Render(truncate(sanitizeLine(msg.Snippet), remaining))
+		if snippet := sanitizeLine(msg.Snippet); snippet != "" && subjectWidth > 40 {
+			subject = truncate(subject, subjectWidth)
+			if remaining := subjectWidth - len([]rune(subject)) - 1; remaining > 8 {
+				subject += " " + m.styles.muted.Render(truncate(snippet, remaining))
 			}
 		}
-		from := fit(sanitizeLine(mail.ParseSender(msg.Sender).Name), fromWidth)
-		date := fit(formatDate(msg.DateReceived), dateWidth)
-		row := marker + unread + flag + " " + date + " " + from + " " + fit(subject, subjectWidth)
+		row := marker + unread + flag + " " +
+			fit(formatDate(msg.DateReceived, now), l.dateWidth) + " " +
+			fit(sanitizeLine(mail.ParseSender(msg.Sender).Name), fromWidth) + " " +
+			fit(subject, subjectWidth)
 		if showLocation {
-			row += " " + m.styles.muted.Render(fit(sanitizeLine(msg.Account+"/"+msg.Mailbox), locWidth))
+			row += " " + m.styles.muted.Render(fit(sanitizeLine(msg.Account+"/"+msg.Mailbox), locWidth-1))
 		}
 		switch {
 		case i == l.cursor && m.focus == focusList:
-			row = m.styles.cursor.Render(row)
+			row = m.styles.title.Render(row)
 		case !msg.Read:
 			row = m.styles.unread.Render(row)
 		}
-		lines = append(lines, fit(row, l.width))
+		lines = append(lines, row)
 	}
-	for len(lines) < l.height {
-		lines = append(lines, strings.Repeat(" ", l.width))
-	}
-	return strings.Join(lines, "\n")
+	return block(lines, l.width, l.height)
 }

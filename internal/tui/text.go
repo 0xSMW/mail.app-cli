@@ -6,20 +6,28 @@ import (
 	"unicode"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
+
+func unsafeRune(r rune) bool {
+	return r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || (unicode.Is(unicode.Cf, r) && r != '‍')
+}
 
 // sanitizeLine strips control characters and escape sequences from text
 // that came from a message, so a hostile subject cannot drive the terminal.
 func sanitizeLine(s string) string {
+	if strings.IndexFunc(s, unsafeRune) < 0 {
+		return strings.TrimSpace(s)
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
 		switch {
 		case r == '\n' || r == '\r' || r == '\t':
 			b.WriteRune(' ')
-		case r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0):
-			continue
-		case unicode.Is(unicode.Cf, r) && r != '‍':
+		case unsafeRune(r):
 			continue
 		default:
 			b.WriteRune(r)
@@ -60,62 +68,43 @@ func fit(s string, width int) string {
 	return pad(truncate(s, width), width)
 }
 
-func formatDate(value string) string {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z"} {
-		if t, err := time.Parse(layout, value); err == nil {
-			local := t.Local()
-			now := time.Now()
-			switch {
-			case local.YearDay() == now.YearDay() && local.Year() == now.Year():
-				return local.Format("15:04")
-			case local.Year() == now.Year():
-				return local.Format("Jan 02")
-			default:
-				return local.Format("2006-01-02")
-			}
+// block pads lines to a width-by-height rectangle so panes join cleanly.
+func block(lines []string, width, height int) string {
+	out := make([]string, 0, height)
+	for i := 0; i < height; i++ {
+		if i < len(lines) {
+			out = append(out, fit(lines[i], width))
+		} else {
+			out = append(out, strings.Repeat(" ", width))
 		}
 	}
-	if len(value) >= 10 {
-		return value[:10]
+	return strings.Join(out, "\n")
+}
+
+func formatDate(value string, now time.Time) string {
+	t, ok := mail.ParseMessageTime(value)
+	if !ok {
+		if len(value) >= 10 {
+			return value[:10]
+		}
+		return value
 	}
-	return value
+	local := t.Local()
+	switch {
+	case local.YearDay() == now.YearDay() && local.Year() == now.Year():
+		return local.Format("15:04")
+	case local.Year() == now.Year():
+		return local.Format("Jan 02")
+	default:
+		return local.Format("2006-01-02")
+	}
 }
 
 func formatLongDate(value string) string {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z"} {
-		if t, err := time.Parse(layout, value); err == nil {
-			return t.Local().Format("Mon, 02 Jan 2006 15:04")
-		}
+	if t, ok := mail.ParseMessageTime(value); ok {
+		return t.Local().Format("Mon, 02 Jan 2006 15:04")
 	}
 	return value
 }
 
-func plural(n int, singular string) string {
-	if n == 1 {
-		return "1 " + singular
-	}
-	suffix := "s"
-	if strings.HasSuffix(singular, "x") || strings.HasSuffix(singular, "ch") || strings.HasSuffix(singular, "s") {
-		suffix = "es"
-	}
-	return itoa(n) + " " + singular + suffix
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
-	}
-	if neg {
-		return "-" + string(digits)
-	}
-	return string(digits)
-}
+func plural(n int, singular string) string { return output.Plural(n, singular) }

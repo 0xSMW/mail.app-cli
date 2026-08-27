@@ -115,9 +115,6 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	if timeout <= 0 {
 		timeout = defaultAutomationTimeout
 	}
-	if parent == nil {
-		parent = context.Background()
-	}
 
 	lockCtx, cancelLockWait := context.WithTimeout(parent, automationLockTimeout)
 	defer cancelLockWait()

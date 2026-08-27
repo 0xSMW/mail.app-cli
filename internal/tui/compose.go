@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -30,24 +31,11 @@ const (
 
 var composeLabels = []string{"To", "Cc", "Bcc", "Subject"}
 
-type composeDoneMsg struct {
-	requestResult
-	label string
-	draft bool
-}
+var composeTitles = map[composeMode]string{composeNew: "New message", composeReply: "Reply", composeReplyAll: "Reply all", composeForward: "Forward"}
 
-// composeModal is the editor for a new message, reply, or forward. Sending
-// happens in a command so the screen stays live.
-type composeModal struct {
-	mode    composeMode
-	account string
-	inputs  []textinput.Model
-	body    textarea.Model
-	focus   int
-	sending bool
-	status  string
-	width   int
-	height  int
+type composeDoneMsg struct {
+	err   error
+	label string
 }
 
 // pendingCompose is a reply or forward waiting for the body of the message
@@ -56,6 +44,19 @@ type composeModal struct {
 type pendingCompose struct {
 	mode composeMode
 	key  string
+}
+
+// composeModal is the editor for a new message, reply, or forward. Sending
+// happens in a queued write so the screen stays live.
+type composeModal struct {
+	mode    composeMode
+	account string
+	inputs  []textinput.Model
+	body    textarea.Model
+	focus   int
+	sending bool
+	status  string
+	problem bool
 }
 
 // openCompose opens the editor. Replies and forwards quote the message under
@@ -68,7 +69,7 @@ func (m *model) openCompose(mode composeMode) tea.Cmd {
 	if current == nil {
 		return notify("select a message first")
 	}
-	if cached, ok := m.reader.cache[bodyKey(*current)]; ok {
+	if cached, ok := m.reader.cached(bodyKey(*current)); ok {
 		return m.composeFor(mode, cached)
 	}
 	m.pendingCompose = &pendingCompose{mode: mode, key: bodyKey(*current)}
@@ -81,18 +82,18 @@ func (m *model) composeFor(mode composeMode, original *mail.Message) tea.Cmd {
 		account = original.Account
 	}
 	if account == "" {
-		if len(m.sidebar.accounts) == 0 {
-			return notify("no account to send from")
-		}
 		for _, a := range m.sidebar.accounts {
 			if a.Enabled {
 				account = a.Name
 				break
 			}
 		}
+		if account == "" {
+			return notify("no account to send from")
+		}
 	}
 	c := newComposeModal(mode, account, original, m.sidebar.accountEmail(account))
-	c.resize(m.width, m.contentHeight())
+	c.resize(m.width, contentHeight(m.height, m.helpView()))
 	m.modal = c
 	return c.focusCurrent()
 }
@@ -103,7 +104,7 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 		in := textinput.New()
 		in.Prompt = ""
 		in.Placeholder = strings.ToLower(label)
-		if label == "To" || label == "Cc" || label == "Bcc" {
+		if label != "Subject" {
 			in.Placeholder = "addresses, comma separated"
 		}
 		c.inputs = append(c.inputs, in)
@@ -121,9 +122,6 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 	if mode == composeReply || mode == composeReplyAll {
 		c.focus = fieldBody
 	}
-	if mode == composeForward {
-		c.focus = fieldTo
-	}
 	return c
 }
 
@@ -132,27 +130,14 @@ func (c *composeModal) prefill(original *mail.Message, ownAddress string) {
 	subject := strings.TrimSpace(original.Subject)
 	switch c.mode {
 	case composeReply, composeReplyAll:
-		c.inputs[fieldTo].SetValue(sender.Email)
+		to := []string{sender.Email}
+		if c.mode == composeReplyAll {
+			to = append(to, others(original.ToRecipients, ownAddress, sender.Email)...)
+			c.inputs[fieldCc].SetValue(strings.Join(others(original.CcRecipients, ownAddress, sender.Email), ", "))
+		}
+		c.inputs[fieldTo].SetValue(strings.Join(to, ", "))
 		if !strings.HasPrefix(strings.ToLower(subject), "re:") {
 			subject = "Re: " + subject
-		}
-		if c.mode == composeReplyAll {
-			var to []string
-			for _, addr := range original.ToRecipients {
-				if a := strings.ToLower(strings.TrimSpace(addr)); a != "" && a != ownAddress && a != sender.Email {
-					to = append(to, a)
-				}
-			}
-			if len(to) > 0 {
-				c.inputs[fieldTo].SetValue(sender.Email + ", " + strings.Join(to, ", "))
-			}
-			var cc []string
-			for _, addr := range original.CcRecipients {
-				if a := strings.ToLower(strings.TrimSpace(addr)); a != "" && a != ownAddress {
-					cc = append(cc, a)
-				}
-			}
-			c.inputs[fieldCc].SetValue(strings.Join(cc, ", "))
 		}
 	case composeForward:
 		if !strings.HasPrefix(strings.ToLower(subject), "fwd:") {
@@ -164,10 +149,21 @@ func (c *composeModal) prefill(original *mail.Message, ownAddress string) {
 	c.body.CursorStart()
 }
 
+// others lower-cases addresses and drops the ones already covered.
+func others(addresses []string, skip ...string) []string {
+	var out []string
+	for _, addr := range addresses {
+		a := strings.ToLower(strings.TrimSpace(addr))
+		if a != "" && !slices.Contains(skip, a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func quote(original *mail.Message) string {
-	header := fmt.Sprintf("On %s, %s wrote:", formatLongDate(original.DateReceived), strings.TrimSpace(original.Sender))
 	var b strings.Builder
-	b.WriteString(header + "\n")
+	fmt.Fprintf(&b, "On %s, %s wrote:\n", formatLongDate(original.DateReceived), strings.TrimSpace(original.Sender))
 	for _, line := range strings.Split(sanitizeBody(original.Content), "\n") {
 		b.WriteString("> " + line + "\n")
 	}
@@ -175,7 +171,6 @@ func quote(original *mail.Message) string {
 }
 
 func (c *composeModal) resize(width, height int) {
-	c.width, c.height = width, height
 	inner := max(min(width-8, 100), 30)
 	for i := range c.inputs {
 		c.inputs[i].SetWidth(inner - 10)
@@ -214,7 +209,7 @@ func (c *composeModal) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) 
 		return c.submit(m, true), true
 	case "enter":
 		if c.focus != fieldBody {
-			c.focus = (c.focus + 1) % (fieldBody + 1)
+			c.focus++
 			return c.focusCurrent(), true
 		}
 	}
@@ -248,6 +243,12 @@ func parseAddressList(value string) []string {
 	return out
 }
 
+func (c *composeModal) fail(field int, status string) tea.Cmd {
+	c.status, c.problem = status, true
+	c.focus = field
+	return c.focusCurrent()
+}
+
 func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 	to := parseAddressList(c.inputs[fieldTo].Value())
 	cc := parseAddressList(c.inputs[fieldCc].Value())
@@ -256,72 +257,59 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 	body := strings.TrimSpace(c.body.Value())
 	switch {
 	case len(to) == 0:
-		c.status = "at least one To address is needed"
-		c.focus = fieldTo
-		return c.focusCurrent()
+		return c.fail(fieldTo, "at least one To address is needed")
 	case subject == "" && !draft:
-		c.status = "a subject is needed"
-		c.focus = fieldSubject
-		return c.focusCurrent()
+		return c.fail(fieldSubject, "a subject is needed")
 	}
-	for _, addr := range append(append(append([]string{}, to...), cc...), bcc...) {
+	for _, addr := range slices.Concat(to, cc, bcc) {
 		if !strings.Contains(addr, "@") {
-			c.status = "not an address: " + addr
-			return nil
+			return c.fail(c.focus, "not an address: "+addr)
 		}
 	}
-	c.sending = true
+	c.sending, c.problem = true, false
 	c.status = "sending…"
 	if draft {
 		c.status = "saving draft… (Mail.app takes a few seconds)"
 	}
 	client := m.client.WithContext(m.writeCtx)
 	account := c.account
-	return m.enqueueWrite(func() tea.Msg {
-		label := fmt.Sprintf("Sent %q to %s", subject, strings.Join(to, ", "))
-		var err error
+	return m.writes.push(func() tea.Msg {
 		if draft {
-			_, err = client.CreateDraft(mail.DraftInput{Account: account, Subject: subject, Body: body, To: to, Cc: cc, Bcc: bcc})
-			label = "Saved draft " + subject
-		} else {
-			err = client.SendMessage(account, subject, body, to, cc, bcc, nil)
+			_, err := client.CreateDraft(mail.DraftInput{Account: account, Subject: subject, Body: body, To: to, Cc: cc, Bcc: bcc})
+			return composeDoneMsg{err: err, label: "Saved draft " + subject}
 		}
-		return composeDoneMsg{requestResult: requestResult{err: err}, label: label, draft: draft}
+		err := client.SendMessage(account, subject, body, to, cc, bcc, nil)
+		return composeDoneMsg{err: err, label: fmt.Sprintf("Sent %q to %s", subject, strings.Join(to, ", "))}
 	})
 }
 
 func (m model) onComposeDone(msg composeDoneMsg) (tea.Model, tea.Cmd) {
-	next := m.writes.next()
-	c, _ := m.modal.(*composeModal)
 	if msg.err != nil {
-		if c != nil {
+		if c, ok := m.modal.(*composeModal); ok {
 			c.sending = false
-			c.status = sanitizeLine("failed: " + msg.err.Error())
+			c.status, c.problem = sanitizeLine("failed: "+msg.err.Error()), true
 		}
-		return m, tea.Batch(next, m.quitIfDrained())
+		return m, nil
 	}
 	m.modal = nil
 	m.layout()
-	return m, tea.Batch(notify(msg.label), next, m.quitIfDrained())
+	return m, notify(msg.label)
 }
 
 func (c *composeModal) view(m *model) string {
 	var b strings.Builder
-	title := map[composeMode]string{composeNew: "New message", composeReply: "Reply", composeReplyAll: "Reply all", composeForward: "Forward"}[c.mode]
-	b.WriteString(m.styles.title.Render(title) + m.styles.muted.Render("  from "+c.account) + "\n\n")
+	b.WriteString(m.styles.title.Render(composeTitles[c.mode]) + m.styles.muted.Render("  from "+c.account) + "\n\n")
 	for i, label := range composeLabels {
-		name := pad(label+":", 9)
+		name := m.styles.muted.Render(pad(label+":", 9))
 		if i == c.focus {
-			name = m.styles.active.Render(name)
-		} else {
-			name = m.styles.muted.Render(name)
+			name = m.styles.active.Render(pad(label+":", 9))
 		}
 		b.WriteString(name + c.inputs[i].View() + "\n")
 	}
 	b.WriteString("\n" + c.body.View() + "\n")
 	if c.status != "" {
 		style := m.styles.muted
-		if strings.HasPrefix(c.status, "failed") || strings.Contains(c.status, "needed") || strings.HasPrefix(c.status, "not an") {
+		if c.problem {
 			style = m.styles.error
 		}
 		b.WriteString("\n" + style.Render(c.status))

@@ -169,15 +169,18 @@ func (c *Client) findDraftBySubjectContentSince(accountName, subject, content st
 	return best, nil
 }
 
-func parseMessageTimestamp(value string) (time.Time, bool) {
-	layouts := []string{time.RFC3339, "2006-01-02T15:04:05.000Z", "2006-01-02T15:04:05Z"}
-	for _, layout := range layouts {
-		if parsed, err := time.Parse(layout, value); err == nil {
+// ParseMessageTime parses the timestamp shapes Mail.app and the Envelope
+// Index produce.
+func ParseMessageTime(value string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05.000Z", "2006-01-02T15:04:05Z"} {
+		if parsed, err := time.Parse(layout, strings.TrimSpace(value)); err == nil {
 			return parsed, true
 		}
 	}
 	return time.Time{}, false
 }
+
+func parseMessageTimestamp(value string) (time.Time, bool) { return ParseMessageTime(value) }
 
 func normalizeDraftContent(value string) string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
