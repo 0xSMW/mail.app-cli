@@ -2,6 +2,33 @@
 
 A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it prints a JSON envelope. Agents get the same commands, an exit-code table, and an embedded skill. All names, message IDs, addresses, mailboxes, and message content in the examples are fictional.
 
+## Terminal UI
+
+```bash
+mail-app-cli tui                         # all inboxes
+mail-app-cli tui -a "Example Account"    # one account's INBOX
+mail-app-cli tui -a "Example Account" -m "Example Receipts" --message 100001
+```
+
+A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; bodies and every action go through Mail.app one call at a time, with a spinner in the header while a call is queued.
+
+| Key | Does |
+|---|---|
+| `j` `k` `g` `G` `pgup` `pgdn` | move |
+| `enter` | open the message; `n` `p` step to the next or previous one while reading |
+| `space` | select; actions then apply to the selection |
+| `e` `#` `m` | archive, trash (asks first), move (mailbox picker with filtering) |
+| `u` `!` | toggle read, toggle flag |
+| `/` | search the account (or all accounts from All inboxes); `esc` leaves the results |
+| `c` `r` `R` `f` | compose, reply, reply all, forward; `ctrl+s` sends, `ctrl+d` saves a draft, `esc` discards |
+| `1`..`9` | jump to a mailbox in the sidebar |
+| `tab` | cycle sidebar, list, reader |
+| `ctrl+r` | refresh mailboxes and the list |
+| `?` | hide or show the key bar |
+| `q` | quit; `ctrl+c` twice also quits |
+
+Actions apply on screen right away and the list refreshes from the index two seconds after Mail.app confirms. Because Mail.app renumbers a message when it moves, there is no undo; use `move` from the destination mailbox instead. `NO_COLOR` turns color off, and the TUI uses the terminal's own 16 ANSI colors, so it follows your theme.
+
 ## Features
 
 - Inbox, unread, search, and per-mailbox listings from Mail's local Envelope Index (about 0.1s)
@@ -13,6 +40,7 @@ A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it 
 - Typed errors with a fixed exit-code table and a `hint`
 - A default account and mailbox from a config file, env, or the only account Mail.app has
 - `doctor`, `commands --json`, `--agent --help`, `skill install` for agents
+- `tui`, an interactive three-pane client for triage, reading, and replying
 
 ## Install
 

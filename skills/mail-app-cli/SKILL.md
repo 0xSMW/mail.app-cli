@@ -43,6 +43,8 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Settings | `mail-app-cli config show --json`, `config set account "Example Account"` |
 | Every command and flag | `mail-app-cli commands --json` |
 
+`mail-app-cli tui` is the interactive client for a person at a terminal; do not run it from a script.
+
 Shortcuts on read-only lists: `--count`, `--jq '.data[] | select(.read == false) | .id'`, and `--quiet` for bare data. State-changing commands reject `--jq` before doing any work. Use `--ids-only` on ID-bearing inbox, search, account, message, draft, thread, smart-query, and recent-search lists.
 
 ## Workflow

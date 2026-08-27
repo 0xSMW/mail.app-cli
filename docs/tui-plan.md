@@ -96,6 +96,10 @@ Binary size and startup time should be checked before and after; the TUI package
 - `cmd/tui_test.go`: the command parses flags and calls `runTUI` with the resolved scope.
 - One manual checklist in this document's companion PR: start with the index available, start with it disabled (`MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX=1`), archive and undo, compose a draft and confirm it appears in Mail.app's Drafts.
 
+## Status (2.1.0)
+
+Phases 0 through 3 shipped in the `tui` command: service layer (`ListOptions`, `Client.WithContext`, `RunBatch`, `GroupThreads`, `FilterBySender` in `pkg/mail`), the three-pane browser, actions with optimistic updates and a two-second index refresh, search, compose, reply, reply all, forward, and draft saving. Not built: undo (Mail.app renumbers moved messages, so the reverse move needs a fresh lookup), the threads section, `--remote`, and theme overlays. Reply threading headers still wait on R3.2.
+
 ## Open questions
 
 - Whether to keep the reader in a third pane or open it full-screen on narrow terminals. hey-cli switches on width; we should too, with 120 columns as the threshold.

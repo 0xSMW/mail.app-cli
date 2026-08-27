@@ -15,7 +15,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "2.0.0"
+const version = "2.1.0"
 
 const (
 	groupMail   = "mail"
@@ -413,7 +413,7 @@ func init() {
 	)
 
 	for _, cmd := range []*cobra.Command{
-		inboxCmd, unreadCmd, showCmd, searchCmd,
+		tuiCmd, inboxCmd, unreadCmd, showCmd, searchCmd,
 		seenCmd, unseenCmd, flagCmd, unflagCmd, archiveCmd, deleteCmd, moveCmd, sendCmd,
 	} {
 		cmd.GroupID = groupMail
