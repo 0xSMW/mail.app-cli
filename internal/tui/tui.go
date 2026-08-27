@@ -711,10 +711,21 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 	if id := m.pendingOpen; id != "" {
 		cmds = append(cmds, m.openPending(id, msg.source))
 	}
-	if m.reader.open {
-		cmds = append(cmds, m.requestBody())
-	}
+	cmds = append(cmds, m.syncReader())
 	return m, tea.Batch(cmds...)
+}
+
+// syncReader points an open reader at the row now under the cursor after
+// a refresh, or closes it when no row is left.
+func (m *model) syncReader() tea.Cmd {
+	if !m.reader.open {
+		return nil
+	}
+	if m.list.current() == nil {
+		m.closeReader()
+		return nil
+	}
+	return m.requestBody()
 }
 
 // --- Bodies ---

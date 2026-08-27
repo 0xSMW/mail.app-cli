@@ -238,8 +238,9 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	case len(msg.result.Messages) >= searchLimit:
 		m.notice = "showing the newest " + strconv.Itoa(searchLimit) + " matches; narrow the query for older ones"
 	}
+	cmd = m.syncReader()
 	if lagging {
-		return m, m.scheduleRefresh()
+		cmd = tea.Batch(cmd, m.scheduleRefresh())
 	}
-	return m, nil
+	return m, cmd
 }

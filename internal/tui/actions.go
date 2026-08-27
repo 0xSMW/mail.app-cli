@@ -195,9 +195,10 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 				}
 			}
 		}
-		if m.list.source.search != "" {
+		if m.list.source.search != "" && opts.Action != "delete" {
 			// Search results span mailboxes; an archive or move keeps the
-			// message matching, so rows stay until the search re-runs.
+			// message matching, so rows stay until the search re-runs. A
+			// delete stops it matching, so its row goes now.
 			moving = map[string]bool{}
 		}
 		removed = moving

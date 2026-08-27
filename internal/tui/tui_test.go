@@ -321,6 +321,31 @@ func TestSettledStateOutlivesLaggingRefresh(t *testing.T) {
 	}
 }
 
+func TestDeleteInSearchRemovesRowAndRefreshSyncsReader(t *testing.T) {
+	m := loadedModel(t)
+	hits := []mail.Message{
+		{ID: "1", Account: "Work", Mailbox: "INBOX", Subject: "First", Read: true},
+		{ID: "2", Account: "Work", Mailbox: "INBOX", Subject: "Second", Read: true},
+	}
+	m.list.setMessages(hits, false, listSource{search: "first"}, 0)
+	m.reader.open = true
+	_ = m.requestBody()
+	m = press(m, "#")
+	m = press(m, "y")
+	if len(m.list.messages) != 1 || m.list.messages[0].ID != "2" {
+		t.Fatalf("delete in search mode left the row: %+v", m.list.messages)
+	}
+	if !m.reader.open || m.readerKey != bodyKey(hits[1]) {
+		t.Fatalf("reader did not follow the cursor off the deleted message: open=%v key=%q", m.reader.open, m.readerKey)
+	}
+	next, _ := m.Update(searchDoneMsg{requestResult: requestResult{requestID: m.searchLane.id}, query: "first", silent: true,
+		result: mail.SearchResult{Complete: true}})
+	m = next.(model)
+	if m.reader.open {
+		t.Fatal("reader stayed open with no rows left")
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")
