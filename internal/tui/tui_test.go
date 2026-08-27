@@ -132,7 +132,7 @@ func TestAutomaticMarkReadKeepsSelection(t *testing.T) {
 func TestMarkReadAdjustsSidebarUnread(t *testing.T) {
 	m := loadedModel(t)
 	before := m.sidebar.entries[2].unread // Work/INBOX starts at 2
-	m = press(m, "u")                    // row 1 is unread; u marks it read
+	m = press(m, "u")                     // row 1 is unread; u marks it read
 	if got := m.sidebar.entries[2].unread; got != before-1 {
 		t.Fatalf("sidebar unread = %d, want %d", got, before-1)
 	}
