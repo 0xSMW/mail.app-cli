@@ -326,9 +326,12 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch {
 	case m.modal != nil:
+		// A modal that finishes may have installed its successor (the
+		// account picker opens the editor); only clear the one that closed.
+		closing := m.modal
 		var open bool
-		cmd, open = m.modal.handleKey(&m, msg)
-		if !open {
+		cmd, open = closing.handleKey(&m, msg)
+		if !open && m.modal == closing {
 			m.modal = nil
 			m.layout()
 		}

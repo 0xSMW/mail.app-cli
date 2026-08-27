@@ -154,12 +154,29 @@ func TestNoOpMoveKeepsRow(t *testing.T) {
 	}
 }
 
-func TestArchiveFromLabelKeepsRow(t *testing.T) {
+func TestArchiveFromLabelKeepsRowButFolderLosesIt(t *testing.T) {
 	m := loadedModel(t)
 	m.list.messages[0].Mailbox = "Receipts"
 	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+	if len(m.list.messages) != 2 {
+		t.Fatalf("archiving from an IMAP folder should remove the row: %d left", len(m.list.messages))
+	}
+	m = loadedModel(t)
+	m.sidebar.entries = append(m.sidebar.entries, sidebarEntry{kind: entryMailbox, account: "Work", mailbox: "All Mail"})
+	m.list.messages[0].Mailbox = "Receipts"
+	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
 	if len(m.list.messages) != 3 {
-		t.Fatalf("archiving from a label removed the row: %d left", len(m.list.messages))
+		t.Fatalf("archiving from a Gmail label removed the row: %d left", len(m.list.messages))
+	}
+}
+
+func TestAccountPickerOpensCompose(t *testing.T) {
+	m := loadedModel(t)
+	m.sidebar.accounts = append(m.sidebar.accounts, mail.Account{Name: "Personal", EmailAddress: "p@example.test", Enabled: true})
+	m.sidebar.selected = 0
+	m = press(m, "c", "enter")
+	if _, ok := m.modal.(*composeModal); !ok {
+		t.Fatalf("choosing an account did not open the editor: %T", m.modal)
 	}
 }
 

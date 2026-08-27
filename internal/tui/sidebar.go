@@ -167,6 +167,17 @@ func (s *sidebar) accountAddresses(name string) []string {
 	return nil
 }
 
+// isGmail reports whether an account exposes Gmail's All Mail, in which case
+// its other user mailboxes are labels rather than folders.
+func (s *sidebar) isGmail(account string) bool {
+	for _, entry := range s.entries {
+		if entry.kind == entryMailbox && entry.account == account && entry.mailbox == "All Mail" {
+			return true
+		}
+	}
+	return false
+}
+
 // adjustUnread moves a mailbox's unread count by delta, for optimistic
 // updates until the next mailbox reload.
 func (s *sidebar) adjustUnread(account, mailbox string, delta int) {

@@ -110,6 +110,19 @@ func (m *model) markCurrentRead() tea.Cmd {
 	return m.mutate([]mail.Message{*current}, mail.BatchOptions{Action: "mark", Read: true}, mail.MarkMutator(true))
 }
 
+// archiveRemovesFrom reports whether archiving takes the message out of the
+// mailbox it is listed under.
+func (m *model) archiveRemovesFrom(t mail.Message) bool {
+	switch {
+	case strings.EqualFold(t.Mailbox, "INBOX"):
+		return true
+	case mail.IsArchiveAlias(t.Mailbox):
+		return false
+	default:
+		return !m.sidebar.isGmail(t.Account)
+	}
+}
+
 func sameAccount(targets []mail.Message) bool {
 	for _, t := range targets[1:] {
 		if t.Account != targets[0].Account {
@@ -133,15 +146,16 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 	switch opts.Action {
 	case "archive", "delete", "move":
 		// Rows only leave the screen when the action removes them from the
-		// mailbox being viewed: a move to the current mailbox is a no-op,
-		// and an archive only takes a message out of INBOX (the engine acts
-		// from INBOX or the backing mailbox, so a Gmail label keeps it).
+		// mailbox being viewed: a move to the current mailbox is a no-op;
+		// an archive from an archive mailbox is one too, and on Gmail an
+		// archive from a label leaves the label attached (the engine acts
+		// from INBOX or All Mail), while a plain IMAP folder loses the row.
 		moving := make(map[string]bool, len(targets))
 		for _, t := range targets {
 			if opts.Action == "move" && strings.EqualFold(t.Mailbox, opts.TargetMailbox) {
 				continue
 			}
-			if opts.Action == "archive" && !strings.EqualFold(t.Mailbox, "INBOX") {
+			if opts.Action == "archive" && !m.archiveRemovesFrom(t) {
 				continue
 			}
 			moving[bodyKey(t)] = true
