@@ -70,6 +70,7 @@ type model struct {
 	pageLane    requestLane
 	bodyLane    requestLane
 	searchLane  requestLane
+	composeLane requestLane
 
 	// Writes never supersede each other: they queue and run one at a time
 	// under a context that only a forced quit cancels.
@@ -103,8 +104,6 @@ type model struct {
 
 	// pendingOpen is a message ID to open once its mailbox list is loaded.
 	pendingOpen string
-	// pendingCompose is a reply or forward waiting on the body it quotes.
-	pendingCompose *pendingCompose
 	// initCmd is the first load, begun in newModel so the request lane's
 	// bookkeeping lands on the model Bubble Tea keeps rather than a copy.
 	initCmd tea.Cmd
@@ -216,6 +215,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bodyLoadedMsg:
 		return m.onBodyLoaded(msg)
 
+	case composeBodyLoadedMsg:
+		return m.onComposeBodyLoaded(msg)
+
 	case writeDoneMsg:
 		// The queue advances here, once, whatever the write reported. The
 		// result is always handled first so a failure on the way out is
@@ -285,7 +287,8 @@ func writeFailure(inner tea.Msg) error {
 }
 
 func (m *model) anyLoading() bool {
-	return m.mailboxLane.loading || m.listLane.loading || m.pageLane.loading || m.bodyLane.loading || m.searchLane.loading || m.writes.busy
+	return m.mailboxLane.loading || m.listLane.loading || m.pageLane.loading || m.bodyLane.loading ||
+		m.searchLane.loading || m.composeLane.loading || m.writes.busy
 }
 
 // spin starts the spinner chain if a load is now in flight and no chain is
@@ -749,22 +752,12 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.bodyLane.finish()
 	if msg.err != nil {
-		if m.pendingCompose != nil && m.pendingCompose.key == msg.key {
-			m.pendingCompose = nil
-			return m, notifyError("could not load the message to quote", msg.err)
-		}
 		if m.currentKey() == msg.key {
 			m.reader.showError(msg.err)
 		}
 		return m, nil
 	}
 	m.reader.remember(msg.key, msg.message)
-	if pending := m.pendingCompose; pending != nil {
-		m.pendingCompose = nil
-		if pending.key == msg.key && m.modal == nil {
-			return m, m.composeFor(pending.mode, msg.message)
-		}
-	}
 	if m.reader.open && m.currentKey() == msg.key {
 		m.reader.show(msg.message)
 		if !msg.message.Read {
@@ -788,7 +781,6 @@ func (m *model) openReader() tea.Cmd {
 func (m *model) closeReader() {
 	m.reader.open = false
 	m.bodyLane.abandon()
-	m.pendingCompose = nil
 	m.advanceAfterPage = false
 	m.focus = focusList
 	m.layout()

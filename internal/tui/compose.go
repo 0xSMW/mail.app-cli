@@ -39,12 +39,12 @@ type composeDoneMsg struct {
 	label string
 }
 
-// pendingCompose is a reply or forward waiting for the body of the message
-// it quotes. It is tied to that message, not to wherever the cursor is when
-// the body arrives.
-type pendingCompose struct {
-	mode composeMode
-	key  string
+// composeBodyLoadedMsg carries the body a reply or forward quotes. It has
+// its own lane so reader navigation cannot supersede it.
+type composeBodyLoadedMsg struct {
+	requestResult
+	mode    composeMode
+	message *mail.Message
 }
 
 // composeModal is the editor for a new message, reply, or forward. Sending
@@ -73,8 +73,31 @@ func (m *model) openCompose(mode composeMode) tea.Cmd {
 	if cached, ok := m.reader.cached(bodyKey(*current)); ok {
 		return m.composeFor(mode, cached)
 	}
-	m.pendingCompose = &pendingCompose{mode: mode, key: bodyKey(*current)}
-	return m.loadBody()
+	id, ctx := m.composeLane.begin(m.ctx, false)
+	client := m.client.WithContext(ctx)
+	account, mailbox, msgID := current.Account, current.Mailbox, current.ID
+	return func() tea.Msg {
+		details, err := client.MessageDetails(account, mailbox, msgID)
+		if err == nil && details == nil {
+			err = fmt.Errorf("message %s is no longer in %s/%s", msgID, account, mailbox)
+		}
+		return composeBodyLoadedMsg{requestResult: requestResult{id, err}, mode: mode, message: details}
+	}
+}
+
+func (m model) onComposeBodyLoaded(msg composeBodyLoadedMsg) (tea.Model, tea.Cmd) {
+	if !m.composeLane.accepts(msg.requestResult) {
+		return m, nil
+	}
+	m.composeLane.finish()
+	if msg.err != nil {
+		return m, notifyError("could not load the message to quote", msg.err)
+	}
+	m.reader.remember(bodyKey(*msg.message), msg.message)
+	if m.modal != nil {
+		return m, notifyProblem("close the open editor first, then press the reply key again")
+	}
+	return m, m.composeFor(msg.mode, msg.message)
 }
 
 // composeFor opens the editor for the account that owns the original
