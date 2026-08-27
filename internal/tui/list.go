@@ -43,11 +43,11 @@ func (l *list) pageSize() int {
 func (l *list) title() string {
 	switch {
 	case l.mode == listSearch:
-		return "search: " + l.query + "  (" + plural(len(l.messages), "match") + ")"
+		return "search: " + sanitizeLine(l.query) + "  (" + plural(len(l.messages), "match") + ")"
 	case l.source.unified:
 		return "All inboxes  (" + plural(len(l.messages), "message") + ")"
 	default:
-		return l.source.account + " / " + l.source.mailbox + "  (" + plural(len(l.messages), "message") + ")"
+		return sanitizeLine(l.source.account+" / "+l.source.mailbox) + "  (" + plural(len(l.messages), "message") + ")"
 	}
 }
 
@@ -224,7 +224,7 @@ func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 			m.closeReader()
 			return m.reloadList(false)
 		}
-		return tea.Quit
+		return m.requestQuit()
 	case "h", "left":
 		if m.sidebarVisible() {
 			m.focus = focusSidebar

@@ -113,8 +113,16 @@ func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	if len(m.list.messages) != 2 || m.list.messages[0].ID != "2" {
 		t.Fatalf("archive did not remove the cursor row: %+v", m.list.messages)
 	}
-	if !m.actionLane.loading {
-		t.Fatal("archive did not start a request")
+	if !m.writes.busy {
+		t.Fatal("archive did not start a write")
+	}
+	m = press(m, "e")
+	if len(m.writes.pending) != 1 {
+		t.Fatalf("second archive should queue behind the first, pending = %d", len(m.writes.pending))
+	}
+	m = press(m, "q")
+	if !m.quitting {
+		t.Fatal("q with writes in flight should wait for them")
 	}
 }
 
@@ -139,6 +147,14 @@ func TestReplyAllPrefillDropsOwnAddress(t *testing.T) {
 	}
 	if !strings.Contains(c.body.Value(), "> line two") {
 		t.Fatalf("body = %q", c.body.Value())
+	}
+}
+
+func TestParseAddressListKeepsNamesTogether(t *testing.T) {
+	got := parseAddressList("Jane Doe <jane@example.test>, bob@example.test; Carl <carl@example.test>")
+	want := []string{"jane@example.test", "bob@example.test", "carl@example.test"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("parseAddressList = %v", got)
 	}
 }
 

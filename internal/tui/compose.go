@@ -50,24 +50,35 @@ type composeModal struct {
 	height  int
 }
 
+// pendingCompose is a reply or forward waiting for the body of the message
+// it quotes. It is tied to that message, not to wherever the cursor is when
+// the body arrives.
+type pendingCompose struct {
+	mode composeMode
+	key  string
+}
+
+// openCompose opens the editor. Replies and forwards quote the message under
+// the cursor and wait for its body when it is not cached yet.
 func (m *model) openCompose(mode composeMode) tea.Cmd {
-	entry := m.sidebar.current()
-	account := entry.account
-	var original *mail.Message
-	if mode != composeNew {
-		current := m.list.current()
-		if current == nil {
-			return notify("select a message first")
-		}
-		account = current.Account
-		if cached, ok := m.reader.cache[bodyKey(*current)]; ok {
-			original = cached
-		} else {
-			// The body is needed for the quote; fetch it and reopen.
-			pending := mode
-			m.modal = nil
-			return tea.Batch(m.loadBody(), func() tea.Msg { return composeAfterBodyMsg{mode: pending, key: bodyKey(*current)} })
-		}
+	if mode == composeNew {
+		return m.composeFor(mode, nil)
+	}
+	current := m.list.current()
+	if current == nil {
+		return notify("select a message first")
+	}
+	if cached, ok := m.reader.cache[bodyKey(*current)]; ok {
+		return m.composeFor(mode, cached)
+	}
+	m.pendingCompose = &pendingCompose{mode: mode, key: bodyKey(*current)}
+	return m.loadBody()
+}
+
+func (m *model) composeFor(mode composeMode, original *mail.Message) tea.Cmd {
+	account := m.sidebar.current().account
+	if original != nil {
+		account = original.Account
 	}
 	if account == "" {
 		if len(m.sidebar.accounts) == 0 {
@@ -86,11 +97,6 @@ func (m *model) openCompose(mode composeMode) tea.Cmd {
 	return c.focusCurrent()
 }
 
-type composeAfterBodyMsg struct {
-	mode composeMode
-	key  string
-}
-
 func newComposeModal(mode composeMode, account string, original *mail.Message, ownAddress string) *composeModal {
 	c := &composeModal{mode: mode, account: account}
 	for _, label := range composeLabels {
@@ -106,6 +112,9 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 	c.body.Prompt = ""
 	c.body.ShowLineNumbers = false
 	c.body.Placeholder = "message"
+	// The defaults cap a message at 99 lines, which truncates quoted replies.
+	c.body.MaxHeight = 0
+	c.body.MaxContentHeight = 0
 	if original != nil {
 		c.prefill(original, ownAddress)
 	}
@@ -226,11 +235,14 @@ func (c *composeModal) updateInputs(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+// parseAddressList accepts "a@x, Name <b@y>; c@z" and returns bare addresses.
 func parseAddressList(value string) []string {
 	var out []string
-	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ';' }) {
 		if part = strings.TrimSpace(part); part != "" {
-			out = append(out, part)
+			if email := mail.ParseSender(part).Email; email != "" {
+				out = append(out, email)
+			}
 		}
 	}
 	return out
@@ -263,10 +275,9 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 	if draft {
 		c.status = "saving draft… (Mail.app takes a few seconds)"
 	}
-	id, ctx := m.actionLane.begin(m.ctx)
-	client := m.client.WithContext(ctx)
+	client := m.client.WithContext(m.writeCtx)
 	account := c.account
-	return func() tea.Msg {
+	return m.enqueueWrite(func() tea.Msg {
 		label := fmt.Sprintf("Sent %q to %s", subject, strings.Join(to, ", "))
 		var err error
 		if draft {
@@ -275,25 +286,23 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 		} else {
 			err = client.SendMessage(account, subject, body, to, cc, bcc, nil)
 		}
-		return composeDoneMsg{requestResult: requestResult{id, err}, label: label, draft: draft}
-	}
+		return composeDoneMsg{requestResult: requestResult{err: err}, label: label, draft: draft}
+	})
 }
 
 func (m model) onComposeDone(msg composeDoneMsg) (tea.Model, tea.Cmd) {
-	if msg.requestID == m.actionLane.id {
-		m.actionLane.finish()
-	}
+	next := m.writes.next()
 	c, _ := m.modal.(*composeModal)
 	if msg.err != nil {
 		if c != nil {
 			c.sending = false
-			c.status = "failed: " + msg.err.Error()
+			c.status = sanitizeLine("failed: " + msg.err.Error())
 		}
-		return m, nil
+		return m, tea.Batch(next, m.quitIfDrained())
 	}
 	m.modal = nil
 	m.layout()
-	return m, notify(msg.label)
+	return m, tea.Batch(notify(msg.label), next, m.quitIfDrained())
 }
 
 func (c *composeModal) view(m *model) string {

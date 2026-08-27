@@ -142,6 +142,7 @@ type searchDoneMsg struct {
 	requestResult
 	query  string
 	result mail.SearchResult
+	silent bool
 }
 
 func newSearchModal(s styles) *searchModal {
@@ -161,7 +162,7 @@ func (sm *searchModal) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) 
 		if query == "" {
 			return nil, false
 		}
-		return m.runSearch(query), false
+		return m.runSearch(query, false), false
 	}
 	var cmd tea.Cmd
 	sm.input, cmd = sm.input.Update(msg)
@@ -187,26 +188,38 @@ func (sm *searchModal) helpBindings() []helpBinding {
 	return []helpBinding{{"enter", "search"}, {"esc", "cancel"}}
 }
 
-func (m *model) runSearch(query string) tea.Cmd {
+// runSearch searches the account in scope. silent re-runs keep the cursor.
+func (m *model) runSearch(query string, silent bool) tea.Cmd {
 	account := ""
 	if entry := m.sidebar.current(); !entry.unified {
 		account = entry.account
 	}
-	m.closeReader()
-	id, ctx := m.listLane.begin(m.ctx)
+	if !silent {
+		m.closeReader()
+	}
+	m.listLane.abandon()
+	id, ctx := m.searchLane.begin(m.ctx)
+	if silent {
+		m.searchLane.loading = false
+	}
 	client := m.client
 	return func() tea.Msg {
 		result, err := client.Search(ctx, query, account, "", 100)
-		return searchDoneMsg{requestResult: requestResult{id, err}, query: query, result: result}
+		return searchDoneMsg{requestResult: requestResult{id, err}, query: query, result: result, silent: silent}
 	}
 }
 
 func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
-	cmd, ok := m.listLane.settle(msg.requestResult)
+	cmd, ok := m.searchLane.settle(msg.requestResult)
 	if !ok {
 		return m, cmd
 	}
-	m.list.enterSearch(msg.query, msg.result.Messages, len(msg.result.FailedMailboxes))
+	if msg.silent && m.list.mode == listSearch && m.list.query == msg.query {
+		m.list.setMessages(msg.result.Messages, true, m.list.source)
+		m.list.partial = len(msg.result.FailedMailboxes)
+	} else {
+		m.list.enterSearch(msg.query, msg.result.Messages, len(msg.result.FailedMailboxes))
+	}
 	m.focus = focusList
 	if !msg.result.Complete {
 		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be searched"

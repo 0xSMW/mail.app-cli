@@ -53,7 +53,7 @@ func (r *reader) showPlaceholder(msg *mail.Message, s styles) {
 }
 
 func (r *reader) showError(err error, s styles) {
-	r.status = "could not load body: " + err.Error()
+	r.status = sanitizeLine("could not load body: " + err.Error())
 	r.styles = s
 	if r.message != nil {
 		r.viewport.SetContent(r.render(r.message, r.status))

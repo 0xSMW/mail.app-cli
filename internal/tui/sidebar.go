@@ -201,7 +201,7 @@ func (s *sidebar) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	case "enter", "l", "right":
 		return s.choose(m)
 	case "q":
-		return tea.Quit
+		return m.requestQuit()
 	}
 	return nil
 }

@@ -133,7 +133,7 @@ func TestWriteReceiptKeepsMutationFailureAuthoritativeWhenReportFileFails(t *tes
 	writer = w
 	t.Cleanup(func() { writer = previousWriter })
 
-	mutationErr := clierr.New(clierr.CodeMutationFailed, "archive failed for 1 of 1 message(s)")
+	mutationErr := &mail.BatchFailedError{Action: "archive", Failed: 1, Attempted: 1}
 	err = writeReceipt(batchResult{Action: "archive", Matched: 1, Attempted: 1, Failed: 1, Items: []batchItem{{ID: "42", Status: "failed"}}}, batchOptions{Action: "archive"}, nil, mutationErr, filepath.Join(t.TempDir(), "missing", "receipt.json"))
 	var failure *clierr.Error
 	if !errors.As(err, &failure) || failure.Code != clierr.CodeMutationFailed || !failure.Reported {

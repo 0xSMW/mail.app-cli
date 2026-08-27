@@ -69,7 +69,14 @@ type model struct {
 	mailboxLane requestLane
 	listLane    requestLane
 	bodyLane    requestLane
-	actionLane  requestLane
+	searchLane  requestLane
+
+	// Writes never supersede each other: they queue and run one at a time
+	// under a context that only a forced quit cancels.
+	writes    writeQueue
+	quitting  bool
+	writeCtx  context.Context
+	stopWrite context.CancelFunc
 
 	loading      bool
 	spinnerFrame int
@@ -85,7 +92,7 @@ type model struct {
 	// pendingOpen is a message ID to open once its mailbox list is loaded.
 	pendingOpen string
 	// pendingCompose is a reply or forward waiting on the body it quotes.
-	pendingCompose *composeAfterBodyMsg
+	pendingCompose *pendingCompose
 	// initCmd is the first load, begun in newModel so the request lane's
 	// bookkeeping lands on the model Bubble Tea keeps rather than a copy.
 	initCmd tea.Cmd
@@ -93,14 +100,17 @@ type model struct {
 
 func newModel(client *mail.Client, opts Options) model {
 	ctx, cancel := context.WithCancel(context.Background())
+	writeCtx, stopWrite := context.WithCancel(context.Background())
 	m := model{
-		client:  client,
-		ctx:     ctx,
-		cancel:  cancel,
-		opts:    opts,
-		styles:  newStyles(),
-		focus:   focusList,
-		loading: true,
+		client:    client,
+		ctx:       ctx,
+		cancel:    cancel,
+		writeCtx:  writeCtx,
+		stopWrite: stopWrite,
+		opts:      opts,
+		styles:    newStyles(),
+		focus:     focusList,
+		loading:   true,
 	}
 	m.sidebar = newSidebar()
 	m.list = newList()
@@ -119,6 +129,7 @@ func Run(client *mail.Client, opts Options) error {
 	defer func() { mail.Warn = previousWarn }()
 	_, err := p.Run()
 	m.cancel()
+	m.stopWrite()
 	return err
 }
 
@@ -177,7 +188,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onMessagesLoaded(msg)
 
 	case bodyDebounceMsg:
-		if m.currentKey() == msg.key {
+		if m.reader.open && m.currentKey() == msg.key {
 			return m, m.loadBody()
 		}
 		return m, nil
@@ -193,11 +204,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case composeDoneMsg:
 		return m.onComposeDone(msg)
-
-	case composeAfterBodyMsg:
-		pending := msg
-		m.pendingCompose = &pending
-		return m, nil
 
 	case refreshDueMsg:
 		if msg.id == m.refreshID {
@@ -218,7 +224,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) anyLoading() bool {
-	return m.mailboxLane.loading || m.listLane.loading || m.bodyLane.loading || m.actionLane.loading
+	return m.mailboxLane.loading || m.listLane.loading || m.bodyLane.loading || m.searchLane.loading || m.writes.busy
 }
 
 func (m *model) startSpinner(cmd tea.Cmd) tea.Cmd {
@@ -230,7 +236,10 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	if key == "ctrl+c" {
 		if m.ctrlCOnce {
+			// A forced quit abandons queued writes; the one running is
+			// killed, which Mail.app may or may not have applied.
 			m.cancel()
+			m.stopWrite()
 			return m, tea.Quit
 		}
 		m.ctrlCOnce = true
@@ -489,10 +498,14 @@ type messagesLoadedMsg struct {
 	source   sidebarEntry
 }
 
-// reloadList fetches the current mailbox. silent refreshes keep the cursor
-// and show no spinner; they follow a mutation.
+// reloadList fetches the current mailbox or re-runs the current search.
+// silent refreshes keep the cursor and show no spinner; they follow a
+// mutation.
 func (m *model) reloadList(silent bool) tea.Cmd {
 	if m.list.mode == listSearch {
+		return m.runSearch(m.list.query, silent)
+	}
+	if m.searchLane.loading {
 		return nil
 	}
 	entry := m.sidebar.current()
@@ -598,16 +611,21 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	m.bodyLane.finish()
 	if msg.err != nil {
+		if m.pendingCompose != nil && m.pendingCompose.key == msg.key {
+			m.pendingCompose = nil
+			return m, notifyError("could not load the message to quote", msg.err)
+		}
 		m.reader.showError(msg.err, m.styles)
 		return m, nil
 	}
 	m.reader.cache[msg.key] = msg.message
-	if m.pendingCompose != nil && m.pendingCompose.key == msg.key {
-		mode := m.pendingCompose.mode
+	if pending := m.pendingCompose; pending != nil {
 		m.pendingCompose = nil
-		return m, m.openCompose(mode)
+		if pending.key == msg.key && m.modal == nil {
+			return m, m.composeFor(pending.mode, msg.message)
+		}
 	}
-	if m.currentKey() == msg.key {
+	if m.reader.open && m.currentKey() == msg.key {
 		m.reader.show(msg.message, m.styles)
 		if !msg.message.Read {
 			// Reading marks read, the way every mail client does.
@@ -630,6 +648,7 @@ func (m *model) openReader() tea.Cmd {
 func (m *model) closeReader() {
 	m.reader.open = false
 	m.bodyLane.abandon()
+	m.pendingCompose = nil
 	m.focus = focusList
 	m.layout()
 }

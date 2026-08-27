@@ -17,6 +17,7 @@ func TestClassifyMapsTypedErrors(t *testing.T) {
 		{&mail.AutomationTimeoutError{Engine: "jxa", Timeout: time.Second}, CodeTimeout},
 		{&mail.AutomationLockTimeoutError{Engine: "jxa", Timeout: time.Second}, CodeTimeout},
 		{&mail.PartialSearchError{}, CodePartial},
+		{&mail.BatchFailedError{Action: "archive", Failed: 1, Attempted: 2}, CodeMutationFailed},
 		{&mail.NotFoundError{Kind: "message", Name: "1"}, CodeNotFound},
 		{fmt.Errorf("wrapped: %w", &mail.NotFoundError{Kind: "account", Name: "x"}), CodeNotFound},
 		{errors.New("Error: Message not found"), CodeNotFound},

@@ -33,6 +33,11 @@ func (m *model) handleActionKey(key string) tea.Cmd {
 		if len(targets) == 0 {
 			return nil
 		}
+		if !sameAccount(targets) {
+			return func() tea.Msg {
+				return notifyMsg{text: "select messages from one account to move them", kind: toastError}
+			}
+		}
 		account := targets[0].Account
 		m.modal = newMailboxPicker(m.styles, "Move to", m.sidebar.mailboxesFor(account), func(m *model, mailbox string) tea.Cmd {
 			return m.mutate("move", targets, mail.BatchOptions{TargetMailbox: mailbox}, mail.MoveMutator(false))
@@ -68,12 +73,65 @@ func (m *model) markCurrentRead() tea.Cmd {
 	return m.mutate("mark", []mail.Message{*current}, mail.BatchOptions{Read: true}, mail.MarkMutator(true))
 }
 
-// mutate applies an action optimistically and runs it through the batch
-// engine. The list is reconciled from the receipt and refreshed from the
-// index shortly after.
+// writeQueue runs Mail.app writes one after another. A write is never
+// cancelled by a later one, unlike reads, because Mail.app may have applied
+// it by the time the process is killed.
+type writeQueue struct {
+	busy    bool
+	pending []tea.Cmd
+}
+
+func (q *writeQueue) push(cmd tea.Cmd) tea.Cmd {
+	if q.busy {
+		q.pending = append(q.pending, cmd)
+		return nil
+	}
+	q.busy = true
+	return cmd
+}
+
+// next starts the next queued write, or marks the queue idle.
+func (q *writeQueue) next() tea.Cmd {
+	if len(q.pending) == 0 {
+		q.busy = false
+		return nil
+	}
+	cmd := q.pending[0]
+	q.pending = q.pending[1:]
+	return cmd
+}
+
+func (m *model) enqueueWrite(cmd tea.Cmd) tea.Cmd {
+	return m.writes.push(cmd)
+}
+
+// requestQuit leaves once every queued write has finished.
+func (m *model) requestQuit() tea.Cmd {
+	if !m.writes.busy {
+		return tea.Quit
+	}
+	m.quitting = true
+	return notify("finishing Mail.app actions, then quitting")
+}
+
+func (m *model) quitIfDrained() tea.Cmd {
+	if m.quitting && !m.writes.busy {
+		return tea.Quit
+	}
+	return nil
+}
+
+// mutate applies an action optimistically and queues it for Mail.app. The
+// list is reconciled from the receipt and refreshed from the index shortly
+// after.
 func (m *model) mutate(action string, targets []mail.Message, opts mail.BatchOptions, mutate mail.Mutator) tea.Cmd {
 	if len(targets) == 0 {
 		return nil
+	}
+	if action == "move" && !sameAccount(targets) {
+		return func() tea.Msg {
+			return notifyMsg{text: "select messages from one account to move them", kind: toastError}
+		}
 	}
 	opts.Action = action
 	keys := make(map[string]bool, len(targets))
@@ -89,10 +147,8 @@ func (m *model) mutate(action string, targets []mail.Message, opts mail.BatchOpt
 		for key := range keys {
 			delete(m.reader.cache, key)
 		}
-		if m.reader.open {
-			if m.list.current() == nil {
-				m.closeReader()
-			}
+		if m.reader.open && m.list.current() == nil {
+			m.closeReader()
 		}
 	case "mark":
 		m.list.update(keys, func(msg *mail.Message) { msg.Read = opts.Read })
@@ -103,18 +159,59 @@ func (m *model) mutate(action string, targets []mail.Message, opts mail.BatchOpt
 	}
 	m.list.clearSelection()
 
-	id, ctx := m.actionLane.begin(m.ctx)
-	client := m.client
+	client := m.client.WithContext(m.writeCtx)
+	ctx := m.writeCtx
 	run := func() tea.Msg {
+		if action == "archive" {
+			items = archiveSources(client, items)
+		}
 		result, err := mail.RunBatch(ctx, client, opts, items, mutate)
-		return mutationDoneMsg{requestResult: requestResult{id, err}, action: action, result: result, keys: keys}
+		return mutationDoneMsg{requestResult: requestResult{err: err}, action: action, result: result, keys: keys}
 	}
-	var cmds []tea.Cmd
-	cmds = append(cmds, run)
+	cmds := []tea.Cmd{m.enqueueWrite(run)}
 	if m.reader.open && (action == "archive" || action == "delete" || action == "move") {
 		cmds = append(cmds, m.requestBody())
 	}
 	return tea.Batch(cmds...)
+}
+
+func sameAccount(targets []mail.Message) bool {
+	for _, t := range targets[1:] {
+		if t.Account != targets[0].Account {
+			return false
+		}
+	}
+	return true
+}
+
+// archiveSources makes archive act from INBOX or the backing mailbox, never
+// from a user label, matching the CLI. Messages already in the archive are
+// skipped rather than reported as archived.
+func archiveSources(client *mail.Client, items []mail.BatchItem) []mail.BatchItem {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if !strings.EqualFold(item.SourceMailbox, "INBOX") {
+			ids = append(ids, item.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return items
+	}
+	located, err := client.LocateMessages(ids)
+	if err != nil {
+		return items
+	}
+	out := items[:0]
+	for _, item := range items {
+		if loc, ok := located[item.ID]; ok && loc.Account == item.Account {
+			if mail.IsArchiveAlias(loc.ArchiveMailbox) {
+				continue
+			}
+			item.SourceMailbox = loc.ArchiveMailbox
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {
@@ -129,14 +226,11 @@ func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {
 }
 
 func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
-	if msg.requestID == m.actionLane.id {
-		m.actionLane.finish()
-	}
-	summary := receiptSummary(msg.action, msg.result)
-	var cmds []tea.Cmd
+	summary := receiptSummary(msg.action, msg.result, len(msg.keys))
+	cmds := []tea.Cmd{m.writes.next(), m.quitIfDrained()}
 	if msg.err != nil && msg.result.Attempted == 0 && len(msg.result.Items) == 0 {
 		cmds = append(cmds, notifyError(msg.action+" failed", msg.err))
-	} else if msg.result.Failed > 0 {
+	} else if msg.result.Failed > 0 || msg.result.Succeeded < len(msg.keys) {
 		reason := ""
 		for _, item := range msg.result.Items {
 			if item.Status == "failed" {
@@ -161,9 +255,12 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func receiptSummary(action string, result mail.BatchResult) string {
+// receiptSummary describes what happened to the requested messages, which
+// can be more than the receipt covers when archive skipped already-archived
+// ones.
+func receiptSummary(action string, result mail.BatchResult, requested int) string {
 	verb := map[string]string{"archive": "Archived", "delete": "Trashed", "move": "Moved", "mark": "Marked", "flag": "Flagged"}[action]
-	count := plural(result.Matched, "message")
+	count := plural(requested, "message")
 	target := ""
 	destinations := map[string]bool{}
 	for _, item := range result.Items {
@@ -176,8 +273,15 @@ func receiptSummary(action string, result mail.BatchResult) string {
 			target = " to " + name
 		}
 	}
-	if result.Failed > 0 {
-		return verb + " " + itoa(result.Succeeded) + " of " + count + target + "; " + itoa(result.Failed) + " failed"
+	if result.Failed > 0 || result.Succeeded < requested {
+		summary := verb + " " + itoa(result.Succeeded) + " of " + count + target
+		if result.Failed > 0 {
+			summary += "; " + itoa(result.Failed) + " failed"
+		}
+		if skipped := requested - result.Succeeded - result.Failed; skipped > 0 {
+			summary += "; " + itoa(skipped) + " skipped"
+		}
+		return summary
 	}
 	return strings.TrimSpace(verb + " " + count + target)
 }

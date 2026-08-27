@@ -123,7 +123,10 @@ func Classify(err error) *Error {
 	var lockTimeout *mail.AutomationLockTimeoutError
 	var partial *mail.PartialSearchError
 	var notFound *mail.NotFoundError
+	var batchFailed *mail.BatchFailedError
 	switch {
+	case errors.As(err, &batchFailed):
+		return Wrap(CodeMutationFailed, err, err.Error())
 	case errors.As(err, &lockTimeout):
 		return Wrap(CodeTimeout, err, err.Error()).WithHint("another mail-app-cli command is holding Mail.app; wait for it or rerun")
 	case errors.As(err, &timeout):
