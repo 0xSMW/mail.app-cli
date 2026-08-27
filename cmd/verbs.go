@@ -187,7 +187,7 @@ func showMessage(id string, metadataOnly bool) error {
 	})
 }
 
-func newIDVerb(use, short, action string, build func() (batchOptions, mutator)) *cobra.Command {
+func newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutator)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use + " <message-id>...",
 		Short: short,
@@ -206,32 +206,32 @@ func newIDVerb(use, short, action string, build func() (batchOptions, mutator)) 
 	return cmd
 }
 
-var seenCmd = newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mutator) {
-	return batchOptions{Read: true}, markMutator(true)
+var seenCmd = newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Read: true}, mail.MarkMutator(true)
 })
 
-var unseenCmd = newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mutator) {
-	return batchOptions{Read: false}, markMutator(false)
+var unseenCmd = newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Read: false}, mail.MarkMutator(false)
 })
 
-var flagCmd = newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mutator) {
-	return batchOptions{Flagged: true}, flagMutator(true)
+var flagCmd = newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Flagged: true}, mail.FlagMutator(true)
 })
 
-var unflagCmd = newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mutator) {
-	return batchOptions{Flagged: false}, flagMutator(false)
+var unflagCmd = newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mail.Mutator) {
+	return batchOptions{Flagged: false}, mail.FlagMutator(false)
 })
 
-var archiveCmd = newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mutator) {
-	return batchOptions{}, archiveMutator(true)
+var archiveCmd = newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mail.Mutator) {
+	return batchOptions{}, mail.ArchiveMutator(true)
 })
 
-var deleteCmd = newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mutator) {
-	return batchOptions{}, deleteMutator
+var deleteCmd = newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mail.Mutator) {
+	return batchOptions{}, mail.DeleteMutator
 })
 
-var moveCmd = newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mutator) {
-	return batchOptions{TargetMailbox: verbMoveTo}, moveMutator(true)
+var moveCmd = newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mail.Mutator) {
+	return batchOptions{TargetMailbox: verbMoveTo}, mail.MoveMutator(true)
 })
 
 func init() {
@@ -246,7 +246,7 @@ func init() {
 	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
 	_ = moveCmd.MarkFlagRequired("to")
 	archiveCmd.Annotations = map[string]string{
-		annotationAgentNotes: "Archiving a Gmail INBOX message moves it to All Mail. Archiving something already in All Mail is a no-op that still reports success. Mail.app assigns a moved message a new ID; find it again with search or recent.",
+		annotationAgentNotes: "Archiving a Gmail INBOX message moves it to All Mail. Archiving something already in All Mail changes nothing and is reported as skipped (\"already in All Mail\") with exit 0. Mail.app assigns a moved message a new ID; find it again with search or recent.",
 	}
 	deleteCmd.Annotations = map[string]string{
 		annotationAgentNotes: "delete moves to Trash through Mail.app; it does not purge. Preview with --dry-run. The message gets a new ID in Trash.",

@@ -54,16 +54,7 @@ func (c *Client) getInboxBasedUnified(mailboxType string, limit, offset int, wit
 		perLimit = 50
 	}
 
-	type req = struct {
-		AccountName string
-		MailboxName string
-		Limit       int
-		Offset      int
-		UnreadOnly  bool
-		FlaggedOnly bool
-		WithContent bool
-		Since       string
-	}
+	type req = MailboxListRequest
 
 	var requests []req
 	for _, acc := range accounts {
@@ -104,16 +95,7 @@ func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int,
 		return nil, err
 	}
 
-	type req = struct {
-		AccountName string
-		MailboxName string
-		Limit       int
-		Offset      int
-		UnreadOnly  bool
-		FlaggedOnly bool
-		WithContent bool
-		Since       string
-	}
+	type req = MailboxListRequest
 
 	seen := make(map[string]bool)
 	var requests []req
@@ -144,6 +126,12 @@ func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int,
 	}
 
 	return sortAndSlice(messages, offset, limit), nil
+}
+
+// IsSpecialMailboxName reports whether a mailbox name is one of the
+// conventional names for the sent, drafts, trash, or junk folder.
+func IsSpecialMailboxName(mailboxType, mailboxName string) bool {
+	return isSpecialMailboxName(mailboxType, mailboxName)
 }
 
 func isSpecialMailboxName(mailboxType, mailboxName string) bool {

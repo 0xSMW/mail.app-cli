@@ -7,12 +7,13 @@ import "encoding/json"
 const SchemaVersion = 1
 
 type Account struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	EmailAddress string `json:"emailAddress"`
-	AccountType  string `json:"accountType"`
-	UserName     string `json:"userName"`
-	Enabled      bool   `json:"enabled"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	EmailAddress   string   `json:"emailAddress"`
+	EmailAddresses []string `json:"emailAddresses,omitempty"`
+	AccountType    string   `json:"accountType"`
+	UserName       string   `json:"userName"`
+	Enabled        bool     `json:"enabled"`
 }
 
 type Mailbox struct {
@@ -23,16 +24,18 @@ type Mailbox struct {
 }
 
 type Message struct {
-	ID            string   `json:"id"`
-	Subject       string   `json:"subject"`
-	Sender        string   `json:"sender"`
-	DateSent      string   `json:"dateSent"`
-	DateReceived  string   `json:"dateReceived"`
-	Read          bool     `json:"read"`
-	Flagged       bool     `json:"flagged"`
-	Deleted       bool     `json:"deleted"`
-	MessageSize   int      `json:"messageSize"`
-	Content       string   `json:"content"`
+	ID           string `json:"id"`
+	Subject      string `json:"subject"`
+	Sender       string `json:"sender"`
+	DateSent     string `json:"dateSent"`
+	DateReceived string `json:"dateReceived"`
+	Read         bool   `json:"read"`
+	Flagged      bool   `json:"flagged"`
+	Deleted      bool   `json:"deleted"`
+	MessageSize  int    `json:"messageSize"`
+	Content      string `json:"content"`
+	// Snippet is Mail's indexed summary, present on index-backed listings.
+	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`
 	Account       string   `json:"account"`
 	ToRecipients  []string `json:"toRecipients"`

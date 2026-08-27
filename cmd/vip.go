@@ -12,16 +12,7 @@ import (
 
 var vipLimit int
 
-type vipMailboxRequest = struct {
-	AccountName string
-	MailboxName string
-	Limit       int
-	Offset      int
-	UnreadOnly  bool
-	FlaggedOnly bool
-	WithContent bool
-	Since       string
-}
+type vipMailboxRequest = mail.MailboxListRequest
 
 var messagesVIPCmd = &cobra.Command{
 	Use:   "vip",

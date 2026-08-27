@@ -2,9 +2,7 @@ package cmd
 
 import (
 	"fmt"
-	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
@@ -12,17 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-type threadSummary struct {
-	ID           string         `json:"id"`
-	Subject      string         `json:"subject"`
-	Synthetic    bool           `json:"synthetic"`
-	Count        int            `json:"count"`
-	UnreadCount  int            `json:"unreadCount"`
-	LatestDate   string         `json:"latestDate"`
-	Participants []string       `json:"participants"`
-	MessageIDs   []string       `json:"messageIds"`
-	Messages     []mail.Message `json:"messages,omitempty"`
-}
+type threadSummary = mail.ThreadSummary
 
 var (
 	threadLimit  int
@@ -79,7 +67,7 @@ var threadsShowCmd = &cobra.Command{
 		}
 		for _, thread := range threads {
 			if thread.ID == args[0] {
-				thread.Messages = messagesForThread(thread.MessageIDs, messages)
+				thread.Messages = mail.MessagesForThread(thread.MessageIDs, messages)
 				return writer.Write(output.Result{
 					Data:    thread,
 					Summary: fmt.Sprintf("Thread %q with %s", thread.Subject, plural(thread.Count, "message")),
@@ -104,15 +92,15 @@ var threadsArchiveCmd = &cobra.Command{
 			if thread.ID != args[0] {
 				continue
 			}
-			if !threadArchiveAllowed(thread) {
+			if !mail.ThreadArchiveAllowed(thread) {
 				return clierr.Usagef("refusing to archive synthetic subject-only thread %q; archive individual messages instead", thread.ID)
 			}
 			items := make([]batchItem, 0, len(thread.MessageIDs))
-			for _, message := range messagesForThread(thread.MessageIDs, messages) {
+			for _, message := range mail.MessagesForThread(thread.MessageIDs, messages) {
 				items = append(items, batchItem{ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox, Subject: message.Subject})
 			}
 			opts := batchOptions{Action: "archive", DryRun: threadDryRun, Verify: threadVerify}
-			result, mutationErr := runMessageBatch(mailClient, opts, items, archiveMutator(false))
+			result, mutationErr := runMessageBatch(mailClient, opts, items, mail.ArchiveMutator(false))
 			return writeReceipt(result, opts, nil, mutationErr, "")
 		}
 		return clierr.New(clierr.CodeNotFound, "thread not found: "+args[0])
@@ -128,101 +116,7 @@ func loadThreads() ([]threadSummary, []mail.Message, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	byKey := map[string]*threadSummary{}
-	for _, message := range messages {
-		key := normalizeThreadSubject(message.Subject)
-		if key == "" {
-			key = "message-" + message.ID
-		}
-		thread, ok := byKey[key]
-		if !ok {
-			thread = &threadSummary{
-				ID:           key,
-				Subject:      strings.TrimSpace(message.Subject),
-				Synthetic:    !strings.HasPrefix(key, "message-"),
-				Participants: []string{},
-				MessageIDs:   []string{},
-			}
-			byKey[key] = thread
-		}
-		thread.Count++
-		if !message.Read {
-			thread.UnreadCount++
-		}
-		if message.DateReceived > thread.LatestDate {
-			thread.LatestDate = message.DateReceived
-		}
-		thread.MessageIDs = append(thread.MessageIDs, message.ID)
-		if message.Sender != "" && !containsString(thread.Participants, message.Sender) {
-			thread.Participants = append(thread.Participants, message.Sender)
-		}
-	}
-	threads := make([]threadSummary, 0, len(byKey))
-	for _, thread := range byKey {
-		sort.Strings(thread.Participants)
-		threads = append(threads, *thread)
-	}
-	sort.Slice(threads, func(i, j int) bool {
-		return threads[i].LatestDate > threads[j].LatestDate
-	})
-	return threads, messages, nil
-}
-
-func threadArchiveAllowed(thread threadSummary) bool {
-	return !thread.Synthetic || thread.Count <= 1
-}
-
-func messagesForThread(ids []string, loaded []mail.Message) []mail.Message {
-	idSet := map[string]bool{}
-	for _, id := range ids {
-		idSet[id] = true
-	}
-	var messages []mail.Message
-	for _, message := range loaded {
-		if idSet[message.ID] {
-			messages = append(messages, message)
-		}
-	}
-	return messages
-}
-
-func normalizeThreadSubject(subject string) string {
-	subject = strings.TrimSpace(strings.ToLower(subject))
-	for {
-		trimmed := strings.TrimSpace(subject)
-		for _, prefix := range []string{"re:", "fw:", "fwd:"} {
-			if strings.HasPrefix(trimmed, prefix) {
-				trimmed = strings.TrimSpace(strings.TrimPrefix(trimmed, prefix))
-			}
-		}
-		if trimmed == subject {
-			break
-		}
-		subject = trimmed
-	}
-	var b strings.Builder
-	lastSpace := false
-	for _, r := range subject {
-		if unicode.IsSpace(r) {
-			if !lastSpace {
-				b.WriteRune(' ')
-				lastSpace = true
-			}
-			continue
-		}
-		lastSpace = false
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
+	return mail.GroupThreads(messages), messages, nil
 }
 
 func init() {

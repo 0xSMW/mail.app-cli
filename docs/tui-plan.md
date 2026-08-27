@@ -83,7 +83,7 @@ Keys for this phase: navigation, `Enter` opens reader, `Esc` back, `/` search mo
 
 ## Dependencies
 
-- `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`. These need Go 1.24 or newer; `go.mod` moves from 1.21 and `install.sh` and the README say so.
+- `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`. These need Go 1.25 or newer; `go.mod`, `install.sh`, and the README say so.
 - `github.com/mattn/go-runewidth` for column layout.
 - No glamour: bodies are text.
 
@@ -95,6 +95,10 @@ Binary size and startup time should be checked before and after; the TUI package
 - `requestLane` tests: a superseded request's result is dropped; cancellation reaches the context.
 - `cmd/tui_test.go`: the command parses flags and calls `runTUI` with the resolved scope.
 - One manual checklist in this document's companion PR: start with the index available, start with it disabled (`MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX=1`), archive and undo, compose a draft and confirm it appears in Mail.app's Drafts.
+
+## Status (2.1.0)
+
+Phases 0 through 3 shipped in the `tui` command: service layer (`ListOptions`, `Client.WithContext`, `RunBatch`, `GroupThreads`, `FilterBySender` in `pkg/mail`), the three-pane browser, actions with optimistic updates and a two-second index refresh, search, compose, reply, reply all, forward, and draft saving. Not built: undo (Mail.app renumbers moved messages, so the reverse move needs a fresh lookup), the threads section, `--remote`, and theme overlays. Reply threading headers still wait on R3.2.
 
 ## Open questions
 

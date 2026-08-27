@@ -100,37 +100,37 @@ func escapeAppleScriptString(s string) string {
 }
 
 func (c *Client) runAppleScript(script string) (string, error) {
-	return runAutomation("applescript", defaultAutomationTimeout, "-e", script)
+	return runAutomation(c.Context(), "applescript", defaultAutomationTimeout, "-e", script)
 }
 
 func (c *Client) runJXA(script string) (string, error) {
-	return runAutomation("jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
+	return runAutomation(c.Context(), "jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
 }
 
 func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
-	return runAutomation("jxa", timeout, "-l", "JavaScript", "-e", script)
+	return runAutomation(c.Context(), "jxa", timeout, "-l", "JavaScript", "-e", script)
 }
 
-func runAutomation(engine string, timeout time.Duration, args ...string) (string, error) {
+func runAutomation(parent context.Context, engine string, timeout time.Duration, args ...string) (string, error) {
 	if timeout <= 0 {
 		timeout = defaultAutomationTimeout
 	}
 
-	lockCtx, cancelLockWait := context.WithTimeout(context.Background(), automationLockTimeout)
+	lockCtx, cancelLockWait := context.WithTimeout(parent, automationLockTimeout)
 	defer cancelLockWait()
 
 	if err := acquireAutomationGate(lockCtx); err != nil {
-		return "", automationLockError(engine, err)
+		return "", automationLockError(engine, parent, err)
 	}
 	defer releaseAutomationGate()
 
 	releaseProcessLock, err := acquireAutomationProcessLock(lockCtx)
 	if err != nil {
-		return "", automationLockError(engine, err)
+		return "", automationLockError(engine, parent, err)
 	}
 	defer releaseProcessLock()
 
-	executionCtx, cancelExecution := context.WithTimeout(context.Background(), timeout)
+	executionCtx, cancelExecution := context.WithTimeout(parent, timeout)
 	defer cancelExecution()
 
 	cmd := exec.CommandContext(executionCtx, "osascript", args...)
@@ -159,6 +159,9 @@ func runAutomation(engine string, timeout time.Duration, args ...string) (string
 	}
 
 	err = cmd.Wait()
+	if parentErr := parent.Err(); parentErr != nil {
+		return "", parentErr
+	}
 	if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
 		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout}
 	}
@@ -168,7 +171,16 @@ func runAutomation(engine string, timeout time.Duration, args ...string) (string
 	return strings.TrimSpace(out.String()), nil
 }
 
-func automationLockError(engine string, err error) error {
+// automationLockError classifies a failure to enter the automation queue.
+// The caller's own cancellation or deadline is returned as is; only the
+// queue's wait budget running out is a lock timeout.
+func automationLockError(engine string, parent context.Context, err error) error {
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &AutomationLockTimeoutError{Engine: engine, Timeout: automationLockTimeout}
 	}

@@ -2,6 +2,35 @@
 
 A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it prints a JSON envelope. Agents get the same commands, an exit-code table, and an embedded skill. All names, message IDs, addresses, mailboxes, and message content in the examples are fictional.
 
+## Terminal UI
+
+```bash
+mail-app-cli tui                         # all inboxes
+mail-app-cli tui -a "Example Account"    # one account's INBOX
+mail-app-cli tui -a "Example Account" -m "Example Receipts" --message 100001
+```
+
+A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; bodies and every action go through Mail.app one call at a time, with a spinner in the header while a call is queued.
+
+![The terminal client with the mailbox sidebar, the message list across two accounts, and an open message in the reader](docs/images/tui.png)
+
+| Key | Does |
+|---|---|
+| `j` `k` `g` `G` `pgup` `pgdn` | move |
+| `enter` | open the message; `n` `p` step to the next or previous one while reading |
+| `space` | select; actions then apply to the selection |
+| `e` `#` `m` | archive, trash (asks first), move (mailbox picker with filtering) |
+| `u` `!` | toggle read, toggle flag |
+| `/` | search the account (or all accounts from All inboxes); `esc` leaves the results |
+| `c` `r` `R` `f` | compose, reply, reply all, forward; `ctrl+s` sends, `ctrl+d` saves a draft, `esc` discards |
+| `1`..`9` | jump to a mailbox in the sidebar |
+| `tab` | cycle sidebar, list, reader |
+| `ctrl+r` | refresh mailboxes and the list |
+| `?` | hide or show the key bar |
+| `q` | quit; `ctrl+c` twice also quits |
+
+Actions apply on screen right away and the list refreshes from the index two seconds after Mail.app confirms. Because Mail.app renumbers a message when it moves, there is no undo; use `move` from the destination mailbox instead. `NO_COLOR` turns color off, and the TUI uses the terminal's own 16 ANSI colors, so it follows your theme.
+
 ## Features
 
 - Inbox, unread, search, and per-mailbox listings from Mail's local Envelope Index (about 0.1s)
@@ -13,6 +42,7 @@ A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it 
 - Typed errors with a fixed exit-code table and a `hint`
 - A default account and mailbox from a config file, env, or the only account Mail.app has
 - `doctor`, `commands --json`, `--agent --help`, `skill install` for agents
+- `tui`, an interactive three-pane client for triage, reading, and replying
 
 ## Install
 
@@ -20,7 +50,7 @@ A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it 
 curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.sh | sh
 ```
 
-Or with Go 1.24 or newer:
+Or with Go 1.25 or newer:
 
 ```bash
 go install github.com/0xSMW/mail.app-cli/v2@latest
@@ -45,6 +75,8 @@ mail-app-cli move 100001 --to "Example Receipts"
 mail-app-cli search "sample invoice" --limit 20
 mail-app-cli send -t recipient@example.test -s "Hello" --body "Hi" --dry-run
 ```
+
+![Three commands in a terminal: an inbox table with unread and flagged markers, a list of unread message IDs, and an archive dry run receipt](docs/images/cli.png)
 
 Every command has `--help`. `mail-app-cli help output`, `help exit-codes`, `help environment`, and `help agents` cover the contract.
 
@@ -138,7 +170,7 @@ mailbox  INBOX   default
 output   auto    default
 ```
 
-Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (a no-op), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
+Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (reported as skipped, exit 0), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
 
 After archive, delete, or move, Mail.app gives the message a new ID in the destination mailbox. The receipt reports the ID you passed; find the message again with `search` or `recent search` before touching it a second time.
 
@@ -223,6 +255,8 @@ mail-app-cli commands --json  # every command, flag, and agent note
 mail-app-cli show --agent --help
 ```
 
+![Two commands in a terminal: unread messages filtered through --jq to id and subject, and a missing message returning ok false with code not_found and exit status 2](docs/images/agent.png)
+
 `help agents` is the short version: always `--json`, check `ok`, read the exit code, dry-run before acting on more than a couple of messages, and never `send` without showing the user a `--dry-run` first.
 
 ## Migrating from 1.x
@@ -276,7 +310,7 @@ UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot   # after adding or remo
 ## Requirements
 
 - macOS 15 or newer with Mail.app configured
-- Go 1.24 or newer to build
+- Go 1.25 or newer to build
 
 ---
 

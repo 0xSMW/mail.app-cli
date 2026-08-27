@@ -31,6 +31,7 @@ type indexMessage struct {
 	Deleted       int    `json:"Deleted"`
 	MessageSize   int    `json:"MessageSize"`
 	Content       string `json:"Content"`
+	Snippet       string `json:"Snippet"`
 	Mailbox       string `json:"Mailbox"`
 	Account       string `json:"Account"`
 	ToRecipients  string `json:"ToRecipients"`
@@ -108,12 +109,12 @@ func isEnvelopeIndexUnavailable(err error) bool {
 }
 
 func (c *Client) warnEnvelopeIndexFallback(err error) {
-	c.indexFallbackWarningOnce.Do(func() {
+	c.shared.indexFallbackWarningOnce.Do(func() {
 		reason := strings.TrimSpace(err.Error())
 		if reason == "" {
 			reason = "unknown error"
 		}
-		Warn(fmt.Sprintf("Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.", reason))
+		c.warn(fmt.Sprintf("Mail Envelope Index is unavailable (%s). Mail.app automation fallback may be much slower when used. For fast local mail queries, grant Full Disk Access to the app launching mail-app-cli, for example Terminal, iTerm, Cursor, VS Code, Codex, or your automation runner, then rerun the command.", reason))
 	})
 }
 
@@ -126,12 +127,16 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("sqlite3", "-readonly", "-json", indexPath, query)
+	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := c.Context().Err(); ctxErr != nil {
+			// The caller's context ended the query; keep that classifiable.
+			return fmt.Errorf("envelope index query: %w", ctxErr)
+		}
 		return fmt.Errorf("sqlite3 envelope index query failed: %v - %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if strings.TrimSpace(out.String()) == "" {
@@ -296,6 +301,7 @@ func indexMessagesToMessages(rows []indexMessage) []Message {
 			Deleted:      row.Deleted != 0,
 			MessageSize:  row.MessageSize,
 			Content:      row.Content,
+			Snippet:      row.Snippet,
 			Mailbox:      row.Mailbox,
 			Account:      row.Account,
 		})
@@ -337,6 +343,7 @@ select
 	m.deleted as Deleted,
 	m.size as MessageSize,
 	'' as Content,
+	coalesce(su.summary, '') as Snippet,
 	%s as Mailbox,
 	%s as Account,
 	'' as ToRecipients,

@@ -11,14 +11,12 @@ import (
 
 func formatDate(value string) string {
 	value = strings.TrimSpace(value)
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05Z"} {
-		if t, err := time.Parse(layout, value); err == nil {
-			local := t.Local()
-			if local.Year() == time.Now().Year() {
-				return local.Format("Jan 02 15:04")
-			}
-			return local.Format("2006-01-02")
+	if t, ok := mail.ParseMessageTime(value); ok {
+		local := t.Local()
+		if local.Year() == time.Now().Year() {
+			return local.Format("Jan 02 15:04")
 		}
+		return local.Format("2006-01-02")
 	}
 	if len(value) >= 10 {
 		return value[:10]
@@ -27,14 +25,7 @@ func formatDate(value string) string {
 }
 
 func displaySender(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if idx := strings.LastIndex(raw, "<"); idx > 0 {
-		name := strings.Trim(strings.TrimSpace(raw[:idx]), `"'`)
-		if name != "" {
-			return name
-		}
-	}
-	return raw
+	return mail.ParseSender(raw).Name
 }
 
 func messageFlags(p *output.Printer, m mail.Message) string {
@@ -200,13 +191,4 @@ func renderLine(format string, args ...any) func(*output.Printer) {
 	return func(p *output.Printer) { p.Line(format, args...) }
 }
 
-func plural(n int, singular string) string {
-	if n == 1 {
-		return fmt.Sprintf("%d %s", n, singular)
-	}
-	suffix := "s"
-	if strings.HasSuffix(singular, "x") || strings.HasSuffix(singular, "ch") || strings.HasSuffix(singular, "sh") || strings.HasSuffix(singular, "s") {
-		suffix = "es"
-	}
-	return fmt.Sprintf("%d %s%s", n, singular, suffix)
-}
+func plural(n int, singular string) string { return output.Plural(n, singular) }

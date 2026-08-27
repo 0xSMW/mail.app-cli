@@ -43,6 +43,8 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Settings | `mail-app-cli config show --json`, `config set account "Example Account"` |
 | Every command and flag | `mail-app-cli commands --json` |
 
+`mail-app-cli tui` is the interactive client for a person at a terminal; do not run it from a script.
+
 Shortcuts on read-only lists: `--count`, `--jq '.data[] | select(.read == false) | .id'`, and `--quiet` for bare data. State-changing commands reject `--jq` before doing any work. Use `--ids-only` on ID-bearing inbox, search, account, message, draft, thread, smart-query, and recent-search lists.
 
 ## Workflow
@@ -51,7 +53,7 @@ Shortcuts on read-only lists: `--count`, `--jq '.data[] | select(.read == false)
 2. When the user has several accounts and none is configured, account-scoped commands exit 1 listing the names. Ask which, or use `-a`.
 3. To act on search results: `search ... --ids-only | xargs mail-app-cli archive --json`.
 4. After a mutation from outside the CLI, add `--no-cache` to `messages list`; its results are cached for five minutes.
-5. Gmail: archive means "move to All Mail". A message already in All Mail archives as a no-op with `status: succeeded`.
+5. Gmail: archive means "move to All Mail". A message already in All Mail is reported as `status: skipped` with `error: "already in All Mail"`, counted in `skipped`, and the command exits 0; nothing was changed and nothing needs retrying.
 6. Moving a message (archive, delete, move) makes Mail.app assign it a new ID in the destination. The receipt reports the old ID; to touch the message again, find it with `search` or `recent search`. Don't chain a second mutation on the same ID after a move.
 
 ## Migration from 1.x

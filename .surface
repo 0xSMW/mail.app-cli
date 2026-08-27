@@ -394,6 +394,9 @@ threads list --limit (-l)
 threads show
 threads show --help (-h)
 threads show --limit (-l)
+tui
+tui --help (-h)
+tui --message
 unflag
 unflag --dry-run
 unflag --help (-h)

@@ -47,14 +47,36 @@ func (c *Client) GetAccounts() ([]Account, error) {
 	return accounts, err
 }
 
+// ResetAccountCache forgets the in-process account list so the next read
+// asks Mail.app again; an explicit refresh uses it.
+func (c *Client) ResetAccountCache() {
+	c.shared.accountsMu.Lock()
+	defer c.shared.accountsMu.Unlock()
+	c.shared.accounts = nil
+	c.shared.accountsLoaded = false
+}
+
+// cloneAccounts copies the slice and each account's address list, so a
+// caller editing a result cannot reach into the shared cache.
+func cloneAccounts(accounts []Account) []Account {
+	out := make([]Account, len(accounts))
+	for i, account := range accounts {
+		out[i] = account
+		if account.EmailAddresses != nil {
+			out[i].EmailAddresses = append([]string(nil), account.EmailAddresses...)
+		}
+	}
+	return out
+}
+
 func (c *Client) GetAccountsJSON() ([]Account, error) {
-	c.accountsMu.Lock()
-	if c.accountsLoaded {
-		accounts := append([]Account(nil), c.accounts...)
-		c.accountsMu.Unlock()
+	c.shared.accountsMu.Lock()
+	if c.shared.accountsLoaded {
+		accounts := cloneAccounts(c.shared.accounts)
+		c.shared.accountsMu.Unlock()
 		return accounts, nil
 	}
-	c.accountsMu.Unlock()
+	c.shared.accountsMu.Unlock()
 
 	script := `
 const mail = Application('Mail');
@@ -63,10 +85,12 @@ const result = [];
 
 for (let i = 0; i < accounts.length; i++) {
 	const acc = accounts[i];
+	const emailAddresses = acc.emailAddresses();
 	result.push({
 		id: acc.id(),
 		name: acc.name(),
-		emailAddress: acc.emailAddresses().length > 0 ? acc.emailAddresses()[0] : '',
+		emailAddress: emailAddresses.length > 0 ? emailAddresses[0] : '',
+		emailAddresses,
 		userName: acc.userName(),
 		enabled: acc.enabled()
 	});
@@ -84,12 +108,12 @@ JSON.stringify(result);
 		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
 	}
 
-	c.accountsMu.Lock()
-	c.accounts = append([]Account(nil), accounts...)
-	c.accountsLoaded = true
-	c.accountsMu.Unlock()
+	c.shared.accountsMu.Lock()
+	c.shared.accounts = cloneAccounts(accounts)
+	c.shared.accountsLoaded = true
+	c.shared.accountsMu.Unlock()
 
-	return append([]Account(nil), accounts...), nil
+	return cloneAccounts(accounts), nil
 }
 
 func (c *Client) GetUnreadCount() (int, error) {

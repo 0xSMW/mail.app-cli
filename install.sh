@@ -11,7 +11,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 if ! command -v go >/dev/null 2>&1; then
-  echo "Go 1.24 or newer is required: https://go.dev/dl/" >&2
+  echo "Go 1.25 or newer is required: https://go.dev/dl/" >&2
   exit 1
 fi
 

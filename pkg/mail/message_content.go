@@ -10,12 +10,12 @@ import (
 )
 
 func (c *Client) warnContentFallback(err error) {
-	c.contentWarningOnce.Do(func() {
+	c.shared.contentWarningOnce.Do(func() {
 		reason := strings.TrimSpace(err.Error())
 		if reason == "" {
 			reason = "unknown error"
 		}
-		Warn(fmt.Sprintf("message content fetch was limited (%s). Returned message metadata with any content that could be fetched in time. Use a smaller --limit or show for full content on specific messages.", reason))
+		c.warn(fmt.Sprintf("message content fetch was limited (%s). Returned message metadata with any content that could be fetched in time. Use a smaller --limit or show for full content on specific messages.", reason))
 	})
 }
 

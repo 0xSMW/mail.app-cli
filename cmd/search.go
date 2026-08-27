@@ -51,7 +51,7 @@ non-empty mailbox of each enabled account (or of the one named with
 			if !searchNoCache {
 				recentMessages, recentErr := mail.SearchRecentMessages(query, account, mailbox, searchLimit, searchSince)
 				if recentErr == nil {
-					recentMessages = filterMessagesBySender(recentMessages, searchSender, searchSenderDomain)
+					recentMessages = mail.FilterBySender(recentMessages, searchSender, searchSenderDomain)
 					if len(recentMessages) > 0 {
 						return writer.Write(output.Result{
 							Data:    recentMessages,
@@ -65,7 +65,7 @@ non-empty mailbox of each enabled account (or of the one named with
 			}
 			return fmt.Errorf("search messages: %w", err)
 		}
-		messages := filterMessagesBySender(result.Messages, searchSender, searchSenderDomain)
+		messages := mail.FilterBySender(result.Messages, searchSender, searchSenderDomain)
 		if result.Complete {
 			_ = mail.RecordRecentSearchResults(messages, query)
 		}
