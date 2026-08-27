@@ -83,7 +83,9 @@ func (s *sidebar) resize(width, height int) {
 
 // setData rebuilds the tree: All inboxes, then each enabled account with
 // INBOX first and the rest in Mail's order.
-func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) {
+// setData returns true when the selected source changed, for example
+// because its mailbox is gone.
+func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) bool {
 	s.accounts = accounts
 	previous := s.current()
 	entries := []sidebarEntry{{kind: entryUnified}}
@@ -115,6 +117,7 @@ func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) {
 		}
 	}
 	s.cursor = min(s.cursor, max(len(entries)-1, 0))
+	return s.current().source() != previous.source()
 }
 
 // selectInitial opens the requested scope. An account or mailbox that does

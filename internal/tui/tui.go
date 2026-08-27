@@ -83,6 +83,9 @@ type model struct {
 	// refreshWanted defers the index refresh until every queued write has
 	// finished, so a reload cannot resurrect rows a pending write removes.
 	refreshWanted bool
+	// reloadAfterMailboxes makes ctrl+r reload the list once the refreshed
+	// sidebar has settled the selection, rather than racing it.
+	reloadAfterMailboxes bool
 	notice        string
 	err           error
 	helpHidden    bool
@@ -297,7 +300,8 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.helpHidden = !m.helpHidden
 		m.layout()
 	case key == "ctrl+r":
-		cmd = tea.Batch(m.loadMailboxes(), m.reloadList(false))
+		m.reloadAfterMailboxes = true
+		cmd = m.loadMailboxes()
 	case key == "tab":
 		m.cycleFocus(1)
 	case key == "shift+tab":
@@ -479,12 +483,20 @@ func (m model) onMailboxesLoaded(msg mailboxesLoadedMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	first := len(m.sidebar.entries) == 0
-	m.sidebar.setData(msg.accounts, msg.mailboxes)
+	changed := m.sidebar.setData(msg.accounts, msg.mailboxes)
 	if first {
 		if err := m.sidebar.selectInitial(m.opts.Account, m.opts.Mailbox); err != nil {
 			m.fatal = err
 			return m, tea.Quit
 		}
+	}
+	reload := first || changed || m.reloadAfterMailboxes
+	m.reloadAfterMailboxes = false
+	if changed && !first {
+		m.list.leaveSearch()
+		m.closeReader()
+	}
+	if reload {
 		return m, m.spin(m.reloadList(false))
 	}
 	return m, nil
@@ -627,6 +639,9 @@ func (m *model) requestBody() tea.Cmd {
 		return nil
 	}
 	if cached, ok := m.reader.cached(key); ok {
+		// A fetch still in flight for the previous row must not report
+		// against this one.
+		m.bodyLane.abandon()
 		m.reader.show(cached)
 		return nil
 	}
@@ -662,7 +677,9 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 			m.pendingCompose = nil
 			return m, notifyError("could not load the message to quote", msg.err)
 		}
-		m.reader.showError(msg.err)
+		if m.currentKey() == msg.key {
+			m.reader.showError(msg.err)
+		}
 		return m, nil
 	}
 	m.reader.remember(msg.key, msg.message)

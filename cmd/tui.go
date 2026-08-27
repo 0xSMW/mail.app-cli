@@ -38,6 +38,12 @@ ctrl+r refresh, ? help, q quit.`,
 			Color:     output.ColorEnabled(output.FormatPlain, true, outFlags.NoColor, os.Getenv),
 		}
 		if mailboxExplicit() {
+			// A mailbox only means something within an account.
+			account, err := requireAccount()
+			if err != nil {
+				return err
+			}
+			opts.Account = account
 			opts.Mailbox = mailboxInScope()
 		}
 		return tui.Run(mail.NewClient(), opts)
