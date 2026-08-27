@@ -12,6 +12,8 @@ mail-app-cli tui -a "Example Account" -m "Example Receipts" --message 100001
 
 A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; bodies and every action go through Mail.app one call at a time, with a spinner in the header while a call is queued.
 
+![The terminal client with the mailbox sidebar, the message list across two accounts, and an open message in the reader](docs/images/tui.png)
+
 | Key | Does |
 |---|---|
 | `j` `k` `g` `G` `pgup` `pgdn` | move |
@@ -73,6 +75,8 @@ mail-app-cli move 100001 --to "Example Receipts"
 mail-app-cli search "sample invoice" --limit 20
 mail-app-cli send -t recipient@example.test -s "Hello" --body "Hi" --dry-run
 ```
+
+![Three commands in a terminal: an inbox table with unread and flagged markers, a list of unread message IDs, and an archive dry run receipt](docs/images/cli.png)
 
 Every command has `--help`. `mail-app-cli help output`, `help exit-codes`, `help environment`, and `help agents` cover the contract.
 
@@ -250,6 +254,8 @@ mail-app-cli skill install    # ~/.claude/skills/mail-app-cli/SKILL.md
 mail-app-cli commands --json  # every command, flag, and agent note
 mail-app-cli show --agent --help
 ```
+
+![Two commands in a terminal: unread messages filtered through --jq to id and subject, and a missing message returning ok false with code not_found and exit status 2](docs/images/agent.png)
 
 `help agents` is the short version: always `--json`, check `ok`, read the exit code, dry-run before acting on more than a couple of messages, and never `send` without showing the user a `--dry-run` first.
 
