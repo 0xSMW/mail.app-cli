@@ -465,12 +465,55 @@ func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
 func TestStateChangingCommandsRejectJQBeforeRun(t *testing.T) {
 	for _, cmd := range []*cobra.Command{
 		archiveCmd, sendCmd, attachmentsSaveCmd, configSetCmd, draftsCreateCmd,
-		exportMessagesCmd, importMessagesCmd, messagesBatchArchiveCmd, recentClearCmd,
-		rulesApplyCmd, skillInstallCmd, syncCmd, threadsArchiveCmd,
+		exportMessagesCmd, messagesBatchArchiveCmd, recentClearCmd,
+		skillInstallCmd, syncCmd, threadsArchiveCmd,
 	} {
 		if cmd.Annotations[annotationMutation] != "true" {
 			t.Fatalf("%s is not annotated as a mutation", cmd.CommandPath())
 		}
+	}
+}
+
+func TestReadOnlyPreviewsAllowJQ(t *testing.T) {
+	for _, cmd := range []*cobra.Command{importMessagesCmd, rulesApplyCmd} {
+		if cmd.Annotations[annotationMutation] == "true" {
+			t.Fatalf("%s is incorrectly annotated as a mutation", cmd.CommandPath())
+		}
+	}
+
+	fixture := filepath.Join(t.TempDir(), "messages.json")
+	if err := os.WriteFile(fixture, []byte(`[{"id":"42"}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr := run(t, "import", "messages", "--account", "Work", "--file", fixture, "--jq", ".data.validated")
+	if code != 0 || stdout != "1\n" || stderr != "" {
+		t.Fatalf("import jq exit = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "osascript.log")
+	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
+	t.Setenv("MAIL_APP_CLI_TEST_OSASCRIPT_LOG", logPath)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(`#!/bin/sh
+printf '%s\n' "$*" >> "$MAIL_APP_CLI_TEST_OSASCRIPT_LOG"
+case "$*" in
+  *"const accounts = mail.accounts()"*) printf '%s' '[{"id":"work","name":"Work","enabled":true}]' ;;
+  *) printf '%s' '[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}]' ;;
+esac
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, stderr = run(t, "rules", "apply", "receipt-rule", "--account", "Work", "--mailbox", "INBOX", "--query", "receipt", "--jq", ".data.matched")
+	if code != 0 || stdout != "1\n" || stderr != "" {
+		t.Fatalf("rules apply jq exit = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	invocation, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(invocation), "const messages = mbox.messages();") {
+		t.Fatalf("rules apply did not reach its read-only search: %s", invocation)
 	}
 }
 
