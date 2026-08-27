@@ -248,12 +248,52 @@ func TestSkillPrintsMarkdown(t *testing.T) {
 
 func TestCountRefusedBeforeRunOnNonList(t *testing.T) {
 	code, stdout, stderr := run(t, "version", "--count")
-	if code != 1 || stdout != "" || !strings.Contains(stderr, "--ids-only and --count") {
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--count only applies") {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+	code, stdout, stderr = run(t, "version", "--ids-only")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--ids-only only applies") {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
 	}
 	code, stdout, stderr = run(t, "version", "--jq", ".data[")
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "invalid --jq") {
 		t.Fatalf("bad jq: exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+}
+
+func TestListOutputEligibilityAnnotations(t *testing.T) {
+	tests := []struct {
+		path   []string
+		idList bool
+	}{
+		{path: []string{"inbox"}, idList: true},
+		{path: []string{"search"}, idList: true},
+		{path: []string{"accounts", "list"}, idList: true},
+		{path: []string{"mailboxes", "list"}},
+		{path: []string{"messages", "list"}, idList: true},
+		{path: []string{"attachments", "list"}},
+		{path: []string{"drafts", "list"}, idList: true},
+		{path: []string{"rules", "list"}},
+		{path: []string{"smart", "list"}},
+		{path: []string{"smart", "query"}, idList: true},
+		{path: []string{"signatures", "list"}},
+		{path: []string{"threads", "list"}, idList: true},
+		{path: []string{"recent", "search"}, idList: true},
+		{path: []string{"export", "attachments"}},
+	}
+	for _, tt := range tests {
+		t.Run(strings.Join(tt.path, " "), func(t *testing.T) {
+			cmd, _, err := rootCmd.Find(tt.path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cmd.Annotations[annotationList] != "true" {
+				t.Fatalf("%s does not accept --count", cmd.CommandPath())
+			}
+			if got := cmd.Annotations[annotationIDList] == "true"; got != tt.idList {
+				t.Fatalf("%s ids-only eligibility = %t, want %t", cmd.CommandPath(), got, tt.idList)
+			}
+		})
 	}
 }
 

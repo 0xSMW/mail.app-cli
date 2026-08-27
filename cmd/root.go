@@ -27,9 +27,11 @@ const (
 	annotationAgentNotes    = "agentNotes"
 	annotationCompatibility = "compatibility"
 	annotationHelpTopic     = "helpTopic"
-	// annotationList marks commands whose data is a list, the only ones that
-	// accept --ids-only and --count.
+	// annotationList marks commands whose data is a list, which accept --count.
 	annotationList = "list"
+	// annotationIDList marks list commands whose items carry an id, which also
+	// accept --ids-only.
+	annotationIDList = "idList"
 )
 
 var (
@@ -141,9 +143,13 @@ func prepare(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	if (outFlags.Count || outFlags.IDsOnly) && cmd.Annotations[annotationList] != "true" && !isMetaCommand(cmd) {
-		return clierr.Usage("--ids-only and --count only apply to commands that return a list").
+	if outFlags.Count && cmd.Annotations[annotationList] != "true" && !isMetaCommand(cmd) {
+		return clierr.Usage("--count only applies to commands that return a list").
 			WithHint("use --jq to pick fields from this command's data")
+	}
+	if outFlags.IDsOnly && cmd.Annotations[annotationIDList] != "true" && !isMetaCommand(cmd) {
+		return clierr.Usage("--ids-only only applies to lists whose items carry an id").
+			WithHint("use --count to count this list, or --jq to pick fields from its data")
 	}
 	color := output.ColorEnabled(format, tty, outFlags.NoColor, os.Getenv)
 	writer, err = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
@@ -176,13 +182,22 @@ func isMetaCommand(cmd *cobra.Command) bool {
 	return false
 }
 
-// markList tags commands whose data is a list.
+// markList tags commands whose data is a list and therefore accepts --count.
 func markList(cmds ...*cobra.Command) {
 	for _, cmd := range cmds {
 		if cmd.Annotations == nil {
 			cmd.Annotations = map[string]string{}
 		}
 		cmd.Annotations[annotationList] = "true"
+	}
+}
+
+// markIDList tags list commands whose items carry an id and therefore also
+// accept --ids-only.
+func markIDList(cmds ...*cobra.Command) {
+	markList(cmds...)
+	for _, cmd := range cmds {
+		cmd.Annotations[annotationIDList] = "true"
 	}
 }
 
@@ -272,12 +287,15 @@ func init() {
 	rootCmd.AddCommand(helpTopicCommands()...)
 	rootCmd.SetHelpCommand(helpCommand())
 
-	markList(
+	markIDList(
 		inboxCmd, unreadCmd, searchCmd,
-		accountsListCmd, mailboxesListCmd, messagesListCmd,
+		accountsListCmd, messagesListCmd,
 		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd, messagesDraftsCmd,
 		messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd, messagesVIPCmd,
-		attachmentsListCmd, draftsListCmd, rulesListCmd, smartListCmd, smartQueryCmd,
-		signaturesListCmd, threadsListCmd, recentSearchCmd, exportAttachmentsCmd,
+		draftsListCmd, smartQueryCmd, threadsListCmd, recentSearchCmd,
+	)
+	markList(
+		mailboxesListCmd, attachmentsListCmd, rulesListCmd, smartListCmd,
+		signaturesListCmd, exportAttachmentsCmd,
 	)
 }

@@ -125,10 +125,18 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		return refs, nil, nil
 	}
 
-	var notices []string
 	located, err := mailClient.LocateMessages(ids)
-	if err != nil {
-		notices = append(notices, fmt.Sprintf("Envelope Index unavailable (%v); assuming %s", err, describeScope()))
+	return resolveLocatedMessages(ids, located, err)
+}
+
+// resolveLocatedMessages applies Envelope Index lookup results. A successful
+// lookup is authoritative: an absent ID must not be guessed into a configured
+// scope, because that can mutate an unrelated message. Scope fallback is only
+// safe when the index itself was unavailable.
+func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocation, indexErr error) ([]messageRef, []string, error) {
+	var notices []string
+	if indexErr != nil {
+		notices = append(notices, fmt.Sprintf("Envelope Index unavailable (%v); assuming %s", indexErr, describeScope()))
 		located = map[string]mail.MessageLocation{}
 	}
 
@@ -149,16 +157,13 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		missing = append(missing, id)
 	}
 	if len(missing) > 0 {
+		if indexErr == nil {
+			return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message not found in the Envelope Index: %s", strings.Join(missing, ", "))).
+				WithHint("pass --account and --mailbox to address a message the index has not seen yet")
+		}
 		account, accountErr := requireAccount()
 		if accountErr != nil {
-			if err == nil {
-				return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message not found in the Envelope Index: %s", strings.Join(missing, ", "))).
-					WithHint("pass --account and --mailbox to address a message the index has not seen yet")
-			}
 			return nil, nil, accountErr
-		}
-		if err == nil {
-			notices = append(notices, fmt.Sprintf("not in the Envelope Index, assuming %s/%s: %s", account, mailboxInScope(), strings.Join(missing, ", ")))
 		}
 		for _, id := range missing {
 			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope(), ArchiveMailbox: mailboxInScope()})

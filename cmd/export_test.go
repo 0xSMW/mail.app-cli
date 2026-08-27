@@ -84,6 +84,17 @@ func TestAttachmentExportResultPreservesPlainReceiptAndFailure(t *testing.T) {
 	}
 }
 
+func TestExportAttachmentsIDsOnlyIsRejectedBeforeSaving(t *testing.T) {
+	outputDir := filepath.Join(t.TempDir(), "attachments")
+	code, stdout, stderr := run(t, "export", "attachments", "--ids-only", "--output", outputDir)
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--ids-only only applies") {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(outputDir); !os.IsNotExist(err) {
+		t.Fatalf("output directory was created before --ids-only was rejected: %v", err)
+	}
+}
+
 func TestExportAttachmentsPartialFailureWritesOneFailedEnvelope(t *testing.T) {
 	binDir := t.TempDir()
 	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
