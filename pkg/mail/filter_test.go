@@ -64,6 +64,26 @@ func TestNormalizeThreadSubject(t *testing.T) {
 	}
 }
 
+func TestGroupThreadsMarksSubjectGroupsSynthetic(t *testing.T) {
+	threads := GroupThreads([]Message{
+		{ID: "1", Subject: "message-release"},
+		{ID: "2", Subject: "Re: message-release"},
+		{ID: "3", Subject: ""},
+	})
+	for _, thread := range threads {
+		switch thread.ID {
+		case "message-release":
+			if !thread.Synthetic || ThreadArchiveAllowed(thread) {
+				t.Fatalf("subject group starting with message- must stay synthetic: %+v", thread)
+			}
+		case "message-3":
+			if thread.Synthetic {
+				t.Fatalf("subjectless message should not be synthetic: %+v", thread)
+			}
+		}
+	}
+}
+
 func TestThreadArchiveAllowed(t *testing.T) {
 	if ThreadArchiveAllowed(ThreadSummary{ID: "invoice", Synthetic: true, Count: 2}) {
 		t.Fatal("subject-only group should not be archivable")

@@ -26,6 +26,9 @@ func GroupThreads(messages []Message) []ThreadSummary {
 	byKey := map[string]*ThreadSummary{}
 	for _, message := range messages {
 		key := NormalizeThreadSubject(message.Subject)
+		// A subject-derived group is a guess (synthetic); a message with no
+		// subject stands alone under its own ID and is not.
+		synthetic := key != ""
 		if key == "" {
 			key = "message-" + message.ID
 		}
@@ -34,7 +37,7 @@ func GroupThreads(messages []Message) []ThreadSummary {
 			thread = &ThreadSummary{
 				ID:           key,
 				Subject:      strings.TrimSpace(message.Subject),
-				Synthetic:    !strings.HasPrefix(key, "message-"),
+				Synthetic:    synthetic,
 				Participants: []string{},
 				MessageIDs:   []string{},
 			}
