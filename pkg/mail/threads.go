@@ -23,21 +23,27 @@ type ThreadSummary struct {
 
 // GroupThreads buckets messages by normalized subject, newest thread first.
 func GroupThreads(messages []Message) []ThreadSummary {
-	byKey := map[string]*ThreadSummary{}
+	// Subject groups and single subjectless messages live in separate key
+	// spaces so a subject that happens to read like a message ID cannot
+	// merge with an unrelated message and inherit its archive rules.
+	type threadKey struct {
+		synthetic bool
+		value     string
+	}
+	byKey := map[threadKey]*ThreadSummary{}
 	for _, message := range messages {
-		key := NormalizeThreadSubject(message.Subject)
-		// A subject-derived group is a guess (synthetic); a message with no
-		// subject stands alone under its own ID and is not.
-		synthetic := key != ""
-		if key == "" {
-			key = "message-" + message.ID
+		key := threadKey{synthetic: true, value: NormalizeThreadSubject(message.Subject)}
+		if key.value == "" {
+			// Normalized subjects are lowercase, so the capital M keeps this
+			// ID out of the space a subject can occupy.
+			key = threadKey{value: "Message-" + message.ID}
 		}
 		thread, ok := byKey[key]
 		if !ok {
 			thread = &ThreadSummary{
-				ID:           key,
+				ID:           key.value,
 				Subject:      strings.TrimSpace(message.Subject),
-				Synthetic:    synthetic,
+				Synthetic:    key.synthetic,
 				Participants: []string{},
 				MessageIDs:   []string{},
 			}
