@@ -48,7 +48,7 @@ Actions apply on screen right away and the list refreshes from the index two sec
 curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.sh | sh
 ```
 
-Or with Go 1.24 or newer:
+Or with Go 1.25 or newer:
 
 ```bash
 go install github.com/0xSMW/mail.app-cli/v2@latest
@@ -304,7 +304,7 @@ UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot   # after adding or remo
 ## Requirements
 
 - macOS 15 or newer with Mail.app configured
-- Go 1.24 or newer to build
+- Go 1.25 or newer to build
 
 ---
 

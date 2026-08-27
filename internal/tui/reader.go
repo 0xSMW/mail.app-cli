@@ -142,7 +142,7 @@ func (r *reader) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 		r.viewport.GotoBottom()
 	case "n":
 		m.list.move(1)
-		return m.requestBody()
+		return tea.Batch(m.requestBody(), m.loadMore())
 	case "p":
 		m.list.move(-1)
 		return m.requestBody()

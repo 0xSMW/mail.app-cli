@@ -16,6 +16,9 @@ type list struct {
 	height    int
 	source    listSource
 	dateWidth int
+	// hasMore is true while the last page came back full, so older messages
+	// may still be waiting in the mailbox.
+	hasMore bool
 }
 
 func (l *list) resize(width, height int) {
@@ -41,6 +44,7 @@ func (l *list) setMessages(messages []mail.Message, keepCursor bool, source list
 	}
 	l.messages = messages
 	l.source = source
+	l.hasMore = source.search == "" && len(messages) >= l.pageSize()
 	l.cursor = 0
 	if keepCursor {
 		for i, m := range messages {
@@ -49,17 +53,44 @@ func (l *list) setMessages(messages []mail.Message, keepCursor bool, source list
 			}
 		}
 	}
-	// Old years need the full date; this year fits "Jan 02".
+	l.measureDates()
+	if l.selected == nil {
+		l.selected = map[string]bool{}
+	}
+}
+
+// appendPage adds an older page. Rows the list already has (the index can
+// shift while paging) are dropped.
+func (l *list) appendPage(messages []mail.Message, pageSize int) {
+	seen := make(map[string]bool, len(l.messages))
+	for _, m := range l.messages {
+		seen[bodyKey(m)] = true
+	}
+	for _, m := range messages {
+		if !seen[bodyKey(m)] {
+			l.messages = append(l.messages, m)
+		}
+	}
+	l.hasMore = len(messages) >= pageSize
+	l.measureDates()
+}
+
+// nearEnd reports whether the cursor is close enough to the last loaded row
+// that the next page should be fetched.
+func (l *list) nearEnd() bool {
+	return l.hasMore && l.cursor >= len(l.messages)-l.height
+}
+
+// measureDates picks the date column width: old years need the full date,
+// this year fits "Jan 02".
+func (l *list) measureDates() {
 	l.dateWidth = 6
 	now := time.Now()
-	for _, m := range messages {
+	for _, m := range l.messages {
 		if len(formatDate(m.DateReceived, now)) > 6 {
 			l.dateWidth = 10
 			break
 		}
-	}
-	if l.selected == nil {
-		l.selected = map[string]bool{}
 	}
 }
 
@@ -206,11 +237,16 @@ func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	default:
 		return m.handleActionKey(msg.String())
 	}
-	// A cursor move refreshes the reader when it is showing beside the list.
+	// A cursor move refreshes the reader when it is showing beside the list,
+	// and pulls the next page when it nears the end of what is loaded.
+	var cmds []tea.Cmd
 	if m.reader.open {
-		return m.requestBody()
+		cmds = append(cmds, m.requestBody())
 	}
-	return nil
+	if l.nearEnd() {
+		cmds = append(cmds, m.loadMore())
+	}
+	return tea.Batch(cmds...)
 }
 
 func (l *list) view(m *model) string {

@@ -83,7 +83,7 @@ Keys for this phase: navigation, `Enter` opens reader, `Esc` back, `/` search mo
 
 ## Dependencies
 
-- `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`. These need Go 1.24 or newer; `go.mod` moves from 1.21 and `install.sh` and the README say so.
+- `charm.land/bubbletea/v2`, `charm.land/bubbles/v2`, `charm.land/lipgloss/v2`. These need Go 1.25 or newer; `go.mod`, `install.sh`, and the README say so.
 - `github.com/mattn/go-runewidth` for column layout.
 - No glamour: bodies are text.
 

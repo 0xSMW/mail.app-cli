@@ -12,8 +12,8 @@ func (c *Client) ListMessages(req MailboxListRequest) ([]Message, error) {
 
 // ListUnified lists an inbox-style view (inbox, unread, flagged, sent, drafts,
 // trash, junk) merged across every enabled account.
-func (c *Client) ListUnified(kind string, limit int) ([]Message, error) {
-	return c.GetUnifiedMessagesJSON(kind, limit, 0, false)
+func (c *Client) ListUnified(kind string, limit, offset int) ([]Message, error) {
+	return c.GetUnifiedMessagesJSON(kind, limit, offset, false)
 }
 
 // MessageDetails fetches one message with its body through Mail.app.

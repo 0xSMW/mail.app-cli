@@ -67,6 +67,7 @@ type model struct {
 
 	mailboxLane requestLane
 	listLane    requestLane
+	pageLane    requestLane
 	bodyLane    requestLane
 	searchLane  requestLane
 
@@ -183,6 +184,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case messagesLoadedMsg:
 		return m.onMessagesLoaded(msg)
 
+	case pageLoadedMsg:
+		return m.onPageLoaded(msg)
+
 	case bodyDebounceMsg:
 		if m.reader.open && m.currentKey() == msg.key {
 			return m, m.spin(m.loadBody())
@@ -229,7 +233,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) anyLoading() bool {
-	return m.mailboxLane.loading || m.listLane.loading || m.bodyLane.loading || m.searchLane.loading || m.writes.busy
+	return m.mailboxLane.loading || m.listLane.loading || m.pageLane.loading || m.bodyLane.loading || m.searchLane.loading || m.writes.busy
 }
 
 // spin starts the spinner chain if a load is now in flight and no chain is
@@ -474,6 +478,14 @@ type messagesLoadedMsg struct {
 	source   listSource
 }
 
+// pageLoadedMsg carries an older page of the current mailbox.
+type pageLoadedMsg struct {
+	requestResult
+	messages []mail.Message
+	source   listSource
+	pageSize int
+}
+
 // reloadList fetches the current mailbox or re-runs the current search.
 // silent refreshes keep the cursor and show no spinner; they follow a
 // mutation.
@@ -485,19 +497,64 @@ func (m *model) reloadList(silent bool) tea.Cmd {
 		return nil
 	}
 	source := m.sidebar.current().source()
+	m.pageLane.abandon()
 	id, ctx := m.listLane.begin(m.ctx, silent)
 	client := m.client.WithContext(ctx)
 	limit := m.list.pageSize()
 	return func() tea.Msg {
-		var messages []mail.Message
-		var err error
-		if source.unified {
-			messages, err = client.ListUnified("inbox", limit)
-		} else {
-			messages, err = client.ListMessages(mail.MailboxListRequest{AccountName: source.account, MailboxName: source.mailbox, Limit: limit})
-		}
+		messages, err := listPage(client, source, limit, 0)
 		return messagesLoadedMsg{requestResult: requestResult{id, err}, messages: messages, silent: silent, source: source}
 	}
+}
+
+func listPage(client *mail.Client, source listSource, limit, offset int) ([]mail.Message, error) {
+	if source.unified {
+		return client.ListUnified("inbox", limit, offset)
+	}
+	return client.ListMessages(mail.MailboxListRequest{AccountName: source.account, MailboxName: source.mailbox, Limit: limit, Offset: offset})
+}
+
+// loadMore fetches the page after the last loaded row. It is a separate
+// lane so it never cancels, and is never mistaken for, a reload.
+func (m *model) loadMore() tea.Cmd {
+	if !m.list.hasMore || m.pageLane.loading || m.listLane.loading {
+		return nil
+	}
+	source := m.list.source
+	offset := len(m.list.messages)
+	limit := m.list.pageSize()
+	id, ctx := m.pageLane.begin(m.ctx, false)
+	client := m.client.WithContext(ctx)
+	return func() tea.Msg {
+		messages, err := listPage(client, source, limit, offset)
+		return pageLoadedMsg{requestResult: requestResult{id, err}, messages: messages, source: source, pageSize: limit}
+	}
+}
+
+func (m model) onPageLoaded(msg pageLoadedMsg) (tea.Model, tea.Cmd) {
+	cmd, ok := m.pageLane.settle(msg.requestResult)
+	if !ok || msg.source != m.list.source {
+		return m, cmd
+	}
+	m.list.appendPage(msg.messages, msg.pageSize)
+	if id := m.pendingOpen; id != "" {
+		return m, m.openPending(id, msg.source)
+	}
+	return m, nil
+}
+
+// openPending opens the --message target once it is loaded, paging further
+// while the mailbox has more.
+func (m *model) openPending(id string, source listSource) tea.Cmd {
+	if m.list.jumpToID(id) {
+		m.pendingOpen = ""
+		return m.openReader()
+	}
+	if m.list.hasMore {
+		return m.loadMore()
+	}
+	m.pendingOpen = ""
+	return notifyProblem("message " + id + " is not in " + source.label())
 }
 
 func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
@@ -511,12 +568,7 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmds []tea.Cmd
 	if id := m.pendingOpen; id != "" {
-		m.pendingOpen = ""
-		if m.list.jumpToID(id) {
-			cmds = append(cmds, m.openReader())
-		} else {
-			cmds = append(cmds, notifyProblem("message "+id+" is not in the first page of "+msg.source.label()))
-		}
+		cmds = append(cmds, m.openPending(id, msg.source))
 	}
 	if m.reader.open {
 		cmds = append(cmds, m.requestBody())

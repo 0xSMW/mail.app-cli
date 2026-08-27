@@ -147,17 +147,22 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	}
 	chunkSize := normalizedChunkSize(len(items), opts.ChunkSize)
 	result.Chunks = (len(items) + chunkSize - 1) / chunkSize
+	if opts.Action == "archive" && !opts.TrustSource {
+		items = client.archiveSources(items)
+	}
 	if opts.DryRun {
+		// A preview shows the same sources and skips the real run would use.
 		for _, item := range items {
 			item.Status = "dry-run"
+			if skip := skipReason(client, opts, item); skip != "" {
+				item.Status = "skipped"
+				item.Error = skip
+			}
 			result.Skipped++
 			result.Items = append(result.Items, item)
 		}
 		result.EndedAt = time.Now().Format(time.RFC3339)
 		return result, nil
-	}
-	if opts.Action == "archive" && !opts.TrustSource {
-		items = client.archiveSources(items)
 	}
 
 	for start := 0; start < len(items); start += chunkSize {
