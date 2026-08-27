@@ -111,6 +111,85 @@ func TestRunParseErrorDerivesFallbackOutputFromSuppliedStdout(t *testing.T) {
 	}
 }
 
+func TestRunPreRunErrorResolvesConfiguredFallbackOutput(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv(config.EnvConfigPath, path)
+	t.Setenv(config.EnvOutput, "")
+
+	writeConfig := func(outputValue string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(`{"output":"`+outputValue+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	writeConfig("json")
+	var terminalStdout terminalBuffer
+	var terminalStderr bytes.Buffer
+	if code := Run([]string{"config", "set", "account"}, &terminalStdout, &terminalStderr); code != 1 {
+		t.Fatalf("configured JSON exit = %d: %s", code, terminalStderr.String())
+	}
+	var jsonError output.ErrorEnvelope
+	if err := json.Unmarshal(terminalStderr.Bytes(), &jsonError); err != nil || jsonError.Code != "usage" {
+		t.Fatalf("configured JSON error = %q, unmarshal error = %v", terminalStderr.String(), err)
+	}
+
+	writeConfig("plain")
+	var bufferedStdout bytes.Buffer
+	var bufferedStderr bytes.Buffer
+	if code := Run([]string{"config", "set", "account"}, &bufferedStdout, &bufferedStderr); code != 1 {
+		t.Fatalf("configured plain exit = %d: %s", code, bufferedStderr.String())
+	}
+	if strings.HasPrefix(strings.TrimSpace(bufferedStderr.String()), "{") || !strings.Contains(bufferedStderr.String(), "mail-app-cli:") {
+		t.Fatalf("configured plain error = %q, want plain error", bufferedStderr.String())
+	}
+}
+
+func TestRunPreRunErrorFallbackOutputPrecedence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"output":"plain"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfigPath, path)
+	t.Setenv(config.EnvOutput, "json")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"config", "set", "account"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("environment JSON exit = %d: %s", code, stderr.String())
+	}
+	var envError output.ErrorEnvelope
+	if err := json.Unmarshal(stderr.Bytes(), &envError); err != nil || envError.Code != "usage" {
+		t.Fatalf("environment JSON error = %q, unmarshal error = %v", stderr.String(), err)
+	}
+
+	stderr.Reset()
+	if code := Run([]string{"config", "set", "account", "--plain"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("flag plain exit = %d: %s", code, stderr.String())
+	}
+	if strings.HasPrefix(strings.TrimSpace(stderr.String()), "{") || !strings.Contains(stderr.String(), "mail-app-cli:") {
+		t.Fatalf("flag plain error = %q, want plain error", stderr.String())
+	}
+}
+
+func TestRunPreRunErrorDoesNotHideMalformedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfigPath, path)
+	t.Setenv(config.EnvOutput, "")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"config", "set", "account"}, &stdout, &stderr); code != 1 {
+		t.Fatalf("exit = %d: %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "accepts 2 arg(s), received 1") || strings.Contains(stderr.String(), "parse config") {
+		t.Fatalf("error = %q, want original argument error", stderr.String())
+	}
+}
+
 func TestPlainAndJSONConflict(t *testing.T) {
 	code, _, stderr := run(t, "version", "--plain", "--json")
 	if code != 1 || !strings.Contains(stderr, "--plain cannot be combined") {

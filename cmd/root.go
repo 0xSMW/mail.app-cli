@@ -48,6 +48,11 @@ var (
 	cfg        config.Config
 	resolved   config.Resolved
 	mailClient *mail.Client
+
+	// Retain a failed config load for fallback error formatting, so a malformed
+	// or inaccessible config file is never read twice in one invocation.
+	loadedConfig        config.Config
+	configLoadAttempted bool
 )
 
 var rootCmd = &cobra.Command{
@@ -77,6 +82,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	defer resetCommandFlags(rootCmd)
 
 	writer = nil
+	loadedConfig = config.Config{}
+	configLoadAttempted = false
 	rootCmd.SetArgs(args)
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
@@ -90,12 +97,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	w := writer
 	if w == nil {
-		// prepare never ran (parse error, bad config). Honor an explicit JSON
-		// request in the raw args so agents still get a parseable error.
-		format := output.FormatJSON
-		if output.IsTerminal(stdout) && !wantsJSONArgs(args) {
-			format = output.FormatPlain
-		}
+		// prepare never ran (for example, Cobra rejected the arguments). Resolve
+		// output independently so that this error follows the same flag > env >
+		// config > auto precedence as a command that reached prepare. A broken
+		// config must not replace the original Cobra error.
+		format := fallbackOutputFormat(args, stdout)
 		w, _ = output.New(format, stdout, stderr, false, "", "", mail.SchemaVersion)
 	}
 	w.Error(cerr)
@@ -120,15 +126,85 @@ func resetCommandFlags(cmd *cobra.Command) {
 	}
 }
 
-func wantsJSONArgs(args []string) bool {
-	for _, arg := range args {
-		switch {
-		case arg == "--json", arg == "--agent", arg == "--quiet", arg == "-q", arg == "--jq",
-			strings.HasPrefix(arg, "--jq="), arg == "--ids-only", arg == "--count":
-			return true
+func fallbackOutputFormat(args []string, stdout io.Writer) output.Format {
+	// Cobra has not necessarily parsed persistent flags when it reports an
+	// argument error. Read only output selectors here; they are sufficient for
+	// output.Resolve and avoid treating an unknown command or malformed argument
+	// as a second error.
+	flags := outputFlagsFromArgs(args)
+	loaded := loadedConfig
+	if !configLoadAttempted {
+		var err error
+		loaded, err = config.Load()
+		if err != nil {
+			loaded = config.Config{}
 		}
 	}
-	return os.Getenv(config.EnvOutput) == "json"
+	configured := config.Resolve(nil, loaded, os.Getenv).Output.Value
+	format, err := output.Resolve(flags, configured, output.IsTerminal(stdout))
+	if err == nil {
+		return format
+	}
+
+	// Keep the original parse or argument error authoritative if the raw flags
+	// themselves conflict. JSON is the safest fallback for an explicit JSON
+	// selector; otherwise preserve an explicit plain selector or auto output.
+	if flags.JSON || flags.JQ != "" || flags.Agent || flags.Quiet || flags.IDsOnly || flags.Count {
+		return output.FormatJSON
+	}
+	if flags.Plain {
+		return output.FormatPlain
+	}
+	if output.IsTerminal(stdout) {
+		return output.FormatPlain
+	}
+	return output.FormatJSON
+}
+
+func outputFlagsFromArgs(args []string) output.Flags {
+	var flags output.Flags
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if arg == "-q" {
+			flags.Quiet = true
+			continue
+		}
+		if arg == "--jq" {
+			if i+1 < len(args) {
+				flags.JQ = args[i+1]
+				i++
+			}
+			continue
+		}
+		if value, ok := strings.CutPrefix(arg, "--jq="); ok {
+			flags.JQ = value
+			continue
+		}
+		setOutputBoolFlag(&flags, arg)
+	}
+	return flags
+}
+
+func setOutputBoolFlag(flags *output.Flags, arg string) {
+	name, value, hasValue := strings.Cut(arg, "=")
+	set := !hasValue || !strings.EqualFold(value, "false")
+	switch name {
+	case "--json":
+		flags.JSON = set
+	case "--plain":
+		flags.Plain = set
+	case "--quiet":
+		flags.Quiet = set
+	case "--ids-only":
+		flags.IDsOnly = set
+	case "--count":
+		flags.Count = set
+	case "--agent":
+		flags.Agent = set
+	}
 }
 
 // classifyCommandError turns cobra's own parse failures into usage errors and
@@ -152,6 +228,8 @@ func classifyCommandError(err error) *clierr.Error {
 
 func prepare(cmd *cobra.Command, args []string) error {
 	loaded, err := config.Load()
+	loadedConfig = loaded
+	configLoadAttempted = true
 	if err != nil && !isConfigRecoveryCommand(cmd) {
 		return clierr.Wrap(clierr.CodeUsage, err, err.Error()).WithHint("fix or delete the config file, see 'mail-app-cli config path'")
 	}
