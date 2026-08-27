@@ -166,6 +166,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 		items = append(items, mail.BatchItem{ID: t.ID, Account: t.Account, SourceMailbox: t.Mailbox, Subject: t.Subject})
 	}
 
+	m.deferPendingReads()
 	switch opts.Action {
 	case "archive", "delete", "move":
 		// Rows only leave the screen when the action removes them from the
@@ -226,6 +227,25 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 		return tea.Batch(run, m.requestBody())
 	}
 	return run
+}
+
+// deferPendingReads drops index reads still in flight when a write starts:
+// their answers predate the write and would overwrite the optimistic state.
+// The refresh that follows the drained queue reads the settled index.
+func (m *model) deferPendingReads() {
+	lanes := []*requestLane{&m.mailboxLane, &m.listLane, &m.pageLane}
+	if m.list.source.search != "" {
+		lanes = append(lanes, &m.searchLane)
+	}
+	for _, lane := range lanes {
+		if lane.inFlight() {
+			lane.abandon()
+			m.refreshWanted = true
+		}
+	}
+	if m.refreshWanted {
+		m.reloadAfterMailboxes = false
+	}
 }
 
 func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {

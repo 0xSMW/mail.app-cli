@@ -218,6 +218,25 @@ func TestManualRefreshDefersWhileWritesPending(t *testing.T) {
 	}
 }
 
+func TestMutationAbandonsInFlightRefresh(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "ctrl+r")
+	if !m.mailboxLane.inFlight() || !m.reloadAfterMailboxes {
+		t.Fatal("ctrl+r did not start a mailbox reload")
+	}
+	staleID := m.mailboxLane.id
+	m = press(m, "e")
+	if m.mailboxLane.inFlight() || m.reloadAfterMailboxes {
+		t.Fatal("archive left the refresh read in flight")
+	}
+	if !m.refreshWanted {
+		t.Fatal("archive did not defer the refresh until the write drains")
+	}
+	if m.mailboxLane.accepts(requestResult{requestID: staleID}) {
+		t.Fatal("stale refresh answer would still be accepted")
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")

@@ -60,6 +60,11 @@ func (l *requestLane) finish() {
 	l.loading = false
 }
 
+// inFlight reports whether a read is still waiting on an answer.
+func (l *requestLane) inFlight() bool {
+	return l.cancel != nil
+}
+
 func (l *requestLane) abandon() {
 	l.finish()
 	l.id++
