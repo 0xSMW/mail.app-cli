@@ -333,6 +333,12 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.helpHidden = !m.helpHidden
 		m.layout()
 	case key == "ctrl+r":
+		if m.writes.busy {
+			// The index lags pending writes; refresh once they drain.
+			m.refreshWanted = true
+			cmd = notify("refreshing after pending actions finish")
+			break
+		}
 		m.reloadAfterMailboxes = true
 		cmd = m.loadMailboxes(true)
 	case key == "tab":

@@ -23,6 +23,8 @@ func press(m model, keys ...string) model {
 			msg = tea.KeyPressMsg{Code: tea.KeyTab}
 		case "space":
 			msg = tea.KeyPressMsg{Code: tea.KeySpace, Text: " "}
+		case "ctrl+r":
+			msg = tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl}
 		default:
 			msg = tea.KeyPressMsg{Code: rune(key[0]), Text: key}
 		}
@@ -160,6 +162,18 @@ func TestComposeFromAllInboxesAsksForAccount(t *testing.T) {
 	picker, ok := m.modal.(*mailboxPicker)
 	if !ok || picker.title != "Send from" || len(picker.names) != 2 {
 		t.Fatalf("compose from All inboxes did not ask for an account: %T %+v", m.modal, m.modal)
+	}
+}
+
+func TestManualRefreshDefersWhileWritesPending(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "e")
+	if !m.writes.busy {
+		t.Fatal("archive did not start a write")
+	}
+	m = press(m, "ctrl+r")
+	if m.reloadAfterMailboxes || !m.refreshWanted {
+		t.Fatalf("ctrl+r during a write should defer: reloadAfterMailboxes=%v refreshWanted=%v", m.reloadAfterMailboxes, m.refreshWanted)
 	}
 }
 
