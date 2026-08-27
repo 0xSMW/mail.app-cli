@@ -63,6 +63,24 @@ var importMessagesCmd = &cobra.Command{
 }
 
 func parseImportMessages(data []byte) ([]mail.Message, error) {
+	messages, err := parseImportMessagePayload(data)
+	if err == nil {
+		return messages, nil
+	}
+
+	// JSON command output is wrapped in the standard envelope. Accept the
+	// envelope emitted by `export messages` on stdout as well as the raw export
+	// payload written with --output.
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if json.Unmarshal(data, &envelope) == nil && len(envelope.Data) > 0 {
+		return parseImportMessagePayload(envelope.Data)
+	}
+	return nil, err
+}
+
+func parseImportMessagePayload(data []byte) ([]mail.Message, error) {
 	var direct []mail.Message
 	if err := json.Unmarshal(data, &direct); err == nil {
 		return direct, nil

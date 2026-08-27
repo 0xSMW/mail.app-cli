@@ -126,7 +126,7 @@ Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
 
 `--account`/`-a` and `--mailbox`/`-m` work on every command. Precedence is flag, then `MAIL_APP_CLI_ACCOUNT`/`MAIL_APP_CLI_MAILBOX`, then the config file, then defaults: the only enabled account, and `INBOX`. With several accounts and no default, account-scoped commands exit 1 and list the names.
 
-The mailbox default applies to the commands that read one mailbox: `messages list`, `messages batch` selectors, `threads`, `export`, `import`, and `rules apply`. `inbox`, `unread`, `search`, and `sync` only narrow to a mailbox when `-m` is on the command line, and ID-driven verbs never use the default to guess where a message is.
+The mailbox default applies to the commands that read one mailbox: `messages list`, `messages batch` selectors, `threads`, `export`, `import`, and `rules apply`. The unified inbox views (`inbox`, `unread`, `messages inbox`, and `messages unread`) respect the resolved scope: an account from `--account`, `MAIL_APP_CLI_ACCOUNT`, or config limits the view to that account's INBOX; a mailbox from `--mailbox`, `MAIL_APP_CLI_MAILBOX`, or config limits it to that mailbox. A mailbox scope needs an account, so the CLI uses the only enabled account when there is one or asks you to choose when there are several. With no configured account or mailbox, these views merge INBOX across enabled accounts. `search` and `sync` only narrow to a mailbox when `-m` is on the command line, and ID-driven verbs never use the default to guess where a message is.
 
 ```bash
 mail-app-cli config set account "Work"
