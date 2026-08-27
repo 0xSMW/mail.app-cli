@@ -93,6 +93,9 @@ type model struct {
 	// advanceAfterPage moves to the next row once a page the reader asked
 	// for at the loaded boundary arrives.
 	advanceAfterPage bool
+	// markFailed remembers messages whose automatic mark-read failed, so
+	// the reader does not retry on every refresh; an explicit u clears it.
+	markFailed map[string]bool
 	notice           string
 	err              error
 	helpHidden       bool
@@ -723,7 +726,7 @@ func (m *model) requestBody() tea.Cmd {
 		m.bodyLane.abandon()
 		m.reader.show(cached)
 		if !cached.Read {
-			return m.markCurrentRead()
+			return m.autoMarkRead()
 		}
 		return nil
 	}
@@ -765,10 +768,19 @@ func (m model) onBodyLoaded(msg bodyLoadedMsg) (tea.Model, tea.Cmd) {
 		m.reader.show(msg.message)
 		if !msg.message.Read {
 			// Reading marks read, the way every mail client does.
-			return m, m.markCurrentRead()
+			return m, m.autoMarkRead()
 		}
 	}
 	return m, nil
+}
+
+// autoMarkRead marks the message on screen read unless a previous attempt
+// failed, which would otherwise loop through the failure refresh.
+func (m *model) autoMarkRead() tea.Cmd {
+	if key := m.currentKey(); key != "" && m.markFailed[key] {
+		return nil
+	}
+	return m.markCurrentRead()
 }
 
 func (m *model) openReader() tea.Cmd {

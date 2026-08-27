@@ -57,6 +57,13 @@ func (r *reader) forget(keys map[string]bool) {
 	for key := range keys {
 		delete(r.cache, key)
 	}
+	kept := r.order[:0]
+	for _, key := range r.order {
+		if !keys[key] {
+			kept = append(kept, key)
+		}
+	}
+	r.order = kept
 }
 
 // syncFlags copies read and flagged state from freshly listed rows onto

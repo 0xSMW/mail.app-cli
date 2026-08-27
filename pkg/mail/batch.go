@@ -263,12 +263,13 @@ func skipReason(_ *Client, opts BatchOptions, item BatchItem) string {
 }
 
 // archiveSources rewrites each item's source to INBOX or its backing
-// mailbox so archive never strips a user label. An item listed under
-// anything other than INBOX or the archive that the index cannot place is
-// marked failed rather than archived from the label it was listed in.
+// mailbox so archive never strips a user label. A message listed under
+// All Mail (a Gmail search hit, say) is looked up too, because it may still
+// carry the INBOX label. An item under a label that the index cannot place
+// is marked failed rather than archived from that label.
 func (c *Client) archiveSources(items []BatchItem) []BatchItem {
 	needsLookup := func(item BatchItem) bool {
-		return !strings.EqualFold(item.SourceMailbox, "INBOX") && !IsArchiveAlias(item.SourceMailbox)
+		return !strings.EqualFold(item.SourceMailbox, "INBOX")
 	}
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
@@ -286,10 +287,16 @@ func (c *Client) archiveSources(items []BatchItem) []BatchItem {
 		}
 		loc, ok := located[item.ID]
 		switch {
+		case err != nil && IsArchiveAlias(item.SourceMailbox):
+			// Without the index a message listed under All Mail is left
+			// there; the skip below reports it.
 		case err != nil:
 			items[i].Status = "failed"
 			items[i].Error = fmt.Sprintf("cannot resolve a safe archive source without the Envelope Index (%v); archive from INBOX with --mailbox", err)
 		case !ok || !strings.EqualFold(loc.Account, item.Account):
+			if IsArchiveAlias(item.SourceMailbox) {
+				continue
+			}
 			items[i].Status = "failed"
 			items[i].Error = "message not in the Envelope Index; archive from INBOX with --mailbox"
 		default:

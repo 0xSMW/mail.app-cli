@@ -99,6 +99,12 @@ func (m *model) handleActionKey(key string) tea.Cmd {
 // selection alone.
 func (m *model) act(targets []mail.Message, opts mail.BatchOptions, mutate mail.Mutator) tea.Cmd {
 	m.list.clearSelection()
+	if opts.Action == "mark" {
+		// An explicit request lifts the automatic retry guard.
+		for _, t := range targets {
+			delete(m.markFailed, bodyKey(t))
+		}
+	}
 	return m.mutate(targets, opts, mutate)
 }
 
@@ -226,8 +232,17 @@ func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 	summary := result.Summary(msg.opts)
 	if result.Failed > 0 || (msg.err != nil && len(result.Items) == 0) {
 		// The optimistic change may be wrong; drop cached copies so a
-		// reopen fetches Mail.app's state.
+		// reopen fetches Mail.app's state, and stop the reader from
+		// re-arming a mark that Mail.app just refused.
 		m.reader.forget(msg.keys)
+		if msg.opts.Action == "mark" {
+			if m.markFailed == nil {
+				m.markFailed = map[string]bool{}
+			}
+			for key := range msg.keys {
+				m.markFailed[key] = true
+			}
+		}
 	}
 	var cmds []tea.Cmd
 	switch {

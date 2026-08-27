@@ -387,6 +387,20 @@ func TestPickerSanitizesNames(t *testing.T) {
 	}
 }
 
+func TestFailedAutoMarkReadIsNotRetried(t *testing.T) {
+	m := loadedModel(t)
+	m.reader.open = true
+	key := m.currentKey()
+	m.markFailed = map[string]bool{key: true}
+	if cmd := m.autoMarkRead(); cmd != nil {
+		t.Fatal("automatic mark-read retried after a failure")
+	}
+	m = press(m, "u")
+	if m.markFailed[key] {
+		t.Fatal("explicit u did not lift the retry guard")
+	}
+}
+
 func TestBodyCacheStaysBounded(t *testing.T) {
 	r := newReader(newStyles(false))
 	shown := &mail.Message{ID: "shown", Account: "A", Mailbox: "M"}
