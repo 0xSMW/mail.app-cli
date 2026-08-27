@@ -223,9 +223,12 @@ func invalidateBatchCaches(action string, items []batchItem) {
 }
 
 func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem) (string, error) {
-	present := func(mailbox string) bool {
+	present := func(mailbox string) (bool, error) {
 		message, err := client.GetMessageDetailsJSON(item.Account, mailbox, item.ID)
-		return err == nil && message != nil
+		if err != nil {
+			return false, err
+		}
+		return message != nil, nil
 	}
 	switch opts.Action {
 	case "archive", "move":
@@ -238,23 +241,39 @@ func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem)
 			return "already-in-destination", nil
 		}
 		if mail.IsArchiveAlias(item.TargetMailbox) {
-			if present(item.SourceMailbox) {
+			inSource, err := present(item.SourceMailbox)
+			if err != nil {
+				return "verification-failed", err
+			}
+			if inSource {
 				return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 			}
 			return "absent-from-source", nil
 		}
-		if present(item.TargetMailbox) {
+		inDestination, err := present(item.TargetMailbox)
+		if err != nil {
+			return "verification-failed", err
+		}
+		if inDestination {
 			return "present-in-destination", nil
 		}
 		if mail.IsArchiveAlias(item.SourceMailbox) {
 			return "destination-unverified", fmt.Errorf("message not found in %s by its old ID; Mail.app may have renumbered it", item.TargetMailbox)
 		}
-		if !present(item.SourceMailbox) {
+		inSource, err := present(item.SourceMailbox)
+		if err != nil {
+			return "verification-failed", err
+		}
+		if !inSource {
 			return "absent-from-source", nil
 		}
 		return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 	case "delete":
-		if present(item.SourceMailbox) {
+		inSource, err := present(item.SourceMailbox)
+		if err != nil {
+			return "verification-failed", err
+		}
+		if inSource {
 			return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 		}
 		return "absent-from-source", nil

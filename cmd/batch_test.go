@@ -1,0 +1,85 @@
+package cmd
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/0xSMW/mail.app-cli/pkg/mail"
+)
+
+func TestRunMessageBatchVerifyReadErrorFailsMutations(t *testing.T) {
+	installBatchVerificationScript(t, "error")
+
+	for _, tt := range []struct {
+		name   string
+		action string
+		target string
+	}{
+		{name: "archive", action: "archive", target: "All Mail"},
+		{name: "move", action: "move", target: "Processed"},
+		{name: "delete", action: "delete"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := runMessageBatch(mail.NewClient(), batchOptions{
+				Action:        tt.action,
+				TargetMailbox: tt.target,
+				Verify:        true,
+			}, []batchItem{{ID: "123", Account: "Work", SourceMailbox: "INBOX"}}, func(*mail.Client, *batchItem) error {
+				return nil
+			})
+			if err == nil {
+				t.Fatal("runMessageBatch() error = nil, want verification read failure")
+			}
+			if result.Succeeded != 0 || result.Failed != 1 {
+				t.Fatalf("runMessageBatch() counts = succeeded %d, failed %d; want succeeded 0, failed 1", result.Succeeded, result.Failed)
+			}
+			item := result.Items[0]
+			if item.Status != "failed" || item.VerifyStatus != "verification-failed" {
+				t.Fatalf("runMessageBatch() item = %+v, want failed verification", item)
+			}
+			if !strings.Contains(item.VerifyError, "verification read failed") {
+				t.Fatalf("VerifyError = %q, want read error", item.VerifyError)
+			}
+		})
+	}
+}
+
+func TestVerifyBatchMutationAcceptsActualMessageAbsence(t *testing.T) {
+	installBatchVerificationScript(t, "absent")
+
+	for _, tt := range []struct {
+		name   string
+		action string
+		target string
+	}{
+		{name: "archive", action: "archive", target: "All Mail"},
+		{name: "move", action: "move", target: "Processed"},
+		{name: "delete", action: "delete"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			status, err := verifyBatchMutation(mail.NewClient(), batchOptions{Action: tt.action}, batchItem{
+				ID: "123", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: tt.target,
+			})
+			if err != nil {
+				t.Fatalf("verifyBatchMutation() error = %v, want nil", err)
+			}
+			if status != "absent-from-source" {
+				t.Fatalf("verifyBatchMutation() status = %q, want absent-from-source", status)
+			}
+		})
+	}
+}
+
+func installBatchVerificationScript(t *testing.T, mode string) {
+	t.Helper()
+	binDir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$MAIL_APP_CLI_BATCH_VERIFY_MODE\" in\nerror) echo 'verification read failed' >&2; exit 1 ;;\nabsent) printf null ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake osascript: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("MAIL_APP_CLI_BATCH_VERIFY_MODE", mode)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
+}
