@@ -237,6 +237,22 @@ func TestMutationAbandonsInFlightRefresh(t *testing.T) {
 	}
 }
 
+func TestMutationAbandonsPendingUserSearch(t *testing.T) {
+	m := loadedModel(t)
+	_ = m.runSearch("invoice", false)
+	if !m.searchLane.inFlight() || m.list.source.search != "" {
+		t.Fatal("search did not start while the mailbox list stayed on screen")
+	}
+	staleID := m.searchLane.id
+	m = press(m, "e")
+	if m.searchLane.inFlight() || m.searchLane.accepts(requestResult{requestID: staleID}) {
+		t.Fatal("archive left the pending search able to replace the list")
+	}
+	if !m.refreshWanted {
+		t.Fatal("archive did not defer a refresh after abandoning the search")
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")

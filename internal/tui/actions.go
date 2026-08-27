@@ -166,7 +166,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 		items = append(items, mail.BatchItem{ID: t.ID, Account: t.Account, SourceMailbox: t.Mailbox, Subject: t.Subject})
 	}
 
-	m.deferPendingReads()
+	notice := m.deferPendingReads()
 	switch opts.Action {
 	case "archive", "delete", "move":
 		// Rows only leave the screen when the action removes them from the
@@ -224,20 +224,22 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 		return mutationDoneMsg{err: err, result: result, opts: opts, keys: keys}
 	})
 	if m.reader.open && (opts.Action == "archive" || opts.Action == "delete" || opts.Action == "move") {
-		return tea.Batch(run, m.requestBody())
+		return tea.Batch(run, m.requestBody(), notice)
 	}
-	return run
+	return tea.Batch(run, notice)
 }
 
 // deferPendingReads drops index reads still in flight when a write starts:
 // their answers predate the write and would overwrite the optimistic state.
-// The refresh that follows the drained queue reads the settled index.
-func (m *model) deferPendingReads() {
-	lanes := []*requestLane{&m.mailboxLane, &m.listLane, &m.pageLane}
-	if m.list.source.search != "" {
-		lanes = append(lanes, &m.searchLane)
+// The refresh that follows the drained queue reads the settled index. A
+// search the user is still waiting on is dropped too, with a notice, since
+// its rows would replace the list the action was taken on.
+func (m *model) deferPendingReads() tea.Cmd {
+	var notice tea.Cmd
+	if m.searchLane.inFlight() && m.list.source.search == "" {
+		notice = notify("search cancelled by the action; search again")
 	}
-	for _, lane := range lanes {
+	for _, lane := range []*requestLane{&m.mailboxLane, &m.listLane, &m.pageLane, &m.searchLane} {
 		if lane.inFlight() {
 			lane.abandon()
 			m.refreshWanted = true
@@ -246,6 +248,7 @@ func (m *model) deferPendingReads() {
 	if m.refreshWanted {
 		m.reloadAfterMailboxes = false
 	}
+	return notice
 }
 
 func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {
