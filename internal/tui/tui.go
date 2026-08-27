@@ -86,6 +86,9 @@ type model struct {
 	// reloadAfterMailboxes makes ctrl+r reload the list once the refreshed
 	// sidebar has settled the selection, rather than racing it.
 	reloadAfterMailboxes bool
+	// advanceAfterPage moves to the next row once a page the reader asked
+	// for at the loaded boundary arrives.
+	advanceAfterPage bool
 	notice               string
 	err                  error
 	helpHidden           bool
@@ -121,7 +124,7 @@ func newModel(client *mail.Client, opts Options) model {
 		pendingOpen: opts.MessageID,
 	}
 	m.reader = newReader(m.styles)
-	m.initCmd = m.loadMailboxes()
+	m.initCmd = m.loadMailboxes(false)
 	return m
 }
 
@@ -306,7 +309,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.layout()
 	case key == "ctrl+r":
 		m.reloadAfterMailboxes = true
-		cmd = m.loadMailboxes()
+		cmd = m.loadMailboxes(true)
 	case key == "tab":
 		m.cycleFocus(1)
 	case key == "shift+tab":
@@ -469,10 +472,16 @@ type mailboxesLoadedMsg struct {
 	mailboxes []mail.Mailbox
 }
 
-func (m *model) loadMailboxes() tea.Cmd {
+// loadMailboxes reads accounts and mailboxes. fresh bypasses the in-process
+// account cache so an explicit refresh sees accounts added, removed, or
+// disabled since startup.
+func (m *model) loadMailboxes(fresh bool) tea.Cmd {
 	id, ctx := m.mailboxLane.begin(m.ctx, false)
 	client := m.client.WithContext(ctx)
 	return func() tea.Msg {
+		if fresh {
+			client.ResetAccountCache()
+		}
 		accounts, err := client.Accounts()
 		if err != nil {
 			return mailboxesLoadedMsg{requestResult: requestResult{id, err}}
@@ -590,6 +599,13 @@ func (m model) onPageLoaded(msg pageLoadedMsg) (tea.Model, tea.Cmd) {
 	m.list.appendPage(msg.messages, msg.pageSize)
 	if id := m.pendingOpen; id != "" {
 		return m, m.openPending(id, msg.source)
+	}
+	if m.advanceAfterPage {
+		m.advanceAfterPage = false
+		if m.reader.open {
+			m.list.move(1)
+			return m, m.requestBody()
+		}
 	}
 	return m, nil
 }

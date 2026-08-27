@@ -47,6 +47,15 @@ func (c *Client) GetAccounts() ([]Account, error) {
 	return accounts, err
 }
 
+// ResetAccountCache forgets the in-process account list so the next read
+// asks Mail.app again; an explicit refresh uses it.
+func (c *Client) ResetAccountCache() {
+	c.shared.accountsMu.Lock()
+	defer c.shared.accountsMu.Unlock()
+	c.shared.accounts = nil
+	c.shared.accountsLoaded = false
+}
+
 func (c *Client) GetAccountsJSON() ([]Account, error) {
 	c.shared.accountsMu.Lock()
 	if c.shared.accountsLoaded {

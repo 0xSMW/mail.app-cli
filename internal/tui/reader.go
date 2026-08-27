@@ -141,7 +141,13 @@ func (r *reader) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	case "G", "end":
 		r.viewport.GotoBottom()
 	case "n":
+		before := m.list.cursor
 		m.list.move(1)
+		if m.list.cursor == before && m.list.hasMore {
+			// At the loaded boundary: step onto the next row once it arrives.
+			m.advanceAfterPage = true
+			return m.loadMore()
+		}
 		return tea.Batch(m.requestBody(), m.loadMore())
 	case "p":
 		m.list.move(-1)
