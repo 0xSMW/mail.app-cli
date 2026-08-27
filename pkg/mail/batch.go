@@ -332,7 +332,19 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		}
 	}
 	if r.DryRun {
-		summary := fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), countNoun(r.Skipped, "message"), target)
+		previewed, noops := 0, 0
+		for _, item := range r.Items {
+			switch item.Status {
+			case "dry-run":
+				previewed++
+			case "skipped":
+				noops++
+			}
+		}
+		summary := fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), countNoun(previewed, "message"), target)
+		if noops > 0 {
+			summary += fmt.Sprintf("; %d already there", noops)
+		}
 		if r.Failed > 0 {
 			summary += fmt.Sprintf("; %d cannot be %s", r.Failed, strings.ToLower(verb))
 		}

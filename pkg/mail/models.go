@@ -7,12 +7,13 @@ import "encoding/json"
 const SchemaVersion = 1
 
 type Account struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	EmailAddress string `json:"emailAddress"`
-	AccountType  string `json:"accountType"`
-	UserName     string `json:"userName"`
-	Enabled      bool   `json:"enabled"`
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	EmailAddress   string   `json:"emailAddress"`
+	EmailAddresses []string `json:"emailAddresses,omitempty"`
+	AccountType    string   `json:"accountType"`
+	UserName       string   `json:"userName"`
+	Enabled        bool     `json:"enabled"`
 }
 
 type Mailbox struct {

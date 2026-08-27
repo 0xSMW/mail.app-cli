@@ -143,7 +143,7 @@ func (s *sidebar) selectInitial(account, mailbox string) error {
 		}
 	}
 	if !accountSeen {
-		return fmt.Errorf("account %q is not an enabled Mail.app account", account)
+		return &mail.NotFoundError{Kind: "account", Name: account}
 	}
 	return fmt.Errorf("mailbox %q not found in %s", mailbox, account)
 }
@@ -155,15 +155,16 @@ func (s *sidebar) current() sidebarEntry {
 	return s.entries[s.selected]
 }
 
-// accountEmail is the address of the account a message belongs to, for
-// reply-all recipient pruning.
-func (s *sidebar) accountEmail(name string) string {
+// accountAddresses are every address of the account a message belongs to, for
+// reply recipient pruning. Mail.app's first address is retained separately for
+// compatibility with older account data, so include it when aliases are absent.
+func (s *sidebar) accountAddresses(name string) []string {
 	for _, account := range s.accounts {
 		if account.Name == name {
-			return strings.ToLower(account.EmailAddress)
+			return others(append([]string{account.EmailAddress}, account.EmailAddresses...))
 		}
 	}
-	return ""
+	return nil
 }
 
 func (s *sidebar) mailboxesFor(account string) []string {

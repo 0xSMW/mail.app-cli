@@ -63,10 +63,12 @@ const result = [];
 
 for (let i = 0; i < accounts.length; i++) {
 	const acc = accounts[i];
+	const emailAddresses = acc.emailAddresses();
 	result.push({
 		id: acc.id(),
 		name: acc.name(),
-		emailAddress: acc.emailAddresses().length > 0 ? acc.emailAddresses()[0] : '',
+		emailAddress: emailAddresses.length > 0 ? emailAddresses[0] : '',
+		emailAddresses,
 		userName: acc.userName(),
 		enabled: acc.enabled()
 	});

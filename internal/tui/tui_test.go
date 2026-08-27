@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
 
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 )
 
@@ -155,7 +157,7 @@ func TestReplyAllPrefillDropsOwnAddress(t *testing.T) {
 		DateReceived: "2026-01-15T10:00:00Z",
 		Content:      "line one\nline two",
 	}
-	c := newComposeModal(composeReplyAll, "Work", original, "me@example.test")
+	c := newComposeModal(composeReplyAll, "Work", original, []string{"me@example.test"})
 	if got := c.inputs[fieldTo].Value(); got != "s@example.test, other@example.test" {
 		t.Fatalf("to = %q", got)
 	}
@@ -193,13 +195,66 @@ func TestReplyToOwnSentMessageTargetsRecipients(t *testing.T) {
 		ToRecipients: []string{"them@example.test", "other@example.test"},
 		Content:      "hi",
 	}
-	c := newComposeModal(composeReply, "Work", original, "me@example.test")
+	c := newComposeModal(composeReply, "Work", original, []string{"me@example.test"})
 	if got := c.inputs[fieldTo].Value(); got != "them@example.test, other@example.test" {
 		t.Fatalf("reply to own message: to = %q", got)
 	}
-	c = newComposeModal(composeReplyAll, "Work", original, "me@example.test")
+	c = newComposeModal(composeReplyAll, "Work", original, []string{"me@example.test"})
 	if got := c.inputs[fieldTo].Value(); got != "them@example.test, other@example.test" {
 		t.Fatalf("reply-all to own message: to = %q", got)
+	}
+}
+
+func TestReplyToOwnAliasTargetsRecipients(t *testing.T) {
+	original := &mail.Message{
+		Sender:       "Me <alias@example.test>",
+		Subject:      "Ping",
+		ToRecipients: []string{"them@example.test"},
+		Content:      "hi",
+	}
+	c := newComposeModal(composeReply, "Work", original, []string{"me@example.test", "alias@example.test"})
+	if got := c.inputs[fieldTo].Value(); got != "them@example.test" {
+		t.Fatalf("reply to own alias: to = %q", got)
+	}
+}
+
+func TestAccountAddressesIncludesAliases(t *testing.T) {
+	s := sidebar{accounts: []mail.Account{{
+		Name:           "Work",
+		EmailAddress:   "Primary@Example.test",
+		EmailAddresses: []string{"primary@example.test", "Alias@Example.test"},
+	}}}
+	if got := strings.Join(s.accountAddresses("Work"), ","); got != "primary@example.test,alias@example.test" {
+		t.Fatalf("account addresses = %q", got)
+	}
+}
+
+func TestReplyAllDeduplicatesToAndCc(t *testing.T) {
+	original := &mail.Message{
+		Sender:       "Sender <sender@example.test>",
+		Subject:      "Ping",
+		ToRecipients: []string{"other@example.test", "OTHER@example.test"},
+		CcRecipients: []string{"other@example.test", "cc@example.test", "CC@example.test"},
+		Content:      "hi",
+	}
+	c := newComposeModal(composeReplyAll, "Work", original, []string{"me@example.test"})
+	if got := c.inputs[fieldTo].Value(); got != "sender@example.test, other@example.test" {
+		t.Fatalf("reply-all deduplicated to = %q", got)
+	}
+	if got := c.inputs[fieldCc].Value(); got != "cc@example.test" {
+		t.Fatalf("reply-all deduplicated cc = %q", got)
+	}
+}
+
+func TestSelectInitialUnknownAccountIsTypedNotFound(t *testing.T) {
+	s := sidebar{entries: []sidebarEntry{{kind: entryUnified}}}
+	err := s.selectInitial("Missing", "")
+	var notFound *mail.NotFoundError
+	if !errors.As(err, &notFound) || notFound.Kind != "account" || notFound.Name != "Missing" {
+		t.Fatalf("selectInitial error = %#v", err)
+	}
+	if got := clierr.Classify(err).Code; got != clierr.CodeNotFound {
+		t.Fatalf("classified code = %q, want %q", got, clierr.CodeNotFound)
 	}
 }
 

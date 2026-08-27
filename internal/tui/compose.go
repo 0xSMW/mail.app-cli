@@ -93,13 +93,13 @@ func (m *model) composeFor(mode composeMode, original *mail.Message) tea.Cmd {
 			return notify("no account to send from")
 		}
 	}
-	c := newComposeModal(mode, account, original, m.sidebar.accountEmail(account))
+	c := newComposeModal(mode, account, original, m.sidebar.accountAddresses(account))
 	c.resize(m.width, contentHeight(m.height, m.helpView()))
 	m.modal = c
 	return c.focusCurrent()
 }
 
-func newComposeModal(mode composeMode, account string, original *mail.Message, ownAddress string) *composeModal {
+func newComposeModal(mode composeMode, account string, original *mail.Message, ownAddresses []string) *composeModal {
 	c := &composeModal{mode: mode, account: account}
 	for _, label := range composeLabels {
 		in := textinput.New()
@@ -118,7 +118,7 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 	c.body.MaxHeight = 0
 	c.body.MaxContentHeight = 0
 	if original != nil {
-		c.prefill(original, ownAddress)
+		c.prefill(original, ownAddresses)
 	}
 	if mode == composeReply || mode == composeReplyAll {
 		c.focus = fieldBody
@@ -126,19 +126,21 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 	return c
 }
 
-func (c *composeModal) prefill(original *mail.Message, ownAddress string) {
+func (c *composeModal) prefill(original *mail.Message, ownAddresses []string) {
 	sender := mail.ParseSender(original.Sender)
 	subject := strings.TrimSpace(original.Subject)
 	switch c.mode {
 	case composeReply, composeReplyAll:
 		to := []string{sender.Email}
-		if sender.Email == ownAddress && len(original.ToRecipients) > 0 {
+		if slices.Contains(ownAddresses, sender.Email) && len(original.ToRecipients) > 0 {
 			// Replying to a message the user sent goes back to its recipients.
-			to = others(original.ToRecipients, ownAddress)
+			to = others(original.ToRecipients, ownAddresses...)
 		}
 		if c.mode == composeReplyAll {
-			to = append(to, others(original.ToRecipients, append([]string{ownAddress}, to...)...)...)
-			c.inputs[fieldCc].SetValue(strings.Join(others(original.CcRecipients, ownAddress, sender.Email), ", "))
+			covered := append(append([]string(nil), ownAddresses...), to...)
+			to = append(to, others(original.ToRecipients, covered...)...)
+			covered = append(append([]string(nil), ownAddresses...), to...)
+			c.inputs[fieldCc].SetValue(strings.Join(others(original.CcRecipients, covered...), ", "))
 		}
 		c.inputs[fieldTo].SetValue(strings.Join(to, ", "))
 		if !strings.HasPrefix(strings.ToLower(subject), "re:") {
@@ -154,13 +156,20 @@ func (c *composeModal) prefill(original *mail.Message, ownAddress string) {
 	c.body.CursorStart()
 }
 
-// others lower-cases addresses and drops the ones already covered.
+// others lower-cases addresses and drops skipped or duplicate entries.
 func others(addresses []string, skip ...string) []string {
+	seen := make(map[string]bool, len(addresses)+len(skip))
+	for _, addr := range skip {
+		if addr = strings.ToLower(strings.TrimSpace(addr)); addr != "" {
+			seen[addr] = true
+		}
+	}
 	var out []string
 	for _, addr := range addresses {
 		a := strings.ToLower(strings.TrimSpace(addr))
-		if a != "" && !slices.Contains(skip, a) {
+		if a != "" && !seen[a] {
 			out = append(out, a)
+			seen[a] = true
 		}
 	}
 	return out
