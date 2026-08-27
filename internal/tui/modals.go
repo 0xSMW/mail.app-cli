@@ -198,6 +198,12 @@ func (m *model) runSearch(query string, silent bool) tea.Cmd {
 	if !silent {
 		m.closeReader()
 	}
+	if m.writes.busy {
+		// Search rows would show what a queued action is changing; the
+		// refresh after the queue drains runs the search.
+		m.deferRead(listSource{search: query})
+		return nil
+	}
 	m.listLane.abandon()
 	id, ctx := m.searchLane.begin(m.ctx, silent)
 	client := m.client.WithContext(ctx)

@@ -253,6 +253,34 @@ func TestMutationAbandonsPendingUserSearch(t *testing.T) {
 	}
 }
 
+func TestReadsStartedDuringWriteAreDeferred(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "e")
+	if !m.writes.busy {
+		t.Fatal("archive did not start a write")
+	}
+	for i, entry := range m.sidebar.entries {
+		if entry.mailbox == "Receipts" {
+			m.sidebar.cursor = i
+		}
+	}
+	_ = m.sidebar.choose(&m)
+	if m.listLane.inFlight() {
+		t.Fatal("mailbox switch read the index while a write was pending")
+	}
+	if m.list.source.mailbox != "Receipts" || len(m.list.messages) != 0 || !m.refreshWanted {
+		t.Fatalf("switch did not defer to the post-drain refresh: source=%+v rows=%d refreshWanted=%v", m.list.source, len(m.list.messages), m.refreshWanted)
+	}
+	if cmd := m.runSearch("invoice", false); cmd != nil || m.searchLane.inFlight() || m.list.source.search != "invoice" {
+		t.Fatal("search during a write was not deferred")
+	}
+	m.list.hasMore = true
+	m.list.cursor = len(m.list.messages)
+	if cmd := m.loadMore(); cmd != nil || m.pageLane.inFlight() {
+		t.Fatal("paging during a write was not deferred")
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")

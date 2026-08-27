@@ -588,6 +588,13 @@ func (m *model) reloadList(silent bool) tea.Cmd {
 	if m.list.source.search != "" {
 		return m.runSearch(m.list.source.search, silent)
 	}
+	if m.writes.busy {
+		// The index lags pending writes, so a read now could show rows a
+		// queued action already removed. The refresh after the queue drains
+		// loads this source instead.
+		m.deferRead(m.sidebar.current().source())
+		return nil
+	}
 	// A background refresh yields to a search still in flight; a mailbox
 	// the user chose supersedes it.
 	if m.searchLane.loading && silent {
@@ -627,6 +634,11 @@ const pageOverlap = 20
 // lane so it never cancels, and is never mistaken for, a reload.
 func (m *model) loadMore() tea.Cmd {
 	if !m.list.nearEnd() || m.pageLane.loading || m.listLane.loading {
+		return nil
+	}
+	if m.writes.busy {
+		// No page arrives to step onto; the next move retries.
+		m.advanceAfterPage = false
 		return nil
 	}
 	source := m.list.source
@@ -815,6 +827,15 @@ func (m *model) closeReader() {
 	m.advanceAfterPage = false
 	m.focus = focusList
 	m.layout()
+}
+
+// deferRead points the list at a source the user chose while writes are
+// pending and leaves it to the post-drain refresh to fill in.
+func (m *model) deferRead(source listSource) {
+	m.list.setMessages(nil, false, source, 0)
+	m.closeReader()
+	m.notice = "loading after pending actions finish"
+	m.refreshWanted = true
 }
 
 func (m *model) scheduleRefresh() tea.Cmd {
