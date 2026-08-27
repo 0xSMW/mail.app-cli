@@ -15,11 +15,18 @@ func unsafeRune(r rune) bool {
 	return r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) || (unicode.Is(unicode.Cf, r) && r != '‍')
 }
 
-// sanitizeLine strips control characters and escape sequences from text
-// that came from a message, so a hostile subject cannot drive the terminal.
+// sanitizeLine strips control characters and escape sequences from a
+// single-line field such as a subject, so a hostile header cannot drive
+// the terminal, and trims it.
 func sanitizeLine(s string) string {
+	return strings.TrimSpace(stripControls(s))
+}
+
+// stripControls removes control and escape characters, turning tabs and
+// line breaks into spaces, and keeps everything else, indentation included.
+func stripControls(s string) string {
 	if strings.IndexFunc(s, unsafeRune) < 0 {
-		return strings.TrimSpace(s)
+		return s
 	}
 	var b strings.Builder
 	b.Grow(len(s))
@@ -33,16 +40,17 @@ func sanitizeLine(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(b.String())
+	return b.String()
 }
 
-// sanitizeBody keeps line structure but drops control characters.
+// sanitizeBody keeps line structure and indentation but drops control
+// characters. Tabs become four spaces; trailing spaces are dropped.
 func sanitizeBody(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		lines[i] = strings.TrimRight(sanitizeLine(strings.ReplaceAll(line, "\t", "    ")), " ")
+		lines[i] = strings.TrimRight(stripControls(strings.ReplaceAll(line, "\t", "    ")), " ")
 	}
 	return strings.Join(lines, "\n")
 }

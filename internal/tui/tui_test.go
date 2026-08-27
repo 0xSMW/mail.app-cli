@@ -263,4 +263,24 @@ func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)
 	}
+	if got := sanitizeBody("  indented\n\tcode\x07 \n"); got != "  indented\n    code\n" {
+		t.Fatalf("sanitizeBody = %q", got)
+	}
+}
+
+func TestRemoveKeepsCursorOnFollowingRow(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "space") // selects row 1, cursor advances to row 2
+	if m.list.current().ID != "2" {
+		t.Fatalf("cursor after space = %s", m.list.current().ID)
+	}
+	m.list.remove(map[string]bool{bodyKey(m.list.messages[0]): true})
+	if m.list.current().ID != "2" {
+		t.Fatalf("cursor after removing row 1 = %s, want 2", m.list.current().ID)
+	}
+	m.list.cursor = 1
+	m.list.remove(map[string]bool{bodyKey(m.list.messages[1]): true})
+	if m.list.current() == nil || m.list.current().ID != "2" {
+		t.Fatalf("cursor after removing its own row = %v", m.list.current())
+	}
 }

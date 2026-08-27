@@ -171,15 +171,22 @@ func (l *list) toggleSelected() {
 	}
 }
 
-// remove drops messages by key, keeping the cursor on a neighbour.
+// remove drops messages by key. The cursor stays on the same message when
+// that survives, and otherwise lands on the row that took its place.
 func (l *list) remove(keys map[string]bool) {
 	kept := l.messages[:0]
-	for _, m := range l.messages {
-		if !keys[bodyKey(m)] {
-			kept = append(kept, m)
+	cursor := 0
+	for i, m := range l.messages {
+		if keys[bodyKey(m)] {
+			continue
 		}
+		if i < l.cursor {
+			cursor++
+		}
+		kept = append(kept, m)
 	}
 	l.messages = kept
+	l.cursor = cursor
 	for key := range keys {
 		delete(l.selected, key)
 	}
