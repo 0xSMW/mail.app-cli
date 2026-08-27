@@ -56,10 +56,23 @@ func (c *Client) ResetAccountCache() {
 	c.shared.accountsLoaded = false
 }
 
+// cloneAccounts copies the slice and each account's address list, so a
+// caller editing a result cannot reach into the shared cache.
+func cloneAccounts(accounts []Account) []Account {
+	out := make([]Account, len(accounts))
+	for i, account := range accounts {
+		out[i] = account
+		if account.EmailAddresses != nil {
+			out[i].EmailAddresses = append([]string(nil), account.EmailAddresses...)
+		}
+	}
+	return out
+}
+
 func (c *Client) GetAccountsJSON() ([]Account, error) {
 	c.shared.accountsMu.Lock()
 	if c.shared.accountsLoaded {
-		accounts := append([]Account(nil), c.shared.accounts...)
+		accounts := cloneAccounts(c.shared.accounts)
 		c.shared.accountsMu.Unlock()
 		return accounts, nil
 	}
@@ -96,11 +109,11 @@ JSON.stringify(result);
 	}
 
 	c.shared.accountsMu.Lock()
-	c.shared.accounts = append([]Account(nil), accounts...)
+	c.shared.accounts = cloneAccounts(accounts)
 	c.shared.accountsLoaded = true
 	c.shared.accountsMu.Unlock()
 
-	return append([]Account(nil), accounts...), nil
+	return cloneAccounts(accounts), nil
 }
 
 func (c *Client) GetUnreadCount() (int, error) {

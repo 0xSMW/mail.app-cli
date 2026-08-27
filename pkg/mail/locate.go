@@ -169,7 +169,7 @@ func (c *Client) PrimeAccounts(accounts []Account) {
 	if c.shared.accountsLoaded || len(accounts) == 0 {
 		return
 	}
-	c.shared.accounts = append([]Account(nil), accounts...)
+	c.shared.accounts = cloneAccounts(accounts)
 	c.shared.accountsLoaded = true
 }
 

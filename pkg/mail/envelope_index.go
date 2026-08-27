@@ -133,6 +133,10 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if ctxErr := c.Context().Err(); ctxErr != nil {
+			// The caller's context ended the query; keep that classifiable.
+			return fmt.Errorf("envelope index query: %w", ctxErr)
+		}
 		return fmt.Errorf("sqlite3 envelope index query failed: %v - %s", err, strings.TrimSpace(stderr.String()))
 	}
 	if strings.TrimSpace(out.String()) == "" {

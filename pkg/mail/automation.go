@@ -120,13 +120,13 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	defer cancelLockWait()
 
 	if err := acquireAutomationGate(lockCtx); err != nil {
-		return "", automationLockError(engine, err)
+		return "", automationLockError(engine, parent, err)
 	}
 	defer releaseAutomationGate()
 
 	releaseProcessLock, err := acquireAutomationProcessLock(lockCtx)
 	if err != nil {
-		return "", automationLockError(engine, err)
+		return "", automationLockError(engine, parent, err)
 	}
 	defer releaseProcessLock()
 
@@ -171,7 +171,13 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	return strings.TrimSpace(out.String()), nil
 }
 
-func automationLockError(engine string, err error) error {
+// automationLockError classifies a failure to enter the automation queue.
+// The caller's own cancellation or deadline is returned as is; only the
+// queue's wait budget running out is a lock timeout.
+func automationLockError(engine string, parent context.Context, err error) error {
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
