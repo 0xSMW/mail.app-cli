@@ -48,13 +48,13 @@ func (c *Client) GetAccounts() ([]Account, error) {
 }
 
 func (c *Client) GetAccountsJSON() ([]Account, error) {
-	c.accountsMu.Lock()
-	if c.accountsLoaded {
-		accounts := append([]Account(nil), c.accounts...)
-		c.accountsMu.Unlock()
+	c.shared.accountsMu.Lock()
+	if c.shared.accountsLoaded {
+		accounts := append([]Account(nil), c.shared.accounts...)
+		c.shared.accountsMu.Unlock()
 		return accounts, nil
 	}
-	c.accountsMu.Unlock()
+	c.shared.accountsMu.Unlock()
 
 	script := `
 const mail = Application('Mail');
@@ -84,10 +84,10 @@ JSON.stringify(result);
 		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
 	}
 
-	c.accountsMu.Lock()
-	c.accounts = append([]Account(nil), accounts...)
-	c.accountsLoaded = true
-	c.accountsMu.Unlock()
+	c.shared.accountsMu.Lock()
+	c.shared.accounts = append([]Account(nil), accounts...)
+	c.shared.accountsLoaded = true
+	c.shared.accountsMu.Unlock()
 
 	return append([]Account(nil), accounts...), nil
 }

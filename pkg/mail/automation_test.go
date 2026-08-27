@@ -198,6 +198,9 @@ func TestRunAutomationTimeoutDoesNotWaitForDetachedDescendant(t *testing.T) {
 		t.Fatalf("error = %v, want AutomationTimeoutError", err)
 	}
 
+	// The fake osascript writes its descendant's pid asynchronously; under
+	// load it can land after the 200ms timeout fires.
+	waitForAutomationLog(t, logPath, "detached-pid=")
 	contents, readErr := os.ReadFile(logPath)
 	if readErr != nil {
 		t.Fatalf("read descendant pid: %v", readErr)

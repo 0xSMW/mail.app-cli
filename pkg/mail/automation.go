@@ -100,23 +100,26 @@ func escapeAppleScriptString(s string) string {
 }
 
 func (c *Client) runAppleScript(script string) (string, error) {
-	return runAutomation("applescript", defaultAutomationTimeout, "-e", script)
+	return runAutomation(c.Context(), "applescript", defaultAutomationTimeout, "-e", script)
 }
 
 func (c *Client) runJXA(script string) (string, error) {
-	return runAutomation("jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
+	return runAutomation(c.Context(), "jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
 }
 
 func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
-	return runAutomation("jxa", timeout, "-l", "JavaScript", "-e", script)
+	return runAutomation(c.Context(), "jxa", timeout, "-l", "JavaScript", "-e", script)
 }
 
-func runAutomation(engine string, timeout time.Duration, args ...string) (string, error) {
+func runAutomation(parent context.Context, engine string, timeout time.Duration, args ...string) (string, error) {
 	if timeout <= 0 {
 		timeout = defaultAutomationTimeout
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
 
-	lockCtx, cancelLockWait := context.WithTimeout(context.Background(), automationLockTimeout)
+	lockCtx, cancelLockWait := context.WithTimeout(parent, automationLockTimeout)
 	defer cancelLockWait()
 
 	if err := acquireAutomationGate(lockCtx); err != nil {
@@ -130,7 +133,7 @@ func runAutomation(engine string, timeout time.Duration, args ...string) (string
 	}
 	defer releaseProcessLock()
 
-	executionCtx, cancelExecution := context.WithTimeout(context.Background(), timeout)
+	executionCtx, cancelExecution := context.WithTimeout(parent, timeout)
 	defer cancelExecution()
 
 	cmd := exec.CommandContext(executionCtx, "osascript", args...)
@@ -159,6 +162,9 @@ func runAutomation(engine string, timeout time.Duration, args ...string) (string
 	}
 
 	err = cmd.Wait()
+	if parentErr := parent.Err(); parentErr != nil {
+		return "", parentErr
+	}
 	if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
 		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout}
 	}
@@ -169,6 +175,9 @@ func runAutomation(engine string, timeout time.Duration, args ...string) (string
 }
 
 func automationLockError(engine string, err error) error {
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &AutomationLockTimeoutError{Engine: engine, Timeout: automationLockTimeout}
 	}

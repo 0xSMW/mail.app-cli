@@ -164,13 +164,13 @@ func (c *Client) LocateMessage(id string) (*MessageLocation, error) {
 // PrimeAccounts seeds the in-process account cache so callers holding a
 // fresh on-disk copy can avoid a Mail.app round trip.
 func (c *Client) PrimeAccounts(accounts []Account) {
-	c.accountsMu.Lock()
-	defer c.accountsMu.Unlock()
-	if c.accountsLoaded || len(accounts) == 0 {
+	c.shared.accountsMu.Lock()
+	defer c.shared.accountsMu.Unlock()
+	if c.shared.accountsLoaded || len(accounts) == 0 {
 		return
 	}
-	c.accounts = append([]Account(nil), accounts...)
-	c.accountsLoaded = true
+	c.shared.accounts = append([]Account(nil), accounts...)
+	c.shared.accountsLoaded = true
 }
 
 func indexMailboxAccountID(rawURL string) string {

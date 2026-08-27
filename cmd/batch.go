@@ -2,11 +2,11 @@ package cmd
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
@@ -14,189 +14,31 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// batchItem is one message inside a mutation receipt. The same shape is
-// used whether one ID or five hundred were requested.
-type batchItem struct {
-	ID            string `json:"id"`
-	Account       string `json:"account"`
-	SourceMailbox string `json:"sourceMailbox"`
-	TargetMailbox string `json:"targetMailbox,omitempty"`
-	Subject       string `json:"subject,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
-	MarkedRead    bool   `json:"markedRead,omitempty"`
-	VerifyStatus  string `json:"verifyStatus,omitempty"`
-	VerifyError   string `json:"verifyError,omitempty"`
-}
+// The mutation engine lives in pkg/mail; these aliases keep the CLI layer
+// and its tests reading naturally.
+type (
+	batchItem    = mail.BatchItem
+	batchResult  = mail.BatchResult
+	batchOptions = mail.BatchOptions
+	mutator      = mail.Mutator
+)
 
-// batchResult is the mutation receipt.
-type batchResult struct {
-	Action    string      `json:"action"`
-	DryRun    bool        `json:"dryRun"`
-	StartedAt string      `json:"startedAt,omitempty"`
-	EndedAt   string      `json:"endedAt,omitempty"`
-	Matched   int         `json:"matched"`
-	Attempted int         `json:"attempted"`
-	Succeeded int         `json:"succeeded"`
-	Failed    int         `json:"failed"`
-	Skipped   int         `json:"skipped"`
-	Chunks    int         `json:"chunks,omitempty"`
-	Items     []batchItem `json:"items"`
-}
+var (
+	archiveMutator = mail.ArchiveMutator
+	deleteMutator  = mail.DeleteMutator
+	moveMutator    = mail.MoveMutator
+	markMutator    = mail.MarkMutator
+	flagMutator    = mail.FlagMutator
+)
 
-type batchOptions struct {
-	Action         string
-	TargetMailbox  string
-	DryRun         bool
-	Verify         bool
-	Progress       bool
-	MarkReadBefore bool
-	ChunkSize      int
-	Read           bool
-	Flagged        bool
-	// Journal records each message in the recent-message journal. It costs
-	// index queries per message, so bulk selections leave it off.
-	Journal bool
-}
-
-type mutator func(*mail.Client, *batchItem) error
-
-func archiveMutator(journal bool) mutator {
-	return func(client *mail.Client, item *batchItem) error {
-		if journal {
-			_ = client.RecordRecentEnvelope(item.Account, item.SourceMailbox, item.ID, "archive")
-		}
-		destination, err := client.ArchiveMessageWithDestination(item.Account, item.SourceMailbox, item.ID)
-		if err != nil {
-			return err
-		}
-		item.TargetMailbox = destination
-		if journal {
-			_ = mail.UpdateRecentMessageLocation(item.Account, item.ID, destination, "archive")
-		}
-		return nil
-	}
-}
-
-func deleteMutator(client *mail.Client, item *batchItem) error {
-	return client.DeleteMessageResolved(item.Account, item.SourceMailbox, item.ID)
-}
-
-func moveMutator(journal bool) mutator {
-	return func(client *mail.Client, item *batchItem) error {
-		if journal {
-			_ = client.RecordRecentEnvelope(item.Account, item.SourceMailbox, item.ID, "move")
-		}
-		if err := client.MoveMessage(item.Account, item.SourceMailbox, item.ID, item.TargetMailbox); err != nil {
-			return err
-		}
-		if journal {
-			_ = mail.UpdateRecentMessageLocation(item.Account, item.ID, item.TargetMailbox, "move")
-		}
-		return nil
-	}
-}
-
-func markMutator(read bool) mutator {
-	return func(client *mail.Client, item *batchItem) error {
-		return client.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, read)
-	}
-}
-
-func flagMutator(flagged bool) mutator {
-	return func(client *mail.Client, item *batchItem) error {
-		return client.FlagMessage(item.Account, item.SourceMailbox, item.ID, flagged)
-	}
-}
-
-// runMessageBatch applies mutate to every item and returns the receipt. The
-// error is non-nil only when at least one item failed; the receipt is
-// always complete.
+// runMessageBatch runs the engine and invalidates the message-list cache for
+// every mailbox the run touched.
 func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mutator) (batchResult, error) {
-	result := batchResult{
-		Action:    opts.Action,
-		DryRun:    opts.DryRun,
-		StartedAt: time.Now().Format(time.RFC3339),
-		Matched:   len(items),
-		Items:     make([]batchItem, 0, len(items)),
+	result, err := mail.RunBatch(context.Background(), client, opts, items, mutate)
+	if !opts.DryRun {
+		invalidateBatchCaches(opts.Action, result.Items)
 	}
-	for i := range items {
-		if opts.TargetMailbox != "" {
-			items[i].TargetMailbox = opts.TargetMailbox
-		}
-	}
-	chunkSize := normalizedBatchChunkSize(len(items), opts.ChunkSize)
-	result.Chunks = (len(items) + chunkSize - 1) / chunkSize
-	if opts.DryRun {
-		for _, item := range items {
-			item.Status = "dry-run"
-			result.Skipped++
-			result.Items = append(result.Items, item)
-		}
-		result.EndedAt = time.Now().Format(time.RFC3339)
-		return result, nil
-	}
-
-	for start := 0; start < len(items); start += chunkSize {
-		end := start + chunkSize
-		if end > len(items) {
-			end = len(items)
-		}
-		if opts.Progress {
-			fmt.Fprintf(writer.Stderr, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
-		}
-		for _, item := range items[start:end] {
-			if opts.Action == "move" && strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
-				item.Status = "skipped"
-				item.Error = "already in " + item.TargetMailbox
-				result.Skipped++
-				result.Items = append(result.Items, item)
-				continue
-			}
-			result.Attempted++
-			if opts.MarkReadBefore && opts.Action != "mark" {
-				if err := client.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
-					item.Status = "failed"
-					item.Error = fmt.Sprintf("mark-read before %s failed: %v", opts.Action, err)
-					result.Failed++
-					result.Items = append(result.Items, item)
-					continue
-				}
-				item.MarkedRead = true
-			}
-			if err := mutate(client, &item); err != nil {
-				item.Status = "failed"
-				item.Error = err.Error()
-				result.Failed++
-			} else {
-				item.Status = "succeeded"
-				if opts.Verify {
-					verifyStatus, verifyErr := verifyBatchMutation(client, opts, item)
-					item.VerifyStatus = verifyStatus
-					if verifyErr != nil {
-						item.Status = "failed"
-						item.VerifyError = verifyErr.Error()
-						result.Failed++
-					} else {
-						result.Succeeded++
-					}
-				} else {
-					result.Succeeded++
-				}
-			}
-			if opts.Progress {
-				fmt.Fprintf(writer.Stderr, "%s: %d/%d %s %s\n", opts.Action, result.Attempted, len(items), item.ID, item.Status)
-			}
-			result.Items = append(result.Items, item)
-		}
-	}
-	result.EndedAt = time.Now().Format(time.RFC3339)
-	invalidateBatchCaches(opts.Action, result.Items)
-
-	if result.Failed > 0 {
-		return result, clierr.New(clierr.CodeMutationFailed, fmt.Sprintf("%s failed for %d of %d message(s)", opts.Action, result.Failed, result.Attempted))
-	}
-	return result, nil
+	return result, err
 }
 
 func invalidateBatchCaches(action string, items []batchItem) {
@@ -220,94 +62,6 @@ func invalidateBatchCaches(action string, items []batchItem) {
 			invalidate(item.Account, "All Mail")
 		}
 	}
-}
-
-func verifyBatchMutation(client *mail.Client, opts batchOptions, item batchItem) (string, error) {
-	present := func(mailbox string) (bool, error) {
-		message, err := client.GetMessageDetailsForVerificationJSON(item.Account, mailbox, item.ID)
-		if err != nil {
-			return false, err
-		}
-		return message != nil, nil
-	}
-	switch opts.Action {
-	case "archive", "move":
-		// Mail.app may keep the ID (Gmail label changes) or assign a new one
-		// (real moves), and Gmail keeps every message in All Mail. So: a
-		// no-op is fine; archiving into All Mail is proven by absence from
-		// the source; moving out of All Mail is proven by presence in the
-		// destination; anything else accepts either proof.
-		if item.TargetMailbox == "" || strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
-			return "already-in-destination", nil
-		}
-		if mail.IsArchiveAlias(item.TargetMailbox) {
-			inSource, err := present(item.SourceMailbox)
-			if err != nil {
-				return "verification-failed", err
-			}
-			if inSource {
-				return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-			}
-			return "absent-from-source", nil
-		}
-		inDestination, err := present(item.TargetMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if inDestination {
-			return "present-in-destination", nil
-		}
-		if mail.IsArchiveAlias(item.SourceMailbox) {
-			return "destination-unverified", fmt.Errorf("message not found in %s by its old ID; Mail.app may have renumbered it", item.TargetMailbox)
-		}
-		inSource, err := present(item.SourceMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if !inSource {
-			return "absent-from-source", nil
-		}
-		return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-	case "delete":
-		inSource, err := present(item.SourceMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if inSource {
-			return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-		}
-		return "absent-from-source", nil
-	}
-	message, err := client.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
-	if err != nil {
-		return "verification-failed", err
-	}
-	if message == nil {
-		return "verification-failed", fmt.Errorf("message not found after mutation")
-	}
-	if opts.Action == "mark" {
-		if message.Read == opts.Read {
-			return "matched", nil
-		}
-		return "mismatch", fmt.Errorf("read status mismatch")
-	}
-	if opts.Action == "flag" {
-		if message.Flagged == opts.Flagged {
-			return "matched", nil
-		}
-		return "mismatch", fmt.Errorf("flagged status mismatch")
-	}
-	return "unchecked", nil
-}
-
-func normalizedBatchChunkSize(total, requested int) int {
-	if total <= 0 {
-		return 1
-	}
-	if requested <= 0 || requested > total {
-		return total
-	}
-	return requested
 }
 
 // receiptSummary is the one-line human description of a receipt.
@@ -538,17 +292,20 @@ var messagesBatchFlagCmd = &cobra.Command{
 }
 
 func batchOptionsFromFlags(action, target string) batchOptions {
-	return batchOptions{
+	opts := batchOptions{
 		Action:         action,
 		TargetMailbox:  target,
 		DryRun:         batchDryRun,
 		Verify:         batchVerify,
-		Progress:       batchProgress,
 		MarkReadBefore: batchMarkReadBefore,
 		ChunkSize:      batchChunkSize,
 		Read:           batchRead,
 		Flagged:        batchFlagged,
 	}
+	if batchProgress {
+		opts.Progress = writer.Stderr
+	}
+	return opts
 }
 
 func runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mutator) error {
@@ -628,7 +385,7 @@ func resolveBatchMessages(account, mailbox string) ([]mail.Message, error) {
 			return nil, fmt.Errorf("list messages for filtered batch: %w", err)
 		}
 	}
-	return filterMessagesBySender(messages, batchSender, batchSenderDomain), nil
+	return mail.FilterBySender(messages, batchSender, batchSenderDomain), nil
 }
 
 func requiresBatchConfirmation(action string) bool {

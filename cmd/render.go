@@ -27,14 +27,7 @@ func formatDate(value string) string {
 }
 
 func displaySender(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if idx := strings.LastIndex(raw, "<"); idx > 0 {
-		name := strings.Trim(strings.TrimSpace(raw[:idx]), `"'`)
-		if name != "" {
-			return name
-		}
-	}
-	return raw
+	return mail.ParseSender(raw).Name
 }
 
 func messageFlags(p *output.Printer, m mail.Message) string {

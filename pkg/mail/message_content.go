@@ -10,7 +10,7 @@ import (
 )
 
 func (c *Client) warnContentFallback(err error) {
-	c.contentWarningOnce.Do(func() {
+	c.shared.contentWarningOnce.Do(func() {
 		reason := strings.TrimSpace(err.Error())
 		if reason == "" {
 			reason = "unknown error"

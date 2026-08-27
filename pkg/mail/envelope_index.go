@@ -31,6 +31,7 @@ type indexMessage struct {
 	Deleted       int    `json:"Deleted"`
 	MessageSize   int    `json:"MessageSize"`
 	Content       string `json:"Content"`
+	Snippet       string `json:"Snippet"`
 	Mailbox       string `json:"Mailbox"`
 	Account       string `json:"Account"`
 	ToRecipients  string `json:"ToRecipients"`
@@ -108,7 +109,7 @@ func isEnvelopeIndexUnavailable(err error) bool {
 }
 
 func (c *Client) warnEnvelopeIndexFallback(err error) {
-	c.indexFallbackWarningOnce.Do(func() {
+	c.shared.indexFallbackWarningOnce.Do(func() {
 		reason := strings.TrimSpace(err.Error())
 		if reason == "" {
 			reason = "unknown error"
@@ -126,7 +127,7 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("sqlite3", "-readonly", "-json", indexPath, query)
+	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -296,6 +297,7 @@ func indexMessagesToMessages(rows []indexMessage) []Message {
 			Deleted:      row.Deleted != 0,
 			MessageSize:  row.MessageSize,
 			Content:      row.Content,
+			Snippet:      row.Snippet,
 			Mailbox:      row.Mailbox,
 			Account:      row.Account,
 		})
@@ -337,6 +339,7 @@ select
 	m.deleted as Deleted,
 	m.size as MessageSize,
 	'' as Content,
+	coalesce(su.summary, '') as Snippet,
 	%s as Mailbox,
 	%s as Account,
 	'' as ToRecipients,

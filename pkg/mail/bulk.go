@@ -25,7 +25,8 @@ func runWithMailCommandLimit[T any](items []T, run func(T)) {
 	}
 }
 
-func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
+// MailboxListRequest selects messages from one mailbox for a fan-out read.
+type MailboxListRequest struct {
 	AccountName string
 	MailboxName string
 	Limit       int
@@ -34,7 +35,16 @@ func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
 	FlaggedOnly bool
 	WithContent bool
 	Since       string
-}) ([]Message, error) {
+}
+
+// MessageRef names one message by account, mailbox, and ID.
+type MessageRef struct {
+	AccountName string
+	MailboxName string
+	MessageID   string
+}
+
+func (c *Client) GetMessagesFromMultipleMailboxes(requests []MailboxListRequest) ([]Message, error) {
 	if len(requests) == 0 {
 		return []Message{}, nil
 	}
@@ -53,16 +63,7 @@ func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
 	results := make(chan result, len(requests))
 
 	// Launch bounded goroutines for mailbox retrieval.
-	runWithMailCommandLimit(requests, func(r struct {
-		AccountName string
-		MailboxName string
-		Limit       int
-		Offset      int
-		UnreadOnly  bool
-		FlaggedOnly bool
-		WithContent bool
-		Since       string
-	}) {
+	runWithMailCommandLimit(requests, func(r MailboxListRequest) {
 		messages, err := c.GetMessagesJSON(r.AccountName, r.MailboxName, r.Limit, r.Offset, r.UnreadOnly, r.FlaggedOnly, r.WithContent, r.Since)
 		results <- result{messages: messages, err: err}
 	})
@@ -87,11 +88,7 @@ func (c *Client) GetMessagesFromMultipleMailboxes(requests []struct {
 	return allMessages, nil
 }
 
-func (c *Client) GetMultipleMessageDetails(requests []struct {
-	AccountName string
-	MailboxName string
-	MessageID   string
-}) ([]*Message, error) {
+func (c *Client) GetMultipleMessageDetails(requests []MessageRef) ([]*Message, error) {
 	if len(requests) == 0 {
 		return []*Message{}, nil
 	}
@@ -116,11 +113,7 @@ func (c *Client) GetMultipleMessageDetails(requests []struct {
 
 	type indexedRequest struct {
 		index int
-		req   struct {
-			AccountName string
-			MailboxName string
-			MessageID   string
-		}
+		req   MessageRef
 	}
 	indexedRequests := make([]indexedRequest, 0, len(requests))
 	for i, req := range requests {

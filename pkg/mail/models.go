@@ -23,16 +23,18 @@ type Mailbox struct {
 }
 
 type Message struct {
-	ID            string   `json:"id"`
-	Subject       string   `json:"subject"`
-	Sender        string   `json:"sender"`
-	DateSent      string   `json:"dateSent"`
-	DateReceived  string   `json:"dateReceived"`
-	Read          bool     `json:"read"`
-	Flagged       bool     `json:"flagged"`
-	Deleted       bool     `json:"deleted"`
-	MessageSize   int      `json:"messageSize"`
-	Content       string   `json:"content"`
+	ID           string `json:"id"`
+	Subject      string `json:"subject"`
+	Sender       string `json:"sender"`
+	DateSent     string `json:"dateSent"`
+	DateReceived string `json:"dateReceived"`
+	Read         bool   `json:"read"`
+	Flagged      bool   `json:"flagged"`
+	Deleted      bool   `json:"deleted"`
+	MessageSize  int    `json:"messageSize"`
+	Content      string `json:"content"`
+	// Snippet is Mail's indexed summary, present on index-backed listings.
+	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`
 	Account       string   `json:"account"`
 	ToRecipients  []string `json:"toRecipients"`

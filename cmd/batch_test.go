@@ -64,7 +64,7 @@ func TestVerifyBatchMutationAcceptsActualMessageAbsence(t *testing.T) {
 		{name: "delete", action: "delete"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			status, err := verifyBatchMutation(mail.NewClient(), batchOptions{Action: tt.action}, batchItem{
+			status, err := mail.VerifyMutation(mail.NewClient(), batchOptions{Action: tt.action}, batchItem{
 				ID: "123", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: tt.target,
 			})
 			if err != nil {
