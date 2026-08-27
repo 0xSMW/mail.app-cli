@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/base64"
 	"fmt"
 
 	"github.com/0xSMW/mail.app-cli/internal/output"
@@ -32,10 +33,7 @@ var mailboxesListCmd = &cobra.Command{
 		if !mailboxNoCache {
 			c, cacheErr = cache.New()
 		}
-		cacheKey := "mailboxes"
-		if account != "" {
-			cacheKey = "mailboxes-" + sanitizeCacheKey(account)
-		}
+		cacheKey := mailboxCacheKey(account)
 		var mailboxes []mail.Mailbox
 		fromCache := false
 		if !mailboxNoCache && !mailboxForceRefresh && cacheErr == nil {
@@ -64,6 +62,16 @@ var mailboxesListCmd = &cobra.Command{
 			Plain:   renderMailboxes(mailboxes),
 		})
 	},
+}
+
+// mailboxCacheKey returns a filename-safe, collision-free key for a scoped
+// mailbox listing. Versioning keeps the old lossy sanitized-key namespace out
+// of service so a cache entry for one account cannot be reused by another.
+func mailboxCacheKey(account string) string {
+	if account == "" {
+		return "mailboxes"
+	}
+	return "mailboxes-account-v2-" + base64.RawURLEncoding.EncodeToString([]byte(account))
 }
 
 func accountOrAll(account string) string {

@@ -2,6 +2,7 @@
 (root) --account (-a)
 (root) --agent [hidden]
 (root) --count
+(root) --help (-h)
 (root) --ids-only
 (root) --jq
 (root) --json
@@ -10,54 +11,95 @@
 (root) --plain
 (root) --quiet (-q)
 accounts
+accounts --help (-h)
 accounts list
 accounts list --force-refresh
+accounts list --help (-h)
 accounts list --no-cache
 accounts show
+accounts show --help (-h)
 agents
+agents --help (-h)
 archive
 archive --dry-run
+archive --help (-h)
 archive --verify
 attachments
+attachments --help (-h)
 attachments list
+attachments list --help (-h)
 attachments save
+attachments save --help (-h)
 attachments save --output (-o)
 commands
+commands --help (-h)
+completion
+completion --help (-h)
+completion bash
+completion bash --help (-h)
+completion bash --no-descriptions
+completion fish
+completion fish --help (-h)
+completion fish --no-descriptions
+completion powershell
+completion powershell --help (-h)
+completion powershell --no-descriptions
+completion zsh
+completion zsh --help (-h)
+completion zsh --no-descriptions
 config
+config --help (-h)
 config path
+config path --help (-h)
 config set
+config set --help (-h)
 config show
+config show --help (-h)
 config unset
+config unset --help (-h)
 delete
 delete --dry-run
+delete --help (-h)
 delete --verify
 doctor
+doctor --help (-h)
 drafts
+drafts --help (-h)
 drafts create
 drafts create --bcc
 drafts create --body
 drafts create --body-file
 drafts create --cc
 drafts create --dry-run
+drafts create --help (-h)
 drafts create --subject
 drafts create --to
 drafts delete
 drafts delete --dry-run
+drafts delete --help (-h)
 drafts list
+drafts list --help (-h)
 drafts list --limit (-l)
 drafts send
 drafts send --dry-run
+drafts send --help (-h)
 drafts show
+drafts show --help (-h)
 drafts update
 drafts update --body
 drafts update --body-file
 drafts update --dry-run
+drafts update --help (-h)
 drafts update --subject
 environment
+environment --help (-h)
 exit-codes
+exit-codes --help (-h)
 export
+export --help (-h)
 export attachments
 export attachments --flagged
+export attachments --help (-h)
 export attachments --limit (-l)
 export attachments --offset (-o)
 export attachments --output
@@ -66,6 +108,7 @@ export attachments --unread
 export messages
 export messages --flagged
 export messages --format
+export messages --help (-h)
 export messages --limit (-l)
 export messages --offset (-o)
 export messages --output
@@ -73,29 +116,41 @@ export messages --since
 export messages --unread
 flag
 flag --dry-run
+flag --help (-h)
 flag --verify
+help
+help --help (-h)
 import
+import --help (-h)
 import messages
 import messages --dry-run
 import messages --file
 import messages --format
+import messages --help (-h)
 inbox
+inbox --help (-h)
 inbox --limit (-l)
 inbox --offset (-o)
 inbox --unread (-u)
 inbox --with-content
 mailboxes
+mailboxes --help (-h)
 mailboxes list
 mailboxes list --force-refresh
+mailboxes list --help (-h)
 mailboxes list --no-cache
 messages
+messages --help (-h)
 messages archive
 messages archive --dry-run
+messages archive --help (-h)
 messages archive --verify
 messages batch
+messages batch --help (-h)
 messages batch archive
 messages batch archive --chunk-size
 messages batch archive --dry-run
+messages batch archive --help (-h)
 messages batch archive --limit (-l)
 messages batch archive --mark-read
 messages batch archive --progress
@@ -109,6 +164,7 @@ messages batch archive --yes
 messages batch delete
 messages batch delete --chunk-size
 messages batch delete --dry-run
+messages batch delete --help (-h)
 messages batch delete --limit (-l)
 messages batch delete --mark-read
 messages batch delete --progress
@@ -123,6 +179,7 @@ messages batch flag
 messages batch flag --chunk-size
 messages batch flag --dry-run
 messages batch flag --flagged
+messages batch flag --help (-h)
 messages batch flag --limit (-l)
 messages batch flag --mark-read
 messages batch flag --progress
@@ -136,6 +193,7 @@ messages batch flag --yes
 messages batch mark
 messages batch mark --chunk-size
 messages batch mark --dry-run
+messages batch mark --help (-h)
 messages batch mark --limit (-l)
 messages batch mark --mark-read
 messages batch mark --progress
@@ -150,6 +208,7 @@ messages batch mark --yes
 messages batch move
 messages batch move --chunk-size
 messages batch move --dry-run
+messages batch move --help (-h)
 messages batch move --limit (-l)
 messages batch move --mark-read
 messages batch move --progress
@@ -162,30 +221,37 @@ messages batch move --verify
 messages batch move --yes
 messages delete
 messages delete --dry-run
+messages delete --help (-h)
 messages delete --verify
 messages drafts
+messages drafts --help (-h)
 messages drafts --limit (-l)
 messages drafts --offset (-o)
 messages drafts --with-content
 messages flag
 messages flag --dry-run
 messages flag --flagged (-f)
+messages flag --help (-h)
 messages flag --verify
 messages flagged
+messages flagged --help (-h)
 messages flagged --limit (-l)
 messages flagged --offset (-o)
 messages flagged --with-content
 messages inbox
+messages inbox --help (-h)
 messages inbox --limit (-l)
 messages inbox --offset (-o)
 messages inbox --with-content
 messages junk
+messages junk --help (-h)
 messages junk --limit (-l)
 messages junk --offset (-o)
 messages junk --with-content
 messages list
 messages list --flagged (-f)
 messages list --force-refresh
+messages list --help (-h)
 messages list --limit (-l)
 messages list --no-cache
 messages list --offset (-o)
@@ -194,57 +260,79 @@ messages list --unread (-u)
 messages list --with-content
 messages mark
 messages mark --dry-run
+messages mark --help (-h)
 messages mark --read (-r)
 messages mark --verify
 messages move
 messages move --dry-run
+messages move --help (-h)
 messages move --verify
 messages sent
+messages sent --help (-h)
 messages sent --limit (-l)
 messages sent --offset (-o)
 messages sent --with-content
 messages show
+messages show --help (-h)
 messages trash
+messages trash --help (-h)
 messages trash --limit (-l)
 messages trash --offset (-o)
 messages trash --with-content
 messages unread
+messages unread --help (-h)
 messages unread --limit (-l)
 messages unread --offset (-o)
 messages unread --with-content
 messages vip
+messages vip --help (-h)
 messages vip --limit (-l)
 move
 move --dry-run
+move --help (-h)
 move --to
 move --verify
 output
+output --help (-h)
 recent
+recent --help (-h)
 recent clear
+recent clear --help (-h)
 recent search
+recent search --help (-h)
 recent search --limit (-l)
 recent show
+recent show --help (-h)
 rules
+rules --help (-h)
 rules apply
+rules apply --help (-h)
 rules apply --limit (-l)
 rules apply --query
 rules create
 rules create --dry-run
 rules create --enabled
 rules create --from-domain
+rules create --help (-h)
 rules create --mark-read
 rules create --move-to
 rules create --subject-contains
 rules delete
 rules delete --dry-run
+rules delete --help (-h)
 rules disable
 rules disable --dry-run
+rules disable --help (-h)
 rules enable
 rules enable --dry-run
+rules enable --help (-h)
 rules list
+rules list --help (-h)
 rules show
+rules show --help (-h)
 search
 search --allow-partial
+search --help (-h)
 search --limit (-l)
 search --no-cache
 search --sender
@@ -252,6 +340,7 @@ search --sender-domain
 search --since (-s)
 seen
 seen --dry-run
+seen --help (-h)
 seen --verify
 send
 send --attach
@@ -260,42 +349,63 @@ send --body
 send --body-file
 send --cc (-c)
 send --dry-run
+send --help (-h)
 send --signature
 send --subject (-s)
 send --to (-t)
 show
+show --help (-h)
 show --metadata-only
 signatures
+signatures --help (-h)
 signatures list
+signatures list --help (-h)
 signatures show
+signatures show --help (-h)
 skill
+skill --help (-h)
 skill install
+skill install --help (-h)
 skill path
+skill path --help (-h)
 smart
+smart --help (-h)
 smart list
+smart list --help (-h)
 smart query
+smart query --help (-h)
 smart query --limit (-l)
 smart show
+smart show --help (-h)
 sync
+sync --help (-h)
 sync --timeout
 sync --wait
 threads
+threads --help (-h)
 threads archive
 threads archive --dry-run
+threads archive --help (-h)
 threads archive --limit (-l)
 threads archive --verify
 threads list
+threads list --help (-h)
 threads list --limit (-l)
 threads show
+threads show --help (-h)
 threads show --limit (-l)
 unflag
 unflag --dry-run
+unflag --help (-h)
 unflag --verify
 unread
+unread --help (-h)
 unread --limit (-l)
 unread --offset (-o)
 unread --with-content
 unseen
 unseen --dry-run
+unseen --help (-h)
 unseen --verify
 version
+version --help (-h)

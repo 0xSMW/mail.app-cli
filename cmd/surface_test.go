@@ -16,10 +16,18 @@ import (
 //
 //	UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot
 func TestSurfaceSnapshot(t *testing.T) {
+	// Cobra creates these public commands lazily during Execute. Initialize them
+	// here so the snapshot captures the same user-visible command tree.
+	rootCmd.InitDefaultHelpCmd()
+	rootCmd.InitDefaultCompletionCmd()
+
 	var lines []string
 	var walk func(cmd *cobra.Command)
 	walk = func(cmd *cobra.Command) {
-		if cmd.Name() == "help" || cmd.Name() == "completion" {
+		// Cobra's hidden completion protocol commands are implementation details.
+		// Its public completion command and our custom help command are part of
+		// the CLI surface and must remain in the snapshot.
+		if cmd.Name() == "__complete" || cmd.Name() == "__completeNoDesc" {
 			return
 		}
 		path := commandPath(cmd)
@@ -27,14 +35,10 @@ func TestSurfaceSnapshot(t *testing.T) {
 			path = "(root)"
 		}
 		lines = append(lines, path)
+		// Cobra adds --help lazily for every executable command.
+		cmd.InitDefaultHelpFlag()
 		flags := cmd.NonInheritedFlags()
-		if !cmd.HasParent() {
-			flags = cmd.PersistentFlags()
-		}
 		flags.VisitAll(func(f *pflag.Flag) {
-			if f.Name == "help" {
-				return
-			}
 			entry := path + " --" + f.Name
 			if f.Shorthand != "" {
 				entry += " (-" + f.Shorthand + ")"
