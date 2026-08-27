@@ -261,28 +261,33 @@ func (c *composeModal) updateInputs(msg tea.Msg) tea.Cmd {
 
 // parseAddressList accepts an RFC 5322 list such as `"Doe, Jane" <j@x>, b@y`
 // with semicolons allowed as separators, and returns bare addresses. Input
-// the parser still rejects is split on separators outside quotes.
-func parseAddressList(value string) []string {
+// the parser rejects is split on separators outside quotes, and any
+// non-empty part that is not an address is an error rather than dropped.
+func parseAddressList(value string) ([]string, error) {
 	value = strings.TrimSpace(semicolonsToCommas(value))
 	if value == "" {
-		return nil
+		return nil, nil
 	}
 	if parsed, err := netmail.ParseAddressList(value); err == nil {
 		out := make([]string, 0, len(parsed))
 		for _, addr := range parsed {
 			out = append(out, addr.Address)
 		}
-		return out
+		return out, nil
 	}
 	var out []string
 	for _, part := range splitOutsideQuotes(value, ',') {
-		if part = strings.TrimSpace(part); part != "" {
-			if email := senderAddressOf(part); email != "" {
-				out = append(out, email)
-			}
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
+		email := senderAddressOf(part)
+		if email == "" || !strings.Contains(email, "@") {
+			return nil, fmt.Errorf("not an address: %s", part)
+		}
+		out = append(out, email)
 	}
-	return out
+	return out, nil
 }
 
 // semicolonsToCommas turns separator semicolons into commas, leaving any
@@ -328,9 +333,15 @@ func (c *composeModal) fail(field int, status string) tea.Cmd {
 }
 
 func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
-	to := parseAddressList(c.inputs[fieldTo].Value())
-	cc := parseAddressList(c.inputs[fieldCc].Value())
-	bcc := parseAddressList(c.inputs[fieldBcc].Value())
+	lists := make([][]string, fieldSubject)
+	for field := fieldTo; field < fieldSubject; field++ {
+		parsed, err := parseAddressList(c.inputs[field].Value())
+		if err != nil {
+			return c.fail(field, err.Error())
+		}
+		lists[field] = parsed
+	}
+	to, cc, bcc := lists[fieldTo], lists[fieldCc], lists[fieldBcc]
 	subject := strings.TrimSpace(c.inputs[fieldSubject].Value())
 	body := strings.TrimSpace(c.body.Value())
 	switch {
@@ -338,11 +349,6 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 		return c.fail(fieldTo, "at least one To address is needed")
 	case subject == "" && !draft:
 		return c.fail(fieldSubject, "a subject is needed")
-	}
-	for _, addr := range slices.Concat(to, cc, bcc) {
-		if !strings.Contains(addr, "@") {
-			return c.fail(c.focus, "not an address: "+addr)
-		}
 	}
 	c.sending, c.problem = true, false
 	c.status = "sending…"

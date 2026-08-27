@@ -214,13 +214,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.onBodyLoaded(msg)
 
 	case writeDoneMsg:
-		// The queue advances here, once, whatever the write reported.
+		// The queue advances here, once, whatever the write reported. The
+		// result is always handled first so a failure on the way out is
+		// not lost.
 		next := m.writes.next()
-		if next == nil && m.quitting {
-			return m, tea.Quit
-		}
 		updated, cmd := m.Update(msg.inner)
 		m = updated.(model)
+		if next == nil && m.quitting {
+			if err := writeFailure(msg.inner); err != nil {
+				m.fatal = err
+			}
+			return m, tea.Quit
+		}
 		if next == nil && m.refreshWanted {
 			m.refreshWanted = false
 			cmd = tea.Batch(cmd, m.scheduleRefresh())
@@ -257,6 +262,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// writeFailure is the error a finished write reported, if any, so a quit
+// that waited for it can return it.
+func writeFailure(inner tea.Msg) error {
+	switch msg := inner.(type) {
+	case mutationDoneMsg:
+		if msg.err != nil {
+			return fmt.Errorf("%s: %w", msg.opts.Action, msg.err)
+		}
+	case composeDoneMsg:
+		return msg.err
+	}
+	return nil
 }
 
 func (m *model) anyLoading() bool {

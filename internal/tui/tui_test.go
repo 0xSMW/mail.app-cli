@@ -173,16 +173,19 @@ func TestReplyAllPrefillDropsOwnAddress(t *testing.T) {
 }
 
 func TestParseAddressListKeepsNamesTogether(t *testing.T) {
-	got := parseAddressList("Jane Doe <jane@example.test>, bob@example.test; Carl <carl@example.test>")
+	got, err := parseAddressList("Jane Doe <jane@example.test>, bob@example.test; Carl <carl@example.test>")
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := []string{"jane@example.test", "bob@example.test", "carl@example.test"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parseAddressList = %v", got)
 	}
-	got = parseAddressList(`"Doe, Jane" <Jane@Example.test>, bob@example.test`)
+	got, _ = parseAddressList(`"Doe, Jane" <Jane@Example.test>, bob@example.test`)
 	if strings.Join(got, ",") != "Jane@Example.test,bob@example.test" {
 		t.Fatalf("quoted name = %v (case must be preserved)", got)
 	}
-	got = parseAddressList(`"Doe; Jane" <jane@example.test>; bob@example.test`)
+	got, _ = parseAddressList(`"Doe; Jane" <jane@example.test>; bob@example.test`)
 	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
 		t.Fatalf("quoted name with semicolons = %v", got)
 	}
@@ -256,6 +259,15 @@ func TestSelectInitialUnknownAccountIsTypedNotFound(t *testing.T) {
 	}
 	if got := clierr.Classify(err).Code; got != clierr.CodeNotFound {
 		t.Fatalf("classified code = %q, want %q", got, clierr.CodeNotFound)
+	}
+}
+
+func TestParseAddressListRejectsMalformedParts(t *testing.T) {
+	if _, err := parseAddressList("bad <>, good@example.test"); err == nil {
+		t.Fatal("malformed recipient beside a valid one was accepted")
+	}
+	if _, err := parseAddressList("nobody, good@example.test"); err == nil {
+		t.Fatal("bare word recipient was accepted")
 	}
 }
 
