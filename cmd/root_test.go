@@ -382,6 +382,38 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 	if !hasGlobal {
 		t.Fatal("global flags missing --jq")
 	}
+	assertHelpFlag := func(t *testing.T, record commandRecord) {
+		t.Helper()
+		for _, f := range record.Flags {
+			if f.Name == "help" {
+				if f.Shorthand != "h" {
+					t.Fatalf("%s --help shorthand = %q, want h", record.Path, f.Shorthand)
+				}
+				return
+			}
+		}
+		t.Fatalf("%s flags missing --help: %+v", record.Path, record.Flags)
+	}
+	assertNoDuplicateFlags := func(t *testing.T, record commandRecord) {
+		t.Helper()
+		flags := map[string]bool{}
+		for _, f := range record.Flags {
+			if flags[f.Name] {
+				t.Fatalf("%s repeats --%s in flags", record.Path, f.Name)
+			}
+			flags[f.Name] = true
+		}
+		for _, f := range record.GlobalFlags {
+			if flags[f.Name] {
+				t.Fatalf("%s repeats --%s in flags and globalFlags", record.Path, f.Name)
+			}
+			flags[f.Name] = true
+		}
+	}
+	for _, path := range []string{"", "archive", "completion", "completion bash", "help"} {
+		assertHelpFlag(t, paths[path])
+		assertNoDuplicateFlags(t, paths[path])
+	}
 
 	code, stdout, stderr = run(t, "archive", "--agent", "--help")
 	if code != 0 {
@@ -394,6 +426,7 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 	if record.Path != "archive" || len(record.Flags) == 0 {
 		t.Fatalf("agent help record = %+v", record)
 	}
+	assertHelpFlag(t, record)
 	global := map[string]bool{}
 	for _, f := range record.GlobalFlags {
 		global[f.Name] = true
@@ -403,13 +436,7 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 			t.Fatalf("archive agent help globals missing --%s: %+v", want, record.GlobalFlags)
 		}
 	}
-	local := map[string]bool{}
-	for _, f := range record.Flags {
-		local[f.Name] = true
-		if global[f.Name] {
-			t.Fatalf("archive agent help repeats --%s in flags and globalFlags", f.Name)
-		}
-	}
+	assertNoDuplicateFlags(t, record)
 }
 
 func TestHelpTopicsPrint(t *testing.T) {

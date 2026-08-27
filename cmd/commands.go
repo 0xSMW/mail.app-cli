@@ -105,7 +105,7 @@ func describeCommand(cmd *cobra.Command, recurse bool) commandRecord {
 	}
 	if !cmd.HasParent() {
 		record.GlobalFlags = describeFlags(cmd.PersistentFlags())
-		record.Flags = []flagRecord{}
+		record.Flags = describeFlags(cmd.LocalNonPersistentFlags())
 	} else {
 		// Agent help for a subcommand must describe the root persistent flags it
 		// can accept as well as its own flags. InheritedFlags excludes locals
@@ -131,9 +131,6 @@ func isCompletionProtocolCommand(cmd *cobra.Command) bool {
 func describeFlags(set *pflag.FlagSet) []flagRecord {
 	flags := []flagRecord{}
 	set.VisitAll(func(f *pflag.Flag) {
-		if f.Name == "help" {
-			return
-		}
 		flags = append(flags, flagRecord{
 			Name:      f.Name,
 			Shorthand: f.Shorthand,
