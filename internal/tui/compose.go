@@ -77,22 +77,37 @@ func (m *model) openCompose(mode composeMode) tea.Cmd {
 	return m.loadBody()
 }
 
+// composeFor opens the editor for the account that owns the original
+// message, the account in scope, or, from All inboxes with several
+// accounts, whichever the user picks.
 func (m *model) composeFor(mode composeMode, original *mail.Message) tea.Cmd {
 	account := m.sidebar.current().account
 	if original != nil {
 		account = original.Account
 	}
 	if account == "" {
+		var enabled []string
 		for _, a := range m.sidebar.accounts {
 			if a.Enabled {
-				account = a.Name
-				break
+				enabled = append(enabled, a.Name)
 			}
 		}
-		if account == "" {
+		switch len(enabled) {
+		case 0:
 			return notify("no account to send from")
+		case 1:
+			account = enabled[0]
+		default:
+			m.modal = newMailboxPicker("Send from", enabled, func(m *model, chosen string) tea.Cmd {
+				return m.composeWithAccount(mode, original, chosen)
+			})
+			return nil
 		}
 	}
+	return m.composeWithAccount(mode, original, account)
+}
+
+func (m *model) composeWithAccount(mode composeMode, original *mail.Message, account string) tea.Cmd {
 	c := newComposeModal(mode, account, original, m.sidebar.accountAddresses(account))
 	c.resize(m.width, contentHeight(m.height, m.helpView()))
 	m.modal = c
@@ -380,6 +395,9 @@ func (m model) onComposeDone(msg composeDoneMsg) (tea.Model, tea.Cmd) {
 	}
 	m.modal = nil
 	m.layout()
+	// A sent or saved message shows up in Sent or Drafts; reconcile like
+	// any other write once the queue drains.
+	m.refreshWanted = true
 	return m, notify(msg.label)
 }
 

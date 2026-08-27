@@ -132,7 +132,17 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 
 	switch opts.Action {
 	case "archive", "delete", "move":
+		// Targets already where the action would put them are no-ops in
+		// the engine; leave their rows in place.
+		moving := make(map[string]bool, len(targets))
 		for _, t := range targets {
+			if opts.Action == "move" && strings.EqualFold(t.Mailbox, opts.TargetMailbox) {
+				continue
+			}
+			if opts.Action == "archive" && mail.IsArchiveAlias(t.Mailbox) {
+				continue
+			}
+			moving[bodyKey(t)] = true
 			if !t.Read {
 				m.sidebar.adjustUnread(t.Account, t.Mailbox, -1)
 				if opts.Action == "move" {
@@ -140,8 +150,8 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 				}
 			}
 		}
-		m.list.remove(keys)
-		m.reader.forget(keys)
+		m.list.remove(moving)
+		m.reader.forget(moving)
 		if m.reader.open && m.list.current() == nil {
 			m.closeReader()
 		}

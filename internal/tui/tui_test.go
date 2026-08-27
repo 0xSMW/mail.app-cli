@@ -142,6 +142,27 @@ func TestMarkReadAdjustsSidebarUnread(t *testing.T) {
 	}
 }
 
+func TestNoOpMoveKeepsRow(t *testing.T) {
+	m := loadedModel(t)
+	m.list.clearSelection()
+	targets := m.list.targets()
+	_ = m.mutate(targets, mail.BatchOptions{Action: "move", TargetMailbox: "inbox"}, mail.MoveMutator(false))
+	if len(m.list.messages) != 3 {
+		t.Fatalf("moving to the current mailbox removed rows: %d left", len(m.list.messages))
+	}
+}
+
+func TestComposeFromAllInboxesAsksForAccount(t *testing.T) {
+	m := loadedModel(t)
+	m.sidebar.accounts = append(m.sidebar.accounts, mail.Account{Name: "Personal", EmailAddress: "p@example.test", Enabled: true})
+	m.sidebar.selected = 0 // All inboxes
+	m = press(m, "c")
+	picker, ok := m.modal.(*mailboxPicker)
+	if !ok || picker.title != "Send from" || len(picker.names) != 2 {
+		t.Fatalf("compose from All inboxes did not ask for an account: %T %+v", m.modal, m.modal)
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")
