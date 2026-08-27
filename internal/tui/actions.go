@@ -53,6 +53,7 @@ type mutationDoneMsg struct {
 	err    error
 	result mail.BatchResult
 	opts   mail.BatchOptions
+	keys   map[string]bool
 }
 
 // handleActionKey runs the message actions shared by the list and the reader.
@@ -149,7 +150,7 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 	client := m.client.WithContext(m.writeCtx)
 	run := m.writes.push(func() tea.Msg {
 		result, err := mail.RunBatch(client, opts, items, mutate)
-		return mutationDoneMsg{err: err, result: result, opts: opts}
+		return mutationDoneMsg{err: err, result: result, opts: opts, keys: keys}
 	})
 	if m.reader.open && (opts.Action == "archive" || opts.Action == "delete" || opts.Action == "move") {
 		return tea.Batch(run, m.requestBody())
@@ -168,6 +169,11 @@ func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {
 func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 	result := msg.result
 	summary := result.Summary(msg.opts)
+	if result.Failed > 0 || (msg.err != nil && len(result.Items) == 0) {
+		// The optimistic change may be wrong; drop cached copies so a
+		// reopen fetches Mail.app's state.
+		m.reader.forget(msg.keys)
+	}
 	var cmds []tea.Cmd
 	switch {
 	case msg.err != nil && len(result.Items) == 0:

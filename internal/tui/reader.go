@@ -55,6 +55,16 @@ func (r *reader) forget(keys map[string]bool) {
 	}
 }
 
+// syncFlags copies read and flagged state from freshly listed rows onto
+// cached bodies, so a failed mutation's optimistic change is undone.
+func (r *reader) syncFlags(messages []mail.Message) {
+	for _, m := range messages {
+		if cached, ok := r.cache[bodyKey(m)]; ok {
+			cached.Read, cached.Flagged = m.Read, m.Flagged
+		}
+	}
+}
+
 func (r *reader) resize(width, height int) {
 	rewrap := width != r.width
 	r.width, r.height = width, height

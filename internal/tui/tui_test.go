@@ -269,6 +269,9 @@ func TestParseAddressListRejectsMalformedParts(t *testing.T) {
 	if _, err := parseAddressList("nobody, good@example.test"); err == nil {
 		t.Fatal("bare word recipient was accepted")
 	}
+	if _, err := parseAddressList("bad@example.test garbage; good@example.test"); err == nil {
+		t.Fatal("address with trailing garbage was accepted")
+	}
 }
 
 func TestSanitizeLineStripsEscapes(t *testing.T) {

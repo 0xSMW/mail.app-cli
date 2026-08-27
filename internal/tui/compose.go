@@ -281,11 +281,11 @@ func parseAddressList(value string) ([]string, error) {
 		if part == "" {
 			continue
 		}
-		email := senderAddressOf(part)
-		if email == "" || !strings.Contains(email, "@") {
+		parsed, err := netmail.ParseAddress(part)
+		if err != nil {
 			return nil, fmt.Errorf("not an address: %s", part)
 		}
-		out = append(out, email)
+		out = append(out, parsed.Address)
 	}
 	return out, nil
 }

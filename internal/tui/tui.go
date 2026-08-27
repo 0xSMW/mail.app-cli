@@ -77,6 +77,9 @@ type model struct {
 	quitting  bool
 	writeCtx  context.Context
 	stopWrite context.CancelFunc
+	// quitFailure is the first write that failed after q was pressed, so a
+	// quit that waited for the queue can report it.
+	quitFailure error
 
 	spinning     bool
 	spinnerFrame int
@@ -220,10 +223,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		next := m.writes.next()
 		updated, cmd := m.Update(msg.inner)
 		m = updated.(model)
+		if m.quitting && m.quitFailure == nil {
+			m.quitFailure = writeFailure(msg.inner)
+		}
 		if next == nil && m.quitting {
-			if err := writeFailure(msg.inner); err != nil {
-				m.fatal = err
-			}
+			m.fatal = m.quitFailure
 			return m, tea.Quit
 		}
 		if next == nil && m.refreshWanted {
@@ -651,6 +655,7 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	m.list.setMessages(msg.messages, msg.silent, msg.source, msg.limit)
+	m.reader.syncFlags(msg.messages)
 	if !strings.HasPrefix(m.notice, "slow mode") {
 		m.notice = ""
 	}
