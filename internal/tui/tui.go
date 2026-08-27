@@ -89,11 +89,11 @@ type model struct {
 	// advanceAfterPage moves to the next row once a page the reader asked
 	// for at the loaded boundary arrives.
 	advanceAfterPage bool
-	notice               string
-	err                  error
-	helpHidden           bool
-	ctrlCOnce            bool
-	refreshID            uint64
+	notice           string
+	err              error
+	helpHidden       bool
+	ctrlCOnce        bool
+	refreshID        uint64
 
 	toast   notifyMsg
 	toastID uint64
