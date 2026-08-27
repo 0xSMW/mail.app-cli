@@ -62,19 +62,22 @@ func (l *list) setMessages(messages []mail.Message, keepCursor bool, source list
 	}
 }
 
-// appendPage adds an older page. Rows the list already has (the index can
-// shift while paging) are dropped.
+// appendPage adds an older page fetched with an overlap. Rows the list
+// already has are dropped; a full page that adds nothing means the offsets
+// no longer line up with the mailbox, and paging stops until a reload.
 func (l *list) appendPage(messages []mail.Message, pageSize int) {
 	seen := make(map[string]bool, len(l.messages))
 	for _, m := range l.messages {
 		seen[bodyKey(m)] = true
 	}
+	added := 0
 	for _, m := range messages {
 		if !seen[bodyKey(m)] {
 			l.messages = append(l.messages, m)
+			added++
 		}
 	}
-	l.hasMore = len(messages) >= pageSize
+	l.hasMore = len(messages) >= pageSize && added > 0
 	l.measureDates()
 }
 

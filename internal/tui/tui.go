@@ -559,6 +559,12 @@ func listPage(client *mail.Client, source listSource, limit, offset int) ([]mail
 	return client.ListMessages(mail.MailboxListRequest{AccountName: source.account, MailboxName: source.mailbox, Limit: limit, Offset: offset})
 }
 
+// pageOverlap is how far back the next page starts from the loaded end.
+// The index has no keyset cursor, so a message removed from the loaded
+// prefix by another client shifts later rows up; re-reading this many rows
+// (deduplicated on arrival) covers that many removals between pages.
+const pageOverlap = 20
+
 // loadMore fetches the page after the last loaded row. It is a separate
 // lane so it never cancels, and is never mistaken for, a reload.
 func (m *model) loadMore() tea.Cmd {
@@ -566,7 +572,7 @@ func (m *model) loadMore() tea.Cmd {
 		return nil
 	}
 	source := m.list.source
-	offset := len(m.list.messages)
+	offset := max(len(m.list.messages)-pageOverlap, 0)
 	limit := m.list.pageSize()
 	id, ctx := m.pageLane.begin(m.ctx, false)
 	client := m.client.WithContext(ctx)
