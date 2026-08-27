@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -138,6 +139,33 @@ func TestConfigRoundTripAndPrecedence(t *testing.T) {
 		t.Fatalf("invalid output value exit = %d", code)
 	}
 	resetFlags(rootCmd)
+}
+
+func TestConfigPathWorksWithMalformedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(config.EnvConfigPath, path)
+	resetFlags(rootCmd)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"config", "path", "--json"}, &stdout, &stderr)
+	resetFlags(rootCmd)
+	if code != 0 {
+		t.Fatalf("exit = %d: %s", code, stderr.String())
+	}
+	var env struct {
+		Data struct {
+			Path   string `json:"path"`
+			Exists bool   `json:"exists"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &env); err != nil {
+		t.Fatalf("stdout is not an envelope: %v\n%s", err, stdout.String())
+	}
+	if env.Data.Path != path || !env.Data.Exists {
+		t.Fatalf("config path data = %+v, want existing %q", env.Data, path)
+	}
 }
 
 func TestCommandsTreeAndAgentHelp(t *testing.T) {

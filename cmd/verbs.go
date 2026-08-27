@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/config"
 	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 	"github.com/spf13/cobra"
@@ -54,15 +56,15 @@ func listUnified(kind string, limit, offset int, withContent bool) error {
 	var messages []mail.Message
 	var err error
 	meta := map[string]any{"view": kind}
-	scoped := resolved.Account.Value != "" || mailboxExplicit()
+	scoped := unifiedListingScoped(resolved)
 	if scoped {
 		account, accountErr := requireAccount()
 		if accountErr != nil {
 			return accountErr
 		}
-		mailbox := "INBOX"
-		if mailboxExplicit() {
-			mailbox = mailboxInScope()
+		mailbox, mailboxErr := unifiedMailboxForAccount(account, kind)
+		if mailboxErr != nil {
+			return mailboxErr
 		}
 		unreadOnly, flaggedOnly := scopedUnifiedFilters(kind)
 		messages, err = mailClient.GetMessagesJSON(account, mailbox, limit, offset, unreadOnly, flaggedOnly, withContent, "")
@@ -81,6 +83,64 @@ func listUnified(kind string, limit, offset int, withContent bool) error {
 		Meta:    meta,
 		Plain:   renderMessages(messages, !scoped),
 	})
+}
+
+// unifiedListingScoped reports whether a unified-style listing should be
+// limited to one account and mailbox. A configured mailbox is a scope even
+// when it came from the environment or config file rather than --mailbox.
+func unifiedListingScoped(scope config.Resolved) bool {
+	return scope.Account.Value != "" || scope.Mailbox.Source != config.SourceDefault
+}
+
+// unifiedMailboxForAccount respects a configured mailbox. When an account is
+// the only scope, special views use that account's real special mailbox name
+// (for example, "Sent Items") instead of falling back to INBOX.
+func unifiedMailboxForAccount(account, kind string) (string, error) {
+	if resolved.Mailbox.Source != config.SourceDefault {
+		return mailboxInScope(), nil
+	}
+	if _, special := specialMailboxCandidates(kind); !special {
+		return "INBOX", nil
+	}
+	mailboxes, err := mailClient.GetMailboxesJSON(account)
+	if err != nil {
+		return "", fmt.Errorf("list mailboxes for %s: %w", account, err)
+	}
+	mailbox, _ := specialMailboxForAccount(kind, account, mailboxes)
+	return mailbox, nil
+}
+
+func specialMailboxForAccount(kind, account string, mailboxes []mail.Mailbox) (string, bool) {
+	candidates, special := specialMailboxCandidates(kind)
+	if !special {
+		return "", false
+	}
+	for _, mailbox := range mailboxes {
+		if mailbox.Account != "" && mailbox.Account != account {
+			continue
+		}
+		for _, candidate := range candidates {
+			if strings.EqualFold(strings.TrimSpace(mailbox.Name), candidate) {
+				return mailbox.Name, true
+			}
+		}
+	}
+	return candidates[0], true
+}
+
+func specialMailboxCandidates(kind string) ([]string, bool) {
+	switch kind {
+	case "sent":
+		return []string{"Sent", "Sent Messages", "Sent Mail", "Sent Items"}, true
+	case "drafts":
+		return []string{"Drafts", "Draft"}, true
+	case "trash":
+		return []string{"Trash", "Deleted Messages", "Deleted Items", "Bin"}, true
+	case "junk":
+		return []string{"Junk", "Spam", "Junk E-mail", "Junk Email", "CATEGORY_SPAM"}, true
+	default:
+		return nil, false
+	}
 }
 
 var showCmd = &cobra.Command{

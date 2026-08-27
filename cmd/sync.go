@@ -51,8 +51,10 @@ they hold still for two samples.`,
 		finish := func(status string, err error) error {
 			result.Status = status
 			result.EndedAt = time.Now().UTC()
+			var resultErr *clierr.Error
 			if err != nil {
 				result.Error = err.Error()
+				resultErr = clierr.Classify(err)
 			}
 			summary := "Synced all accounts"
 			if account != "" {
@@ -66,10 +68,8 @@ they hold still for two samples.`,
 				Summary: summary,
 				Meta:    map[string]any{"account": accountOrAll(account)},
 				Plain:   renderLine("%s", summary),
+				Err:     resultErr,
 			})
-			if err != nil {
-				return err
-			}
 			return writeErr
 		}
 

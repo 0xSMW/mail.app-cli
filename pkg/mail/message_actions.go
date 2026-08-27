@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -103,7 +104,15 @@ func deleteFallbackMailboxes(mailboxName string) []string {
 }
 
 func isMessageNotFoundError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "Message not found")
+	if err == nil {
+		return false
+	}
+
+	var notFound *NotFoundError
+	if errors.As(err, &notFound) {
+		return strings.EqualFold(notFound.Kind, "message")
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "message not found")
 }
 
 func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) error {

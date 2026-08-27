@@ -30,6 +30,14 @@ type exportMetadata struct {
 	FlaggedOnly bool      `json:"flaggedOnly"`
 }
 
+type savedAttachment struct {
+	MessageID string `json:"messageId"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+}
+
 var (
 	exportFormat  string
 	exportOutput  string
@@ -105,13 +113,6 @@ var exportAttachmentsCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("select messages: %w", err)
 		}
-		type savedAttachment struct {
-			MessageID string `json:"messageId"`
-			Name      string `json:"name"`
-			Path      string `json:"path"`
-			Status    string `json:"status"`
-			Error     string `json:"error,omitempty"`
-		}
 		saved := []savedAttachment{}
 		failed := 0
 		used := map[string]int{}
@@ -140,18 +141,21 @@ var exportAttachmentsCmd = &cobra.Command{
 		for _, item := range saved {
 			rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
 		}
-		if err := writer.Write(output.Result{
-			Data:    saved,
-			Summary: fmt.Sprintf("Saved %d attachment(s) to %s, %d failed", len(saved)-failed, exportOutput, failed),
-			Plain:   renderTable([]string{"MESSAGE", "NAME", "STATUS", "PATH"}, rows, "no attachments"),
-		}); err != nil {
-			return err
-		}
-		if attachmentExportFailed(failed) {
-			return clierr.New(clierr.CodeMutationFailed, fmt.Sprintf("failed to export %d attachment item(s)", failed))
-		}
-		return nil
+		return writer.Write(attachmentExportResult(saved, exportOutput, failed, rows))
 	},
+}
+
+func attachmentExportResult(saved []savedAttachment, exportOutput string, failed int, rows [][]string) output.Result {
+	var failure error
+	if attachmentExportFailed(failed) {
+		failure = clierr.New(clierr.CodeMutationFailed, fmt.Sprintf("failed to export %d attachment item(s)", failed))
+	}
+	return output.Result{
+		Data:    saved,
+		Summary: fmt.Sprintf("Saved %d attachment(s) to %s, %d failed", len(saved)-failed, exportOutput, failed),
+		Plain:   renderTable([]string{"MESSAGE", "NAME", "STATUS", "PATH"}, rows, "no attachments"),
+		Err:     clierr.Classify(failure),
+	}
 }
 
 func writeJSONFile(path string, payload any) error {

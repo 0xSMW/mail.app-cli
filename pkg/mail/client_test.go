@@ -129,6 +129,29 @@ func TestDeleteMessageResolvedRetriesAllMail(t *testing.T) {
 	}
 }
 
+func TestDeleteMessageResolvedRetriesAllMailForTypedMessageNotFound(t *testing.T) {
+	var attempts []string
+	err := deleteMessageResolved("Newsletter", func(mailbox string) error {
+		attempts = append(attempts, mailbox)
+		if mailbox == "All Mail" {
+			return nil
+		}
+		return fmt.Errorf("delete message: %w", &NotFoundError{Kind: "message"})
+	})
+	if err != nil {
+		t.Fatalf("deleteMessageResolved returned error: %v", err)
+	}
+	want := []string{"Newsletter", "All Mail"}
+	if len(attempts) != len(want) {
+		t.Fatalf("attempts = %v, want %v", attempts, want)
+	}
+	for i := range want {
+		if attempts[i] != want[i] {
+			t.Fatalf("attempts = %v, want %v", attempts, want)
+		}
+	}
+}
+
 func TestDeleteMessageResolvedDoesNotRetryInvalidMailbox(t *testing.T) {
 	var attempts []string
 	err := deleteMessageResolved("Newsleter", func(mailbox string) error {

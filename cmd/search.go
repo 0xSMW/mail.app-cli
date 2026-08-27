@@ -77,7 +77,7 @@ non-empty mailbox of each enabled account (or of the one named with
 				notices = append(notices, fmt.Sprintf("%d mailbox(es) could not be searched", len(result.FailedMailboxes)))
 			}
 			return writer.Write(output.Result{
-				Data:    result,
+				Data:    partialSearchOutputData(result, writer.Format),
 				Summary: fmt.Sprintf("%s for %q (complete: %v)", plural(len(messages), "match"), query, result.Complete),
 				Notices: notices,
 				Meta:    meta,
@@ -91,6 +91,15 @@ non-empty mailbox of each enabled account (or of the one named with
 			Plain:   renderMessages(messages, true),
 		})
 	},
+}
+
+// partialSearchOutputData preserves completeness metadata for regular search
+// output while allowing list modifiers to operate on the matched messages.
+func partialSearchOutputData(result mail.SearchResult, format output.Format) any {
+	if format == output.FormatCount || format == output.FormatIDs {
+		return result.Messages
+	}
+	return result
 }
 
 func init() {

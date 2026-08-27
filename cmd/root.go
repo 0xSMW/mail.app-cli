@@ -122,7 +122,7 @@ func classifyCommandError(err error) *clierr.Error {
 
 func prepare(cmd *cobra.Command, args []string) error {
 	loaded, err := config.Load()
-	if err != nil && !isMetaCommand(cmd) {
+	if err != nil && !isConfigRecoveryCommand(cmd) {
 		return clierr.Wrap(clierr.CodeUsage, err, err.Error()).WithHint("fix or delete the config file, see 'mail-app-cli config path'")
 	}
 	cfg = loaded
@@ -153,6 +153,15 @@ func prepare(cmd *cobra.Command, args []string) error {
 	mail.Warn = writer.AddNotice
 	mailClient = mail.NewClient()
 	return nil
+}
+
+// isConfigRecoveryCommand reports commands that can identify the broken
+// configuration without consuming any of its values.
+func isConfigRecoveryCommand(cmd *cobra.Command) bool {
+	if isMetaCommand(cmd) {
+		return true
+	}
+	return cmd == configPathCmd
 }
 
 // isMetaCommand reports cobra's own help and completion commands, which
