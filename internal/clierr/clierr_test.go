@@ -20,6 +20,8 @@ func TestClassifyMapsTypedErrors(t *testing.T) {
 		{&mail.NotFoundError{Kind: "message", Name: "1"}, CodeNotFound},
 		{fmt.Errorf("wrapped: %w", &mail.NotFoundError{Kind: "account", Name: "x"}), CodeNotFound},
 		{errors.New("Error: Message not found"), CodeNotFound},
+		{errors.New("execution error: Message not found. (-2700)"), CodeNotFound},
+		{errors.New("execution error: Apple event connection is invalid. (-2700)"), CodeUnavailable},
 		{errors.New("jxa error: exit status 1 - execution error: Not authorized to send Apple events to Mail. (-1743)"), CodeUnavailable},
 		{errors.New("sqlite3 envelope index query failed: authorization denied"), CodeUnavailable},
 		{errors.New("something odd"), CodeInternal},

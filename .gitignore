@@ -1,5 +1,5 @@
 # Binaries
-mail-app-cli
+/mail-app-cli
 *.exe
 *.exe~
 *.dll

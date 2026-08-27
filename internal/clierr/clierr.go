@@ -139,6 +139,15 @@ func Classify(err error) *Error {
 	text := err.Error()
 	lower := strings.ToLower(text)
 	switch {
+	// The automation bridge can attach the generic AppleScript -2700 code to
+	// an otherwise specific lookup failure. Check that signal first so it does
+	// not mask a missing message, mailbox, or other resource.
+	case mail.IsNotFound(err):
+		return Wrap(CodeNotFound, err, text)
+	// A missing executable is an environment problem even though its text
+	// contains "not found".
+	case strings.Contains(lower, "executable file not found"):
+		return Wrap(CodeUnavailable, err, text).WithHint("run 'mail-app-cli doctor' to see which Mail.app access is missing")
 	case containsAny(lower,
 		"not authorized to send apple events",
 		"-1743",
@@ -148,11 +157,8 @@ func Classify(err error) *Error {
 		"authorization denied",
 		"operation not permitted",
 		"full disk access",
-		"envelope index",
-		"executable file not found"):
+		"envelope index"):
 		return Wrap(CodeUnavailable, err, text).WithHint("run 'mail-app-cli doctor' to see which Mail.app access is missing")
-	case mail.IsNotFound(err):
-		return Wrap(CodeNotFound, err, text)
 	}
 	return Wrap(CodeInternal, err, text)
 }
