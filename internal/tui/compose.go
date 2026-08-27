@@ -426,7 +426,7 @@ func (m model) onComposeDone(msg composeDoneMsg) (tea.Model, tea.Cmd) {
 
 func (c *composeModal) view(m *model) string {
 	var b strings.Builder
-	b.WriteString(m.styles.title.Render(composeTitles[c.mode]) + m.styles.muted.Render("  from "+c.account) + "\n\n")
+	b.WriteString(m.styles.title.Render(composeTitles[c.mode]) + m.styles.muted.Render("  from "+sanitizeLine(c.account)) + "\n\n")
 	for i, label := range composeLabels {
 		name := m.styles.muted.Render(pad(label+":", 9))
 		if i == c.focus {

@@ -363,6 +363,14 @@ func TestComposePrefillSanitizesHeaders(t *testing.T) {
 	}
 }
 
+func TestPickerSanitizesNames(t *testing.T) {
+	m := loadedModel(t)
+	p := newMailboxPicker("Move to", []string{"Bad\x1b[2Jname"}, func(*model, string) tea.Cmd { return nil })
+	if view := p.view(&m); strings.ContainsRune(view, '\x1b') && strings.Contains(view, "[2J") {
+		t.Fatalf("picker rendered a control sequence: %q", view)
+	}
+}
+
 func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)

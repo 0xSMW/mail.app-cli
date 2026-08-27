@@ -127,10 +127,12 @@ func (p *mailboxPicker) view(m *model) string {
 	b.WriteString(m.styles.title.Render(p.title) + "\n" + p.input.View() + "\n\n")
 	start := max(p.cursor-pickerRows+1, 0)
 	for i := start; i < len(p.visible) && i < start+pickerRows; i++ {
+		// Mailbox and account names come from Mail.app and the server.
+		name := truncate(sanitizeLine(p.visible[i]), 40)
 		if i == p.cursor {
-			b.WriteString(m.styles.title.Render("▸ "+truncate(p.visible[i], 40)) + "\n")
+			b.WriteString(m.styles.title.Render("▸ "+name) + "\n")
 		} else {
-			b.WriteString("  " + truncate(p.visible[i], 40) + "\n")
+			b.WriteString("  " + name + "\n")
 		}
 	}
 	if len(p.visible) == 0 {
@@ -178,7 +180,7 @@ func (sm *searchModal) view(m *model) string {
 	sm.input.SetWidth(max(min(m.width-10, 70), 20))
 	scope := "all accounts"
 	if entry := m.sidebar.current(); entry.kind != entryUnified {
-		scope = entry.account
+		scope = sanitizeLine(entry.account)
 	}
 	return m.styles.frame.Render(m.styles.title.Render("Search "+scope) + "\n" + sm.input.View())
 }
