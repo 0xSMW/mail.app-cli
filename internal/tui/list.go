@@ -37,14 +37,17 @@ func (l *list) title() string {
 	return l.source.label() + "  (" + plural(len(l.messages), noun) + ")"
 }
 
-func (l *list) setMessages(messages []mail.Message, keepCursor bool, source listSource) {
+// setMessages replaces the list with a fresh page fetched with limit. When
+// keepCursor is set the cursor follows the message it was on.
+func (l *list) setMessages(messages []mail.Message, keepCursor bool, source listSource, limit int) {
 	currentID := ""
 	if current := l.current(); current != nil {
 		currentID = current.ID
 	}
 	l.messages = messages
 	l.source = source
-	l.hasMore = source.search == "" && len(messages) >= l.pageSize()
+	l.hasMore = source.search == "" && limit > 0 && len(messages) >= limit
+	l.pruneSelection()
 	l.cursor = 0
 	if keepCursor {
 		for i, m := range messages {
@@ -133,6 +136,23 @@ func (l *list) targets() []mail.Message {
 	return nil
 }
 
+// pruneSelection drops selected keys that are no longer on the list, so a
+// selection cannot silently point at nothing.
+func (l *list) pruneSelection() {
+	if len(l.selected) == 0 {
+		return
+	}
+	present := make(map[string]bool, len(l.messages))
+	for _, m := range l.messages {
+		present[bodyKey(m)] = true
+	}
+	for key := range l.selected {
+		if !present[key] {
+			delete(l.selected, key)
+		}
+	}
+}
+
 func (l *list) clearSelection() {
 	l.selected = map[string]bool{}
 }
@@ -171,16 +191,11 @@ func (l *list) update(keys map[string]bool, apply func(*mail.Message)) {
 	}
 }
 
-func (l *list) enterSearch(query string, messages []mail.Message) {
-	l.setMessages(messages, false, listSource{search: query})
-	l.clearSelection()
-}
-
 func (l *list) leaveSearch() {
 	if l.source.search == "" {
 		return
 	}
-	l.setMessages(nil, false, listSource{})
+	l.setMessages(nil, false, listSource{}, 0)
 	l.clearSelection()
 }
 

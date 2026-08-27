@@ -210,7 +210,7 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 	keepCursor := msg.silent && m.list.source.search == msg.query
-	m.list.setMessages(msg.result.Messages, keepCursor, listSource{search: msg.query})
+	m.list.setMessages(msg.result.Messages, keepCursor, listSource{search: msg.query}, 0)
 	if !keepCursor {
 		m.list.clearSelection()
 	}

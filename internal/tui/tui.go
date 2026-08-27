@@ -507,6 +507,7 @@ type messagesLoadedMsg struct {
 	messages []mail.Message
 	silent   bool
 	source   listSource
+	limit    int
 }
 
 // pageLoadedMsg carries an older page of the current mailbox.
@@ -535,9 +536,14 @@ func (m *model) reloadList(silent bool) tea.Cmd {
 	id, ctx := m.listLane.begin(m.ctx, silent)
 	client := m.client.WithContext(ctx)
 	limit := m.list.pageSize()
+	if silent {
+		// A reconciliation keeps the depth the user has paged to, so the
+		// row being read stays on screen.
+		limit = max(limit, len(m.list.messages))
+	}
 	return func() tea.Msg {
 		messages, err := listPage(client, source, limit, 0)
-		return messagesLoadedMsg{requestResult: requestResult{id, err}, messages: messages, silent: silent, source: source}
+		return messagesLoadedMsg{requestResult: requestResult{id, err}, messages: messages, silent: silent, source: source, limit: limit}
 	}
 }
 
@@ -597,7 +603,7 @@ func (m model) onMessagesLoaded(msg messagesLoadedMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, cmd
 	}
-	m.list.setMessages(msg.messages, msg.silent, msg.source)
+	m.list.setMessages(msg.messages, msg.silent, msg.source, msg.limit)
 	if !strings.HasPrefix(m.notice, "slow mode") {
 		m.notice = ""
 	}

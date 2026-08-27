@@ -46,7 +46,7 @@ func loadedModel(t *testing.T) model {
 		{ID: "2", Account: "Work", Mailbox: "INBOX", Subject: "Second", Sender: "B <b@example.test>", Read: true},
 		{ID: "3", Account: "Work", Mailbox: "INBOX", Subject: "Third", Sender: "C <c@example.test>", Read: true},
 	}
-	next, _ = m.Update(messagesLoadedMsg{requestResult: requestResult{requestID: m.listLane.id}, messages: messages, source: m.sidebar.current().source()})
+	next, _ = m.Update(messagesLoadedMsg{requestResult: requestResult{requestID: m.listLane.id}, messages: messages, source: m.sidebar.current().source(), limit: m.list.pageSize()})
 	return next.(model)
 }
 
