@@ -127,8 +127,10 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 }
 
 func (c *composeModal) prefill(original *mail.Message, ownAddresses []string) {
-	senderAddress := senderAddressOf(original.Sender)
-	subject := strings.TrimSpace(original.Subject)
+	// Everything from the message is untrusted: strip control and escape
+	// characters before it reaches a text widget.
+	senderAddress := sanitizeLine(senderAddressOf(original.Sender))
+	subject := sanitizeLine(original.Subject)
 	switch c.mode {
 	case composeReply, composeReplyAll:
 		to := []string{senderAddress}
@@ -170,7 +172,7 @@ func containsFold(values []string, target string) bool {
 }
 
 // others drops skipped or duplicate entries, comparing case-insensitively
-// but keeping each address as written.
+// but keeping each address as written (minus control characters).
 func others(addresses []string, skip ...string) []string {
 	seen := make(map[string]bool, len(addresses)+len(skip))
 	for _, addr := range skip {
@@ -180,7 +182,7 @@ func others(addresses []string, skip ...string) []string {
 	}
 	var out []string
 	for _, addr := range addresses {
-		a := strings.TrimSpace(addr)
+		a := sanitizeLine(addr)
 		key := strings.ToLower(a)
 		if a != "" && !seen[key] {
 			out = append(out, a)
@@ -192,7 +194,7 @@ func others(addresses []string, skip ...string) []string {
 
 func quote(original *mail.Message) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "On %s, %s wrote:\n", formatLongDate(original.DateReceived), strings.TrimSpace(original.Sender))
+	fmt.Fprintf(&b, "On %s, %s wrote:\n", formatLongDate(original.DateReceived), sanitizeLine(original.Sender))
 	for _, line := range strings.Split(sanitizeBody(original.Content), "\n") {
 		b.WriteString("> " + line + "\n")
 	}
@@ -343,7 +345,8 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 	}
 	to, cc, bcc := lists[fieldTo], lists[fieldCc], lists[fieldBcc]
 	subject := strings.TrimSpace(c.inputs[fieldSubject].Value())
-	body := strings.TrimSpace(c.body.Value())
+	// The body is sent as written; only trailing blank lines are dropped.
+	body := strings.TrimRight(c.body.Value(), "\n")
 	switch {
 	case len(to) == 0:
 		return c.fail(fieldTo, "at least one To address is needed")

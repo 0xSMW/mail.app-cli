@@ -274,6 +274,21 @@ func TestParseAddressListRejectsMalformedParts(t *testing.T) {
 	}
 }
 
+func TestComposePrefillSanitizesHeaders(t *testing.T) {
+	original := &mail.Message{
+		Sender:       "Evil\x1b[31m <evil@example.test>",
+		Subject:      "Sub\x1b]0;pwned\x07ject",
+		ToRecipients: []string{"a\x1b[2Jb@example.test"},
+		Content:      "hi",
+	}
+	c := newComposeModal(composeReplyAll, "Work", original, []string{"me@example.test"})
+	for _, value := range []string{c.inputs[fieldTo].Value(), c.inputs[fieldSubject].Value(), c.body.Value()} {
+		if strings.ContainsRune(value, '\x1b') || strings.ContainsRune(value, '\x07') {
+			t.Fatalf("compose widget received control characters: %q", value)
+		}
+	}
+}
+
 func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)
