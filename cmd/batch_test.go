@@ -1,11 +1,16 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/0xSMW/mail.app-cli/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/internal/output"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 )
 
@@ -69,6 +74,80 @@ func TestVerifyBatchMutationAcceptsActualMessageAbsence(t *testing.T) {
 				t.Fatalf("verifyBatchMutation() status = %q, want absent-from-source", status)
 			}
 		})
+	}
+}
+
+func TestWriteReceiptPreservesSuccessfulMutationReceiptWhenReportFileFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages batch archive", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousWriter := writer
+	writer = w
+	t.Cleanup(func() { writer = previousWriter })
+
+	result, err := runMessageBatch(mail.NewClient(), batchOptions{Action: "archive"}, []batchItem{{
+		ID: "42", Account: "Work", SourceMailbox: "INBOX",
+	}}, func(*mail.Client, *batchItem) error { return nil })
+	if err != nil {
+		t.Fatalf("runMessageBatch() error = %v", err)
+	}
+	reportFile := filepath.Join(t.TempDir(), "missing", "receipt.json")
+	err = writeReceipt(result, batchOptions{Action: "archive"}, nil, nil, reportFile)
+	var failure *clierr.Error
+	if !errors.As(err, &failure) || failure.Code != clierr.CodeInternal || !failure.Reported {
+		t.Fatalf("writeReceipt() error = %#v, want reported report-file failure", err)
+	}
+	if got := clierr.ExitCode(failure.Code); got != 7 {
+		t.Fatalf("report-file failure exit code = %d, want 7", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no second error envelope", stderr.String())
+	}
+
+	var envelope output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("stdout is not a receipt envelope: %v\n%s", err, stdout.String())
+	}
+	if !envelope.OK || envelope.Code != "" || envelope.ExitCode != 0 {
+		t.Fatalf("envelope outcome = %+v, want successful mutation receipt", envelope)
+	}
+	if !strings.Contains(strings.Join(envelope.Notices, "\n"), "write batch report") || !strings.Contains(strings.Join(envelope.Notices, "\n"), reportFile) {
+		t.Fatalf("notices = %q, want report-file failure for %q", envelope.Notices, reportFile)
+	}
+
+	data, ok := envelope.Data.(map[string]any)
+	if !ok || data["succeeded"] != float64(1) {
+		t.Fatalf("receipt data = %#v, want successful mutation", envelope.Data)
+	}
+}
+
+func TestWriteReceiptKeepsMutationFailureAuthoritativeWhenReportFileFails(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages batch archive", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousWriter := writer
+	writer = w
+	t.Cleanup(func() { writer = previousWriter })
+
+	mutationErr := clierr.New(clierr.CodeMutationFailed, "archive failed for 1 of 1 message(s)")
+	err = writeReceipt(batchResult{Action: "archive", Matched: 1, Attempted: 1, Failed: 1, Items: []batchItem{{ID: "42", Status: "failed"}}}, batchOptions{Action: "archive"}, nil, mutationErr, filepath.Join(t.TempDir(), "missing", "receipt.json"))
+	var failure *clierr.Error
+	if !errors.As(err, &failure) || failure.Code != clierr.CodeMutationFailed || !failure.Reported {
+		t.Fatalf("writeReceipt() error = %#v, want reported mutation failure", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want no second error envelope", stderr.String())
+	}
+	var envelope output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("stdout is not a receipt envelope: %v\n%s", err, stdout.String())
+	}
+	if envelope.OK || envelope.Code != string(clierr.CodeMutationFailed) || !strings.Contains(strings.Join(envelope.Notices, "\n"), "write batch report") {
+		t.Fatalf("envelope = %+v, want mutation failure with report notice", envelope)
 	}
 }
 

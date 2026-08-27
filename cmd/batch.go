@@ -402,23 +402,42 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 // writeReceipt emits the receipt in the current format and returns the
 // mutation error, if any, so the process exits non-zero after reporting.
 func writeReceipt(result batchResult, opts batchOptions, notices []string, mutationErr error, reportFile string) error {
+	var reportErr error
 	if reportFile != "" {
 		data, err := json.MarshalIndent(result, "", "  ")
 		if err != nil {
-			return fmt.Errorf("encode batch report: %w", err)
-		}
-		if err := os.WriteFile(reportFile, append(data, '\n'), 0o644); err != nil {
-			return err
+			reportErr = fmt.Errorf("encode batch report: %w", err)
+		} else if err := os.WriteFile(reportFile, append(data, '\n'), 0o644); err != nil {
+			reportErr = fmt.Errorf("write batch report %q: %w", reportFile, err)
 		}
 	}
-	return writer.Write(output.Result{
+	if reportErr != nil {
+		// The report is supplemental: mutations have already happened, so their
+		// receipt must remain the sole stdout result. Keep this failure as a
+		// notice rather than turning a successful receipt into a mutation error.
+		notices = append(notices, reportErr.Error())
+	}
+	if err := writer.Write(output.Result{
 		Data:    result,
 		Summary: receiptSummary(result, opts),
 		Notices: notices,
 		Meta:    map[string]any{"action": result.Action, "dryRun": result.DryRun},
 		Plain:   renderReceipt(result, opts),
 		Err:     clierr.Classify(mutationErr),
-	})
+	}); err != nil {
+		// A reported mutation failure is authoritative even when the optional
+		// report could not be written.
+		return err
+	}
+	if reportErr != nil {
+		// The receipt above already describes the completed mutation. Return a
+		// reported supplemental failure to retain a non-zero status without
+		// emitting a second or conflicting error envelope.
+		failure := clierr.Wrap(clierr.CodeInternal, reportErr, reportErr.Error())
+		failure.Reported = true
+		return failure
+	}
+	return nil
 }
 
 // itemsFromRefs turns located messages into receipt items. Archive acts
