@@ -1,8 +1,6 @@
 # mail-app-cli
 
-<img width="790" height="720" alt="image" src="https://github.com/user-attachments/assets/f3dafbbd-c604-41a8-974a-f7f7e386ef05" />
-
-A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it prints a JSON envelope. Agents get the same commands, an exit-code table, and an embedded skill.
+A command line for macOS Mail.app. On a terminal it prints tables; in a pipe it prints a JSON envelope. Agents get the same commands, an exit-code table, and an embedded skill. All names, message IDs, addresses, mailboxes, and message content in the examples are fictional.
 
 ## Features
 
@@ -35,17 +33,17 @@ Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, you
 ```bash
 mail-app-cli doctor                      # Mail.app reachable? index readable?
 mail-app-cli accounts list
-mail-app-cli config set account "Work"   # optional; with one account it is picked for you
+mail-app-cli config set account "Example Account"   # optional; with one account it is picked for you
 mail-app-cli inbox                       # newest 25 across enabled accounts
 mail-app-cli unread
-mail-app-cli show 252534                 # body included; mailbox found for you
-mail-app-cli seen 252534 252479
-mail-app-cli flag 252534
-mail-app-cli archive 252534 --dry-run
-mail-app-cli archive 252534
-mail-app-cli move 252534 --to Receipts
-mail-app-cli search "invoice stripe" --limit 20
-mail-app-cli send -t a@example.com -s "Hello" --body "Hi" --dry-run
+mail-app-cli show 100001                 # body included; mailbox found for you
+mail-app-cli seen 100001 100002
+mail-app-cli flag 100001
+mail-app-cli archive 100001 --dry-run
+mail-app-cli archive 100001
+mail-app-cli move 100001 --to "Example Receipts"
+mail-app-cli search "sample invoice" --limit 20
+mail-app-cli send -t recipient@example.test -s "Hello" --body "Hi" --dry-run
 ```
 
 Every command has `--help`. `mail-app-cli help output`, `help exit-codes`, `help environment`, and `help agents` cover the contract.
@@ -56,10 +54,10 @@ On a terminal:
 
 ```
 $ mail-app-cli inbox --limit 3
-ID      DATE              FROM                  SUBJECT                                     LOCATION
-252544  Aug 26 13:50      DigitalOcean Support  Rescheduled: Spaces Maintenance in NYC3     iCloud/INBOX
-252542  Aug 26 12:40      Apple Advertising     Your Apple Ads invoice.                     iCloud/INBOX
-252534  Aug 26 06:48  •   Experian              Your monthly account statement is here      Work/INBOX
+ID      DATE              FROM                  SUBJECT                          LOCATION
+100003  Jan 15 13:50      Example Hosting       Sample maintenance notice        Example Account/INBOX
+100002  Jan 15 12:40      Example Billing       Sample invoice                  Example Account/INBOX
+100001  Jan 15 06:48  •   Example Reports       Your sample report is ready      Example Account/INBOX
 ```
 
 `•` is unread, `⚑` is flagged.
@@ -71,8 +69,8 @@ Piped, or with `--json`:
   "ok": true,
   "schemaVersion": 1,
   "data": [
-    {"id": "252544", "subject": "Rescheduled: ...", "sender": "DigitalOcean Support <support@digitalocean.com>",
-     "dateReceived": "2026-08-26T06:50:19Z", "read": true, "flagged": false, "mailbox": "INBOX", "account": "iCloud", ...}
+    {"id": "100003", "subject": "Sample maintenance notice", "sender": "Example Hosting <updates@example.test>",
+     "dateReceived": "2026-01-15T06:50:19Z", "read": true, "flagged": false, "mailbox": "INBOX", "account": "Example Account", ...}
   ],
   "summary": "3 messages in inbox",
   "meta": {"command": "inbox", "count": 3, "durationMs": 131, "view": "inbox"}
@@ -90,7 +88,7 @@ Errors go to stderr with a code and a hint:
 | `--json` | envelope even on a terminal |
 | `--plain` | table even in a pipe |
 | `--quiet`, `-q` | bare `data`, no envelope |
-| `--ids-only` | one ID per line from lists whose items carry an `id` (messages, accounts, attachments) |
+| `--ids-only` | one ID per line from inbox/unread, search, account, message, draft, thread, smart-query, or recent-search lists; attachments do not support it |
 | `--count` | just the number of items |
 | `--jq EXPR` | run a jq expression over the envelope (over `data` with `--quiet`); strings print raw |
 | `--no-color` | no ANSI; `NO_COLOR=1` does the same |
@@ -104,7 +102,7 @@ mail-app-cli inbox --jq '.data[] | select(.read == false) | .id'
 mail-app-cli mailboxes list --jq '[.data[].unreadCount] | add'
 mail-app-cli mailboxes list --jq '.data[] | select(.unreadCount > 0) | "\(.account)/\(.name): \(.unreadCount)"'
 mail-app-cli search "important" --jq '.data[] | [.account, .mailbox, .subject, .sender] | @csv'
-mail-app-cli attachments list 252542 --jq '.data[] | select(.fileSize > 1048576) | .name'
+mail-app-cli attachments list 100002 --jq '.data[] | select(.fileSize > 1048576) | .name'
 ```
 
 Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
@@ -129,13 +127,13 @@ Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
 The mailbox default applies to the commands that read one mailbox: `messages list`, `messages batch` selectors, `threads`, `export`, `import`, and `rules apply`. The unified inbox views (`inbox`, `unread`, `messages inbox`, and `messages unread`) respect the resolved scope: an account from `--account`, `MAIL_APP_CLI_ACCOUNT`, or config limits the view to that account's INBOX; a mailbox from `--mailbox`, `MAIL_APP_CLI_MAILBOX`, or config limits it to that mailbox. A mailbox scope needs an account, so the CLI uses the only enabled account when there is one or asks you to choose when there are several. With no configured account or mailbox, these views merge INBOX across enabled accounts. `search` and `sync` only narrow to a mailbox when `-m` is on the command line, and ID-driven verbs never use the default to guess where a message is.
 
 ```bash
-mail-app-cli config set account "Work"
+mail-app-cli config set account "Example Account"
 mail-app-cli config show
 ```
 
 ```
 KEY      VALUE   SOURCE
-account  Work    config
+account  Example Account  config
 mailbox  INBOX   default
 output   auto    default
 ```
@@ -149,16 +147,16 @@ After archive, delete, or move, Mail.app gives the message a new ID in the desti
 Every message mutation (`seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, the `messages *` spellings, `messages batch`, and `threads archive`) returns the same receipt and accepts `--dry-run` and `--verify`. Other mutations (`send`, `drafts *`, `rules *`) accept `--dry-run` and return their own shape.
 
 ```bash
-$ mail-app-cli archive 252534 252479 --dry-run
+$ mail-app-cli archive 100001 100002 --dry-run
 Dry run: would have archived 2 messages
 ID      STATUS   LOCATION      DETAIL
-252534  dry-run  Work/INBOX    Your monthly account statement is here
-252479  dry-run  Work/INBOX    [clearance-auth/clearance] Run failed: E2E
+100001  dry-run  Example Account/INBOX    Your sample report is ready
+100002  dry-run  Example Account/INBOX    Sample invoice
 ```
 
 ```json
 {"action": "archive", "dryRun": false, "matched": 2, "attempted": 2, "succeeded": 2, "failed": 0,
- "items": [{"id": "252534", "account": "Work", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
+ "items": [{"id": "100001", "account": "Example Account", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
 ```
 
 `--verify` re-reads each message afterwards and records `verifyStatus`. A receipt with failures is still written, with `ok: false`, `code: "mutation_failed"`, and `exitCode: 6` in the same envelope, and the process exits 6. `ok` means "this command did what you asked", so check it, or check the exit code, before trusting a receipt.
@@ -166,18 +164,18 @@ ID      STATUS   LOCATION      DETAIL
 Bulk selection by query, sender, or domain lives under `messages batch` and needs `--yes` for archive, delete, and move unless `--dry-run` is set:
 
 ```bash
-mail-app-cli messages batch archive -a "Work" -m INBOX --sender-domain linkedin.com --limit 500 --dry-run
-mail-app-cli messages batch archive -a "Work" -m INBOX --sender-domain linkedin.com --limit 500 --yes --chunk-size 50 --progress --verify --report-file cleanup.json
-mail-app-cli search "old alert" --ids-only | xargs mail-app-cli delete --dry-run
-mail-app-cli messages batch mark --read=false 123 456
+mail-app-cli messages batch archive -a "Example Account" -m INBOX --sender-domain updates.example.test --limit 500 --dry-run
+mail-app-cli messages batch archive -a "Example Account" -m INBOX --sender-domain updates.example.test --limit 500 --yes --chunk-size 50 --progress --verify --report-file cleanup.json
+mail-app-cli search "sample alert" --ids-only | xargs mail-app-cli delete --dry-run
+mail-app-cli messages batch mark --read=false 100003 100004
 ```
 
 ## Sending and drafts
 
 ```bash
-mail-app-cli send -a "Work" -t user@example.com -s "Hello" --body "Message" --attach ~/file.pdf --signature "Work"
-mail-app-cli send -t user@example.com -s "Hello" --body-file body.md --dry-run
-mail-app-cli drafts create -a "Work" --to user@example.com --subject "Review" --body-file body.md
+mail-app-cli send -a "Example Account" -t recipient@example.test -s "Hello" --body "Message" --attach ~/sample.pdf --signature "Example Account"
+mail-app-cli send -t recipient@example.test -s "Hello" --body-file body.md --dry-run
+mail-app-cli drafts create -a "Example Account" --to recipient@example.test --subject "Review" --body-file body.md
 mail-app-cli drafts list
 mail-app-cli drafts update <draft-id> --subject "Updated"
 mail-app-cli drafts send <draft-id>
@@ -187,9 +185,9 @@ mail-app-cli drafts delete <draft-id> --dry-run
 ## Search
 
 ```bash
-mail-app-cli search "project update"
-mail-app-cli search "invoice" -a "Work" --since 2026-08-01 --sender-domain stripe.com
-mail-app-cli search "invoice" -a "Work" -m "All Mail"
+mail-app-cli search "sample project update"
+mail-app-cli search "sample invoice" -a "Example Account" --since 2026-01-01 --sender-domain billing.example.test
+mail-app-cli search "sample invoice" -a "Example Account" -m "All Mail"
 ```
 
 Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` (an object, so `--ids-only` and `--count` do not apply). If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
@@ -197,20 +195,20 @@ Every term must match the subject, sender, or Mail's indexed summary. Without `-
 ## Other commands
 
 ```bash
-mail-app-cli messages list -a "Work" -m INBOX --unread --since 2026-08-01 --limit 10
+mail-app-cli messages list -a "Example Account" -m INBOX --unread --since 2026-01-01 --limit 10
 mail-app-cli messages sent|drafts|flagged|trash|junk
-mail-app-cli attachments list 252542
-mail-app-cli attachments save 252542 "S513759903.pdf" -o ~/Downloads/invoice.pdf
-mail-app-cli export messages -a "Work" -m INBOX --output inbox.json
-mail-app-cli export attachments -a "Work" -m INBOX --output ./attachments
-mail-app-cli import messages -a "Work" -m Archive --file inbox.json --dry-run
-mail-app-cli threads list -a "Work" -m INBOX
+mail-app-cli attachments list 100002
+mail-app-cli attachments save 100002 "sample-invoice.pdf" -o ~/Downloads/sample-invoice.pdf
+mail-app-cli export messages -a "Example Account" -m INBOX --output inbox.json
+mail-app-cli export attachments -a "Example Account" -m INBOX --output ./attachments
+mail-app-cli import messages -a "Example Account" -m Archive --file inbox.json --dry-run
+mail-app-cli threads list -a "Example Account" -m INBOX
 mail-app-cli rules list
-mail-app-cli rules create "Receipts" -a "Work" --from-domain stripe.com --move-to Receipts --dry-run
+mail-app-cli rules create "Example Receipts" -a "Example Account" --from-domain billing.example.test --move-to "Example Receipts" --dry-run
 mail-app-cli smart list
-mail-app-cli signatures show "Work"
+mail-app-cli signatures show "Example Account"
 mail-app-cli messages vip
-mail-app-cli recent search "project update"
+mail-app-cli recent search "sample project update"
 mail-app-cli sync --wait
 ```
 

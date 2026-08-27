@@ -42,7 +42,12 @@ func requireAccount() (string, error) {
 	if name := strings.TrimSpace(resolved.Account.Value); name != "" {
 		return name, nil
 	}
-	accounts, err := accountsCached(false, false)
+	// Account auto-selection must reflect Mail.app right now. The disk cache is
+	// intentionally long-lived for account listings, so it can otherwise leave
+	// a command silently scoped to an account after another account is added or
+	// enabled. A new client also bypasses any in-process cache primed from that
+	// disk entry.
+	accounts, err := mail.NewClient().GetAccountsJSON()
 	if err != nil {
 		return "", err
 	}

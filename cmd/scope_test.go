@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/0xSMW/mail.app-cli/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/internal/config"
+	"github.com/0xSMW/mail.app-cli/pkg/cache"
 	"github.com/0xSMW/mail.app-cli/pkg/mail"
 )
 
@@ -48,5 +51,46 @@ func TestResolveLocatedMessagesFallsBackOnlyWhenIndexUnavailable(t *testing.T) {
 	}
 	if len(notices) != 1 || !strings.Contains(notices[0], "Envelope Index unavailable") {
 		t.Fatalf("fallback notices = %v, want unavailable notice", notices)
+	}
+}
+
+func TestRequireAccountUsesLiveInventoryInsteadOfCachedAccounts(t *testing.T) {
+	previousResolved, previousClient := resolved, mailClient
+	t.Cleanup(func() {
+		resolved = previousResolved
+		mailClient = previousClient
+	})
+
+	homeDir := t.TempDir()
+	binDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(`#!/bin/sh
+printf '%s' '[{"id":"personal","name":"Personal","enabled":true},{"id":"work","name":"Work","enabled":true}]'
+`), 0o755); err != nil {
+		t.Fatalf("write fake osascript: %v", err)
+	}
+
+	c, err := cache.New()
+	if err != nil {
+		t.Fatalf("create cache: %v", err)
+	}
+	stale := []mail.Account{{ID: "personal", Name: "Personal", Enabled: true}}
+	if err := c.Set("accounts", stale); err != nil {
+		t.Fatalf("seed accounts cache: %v", err)
+	}
+
+	mailClient = mail.NewClient()
+	if _, err := accountsCached(false, false); err != nil {
+		t.Fatalf("read stale accounts cache: %v", err)
+	}
+	resolved = config.Resolved{}
+
+	account, err := requireAccount()
+	if account != "" {
+		t.Fatalf("account = %q, want no implicit selection", account)
+	}
+	if err == nil || !strings.Contains(err.Error(), `"Personal", "Work"`) {
+		t.Fatalf("requireAccount error = %v, want live account choice", err)
 	}
 }
