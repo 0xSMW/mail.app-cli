@@ -90,7 +90,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		// prepare never ran (parse error, bad config). Honor an explicit JSON
 		// request in the raw args so agents still get a parseable error.
 		format := output.FormatJSON
-		if output.IsTerminal(os.Stdout) && !wantsJSONArgs(args) {
+		if output.IsTerminal(stdout) && !wantsJSONArgs(args) {
 			format = output.FormatPlain
 		}
 		w, _ = output.New(format, stdout, stderr, false, "", "", mail.SchemaVersion)
@@ -163,7 +163,7 @@ func prepare(cmd *cobra.Command, args []string) error {
 	}
 	resolved = config.Resolve(flags, cfg, os.Getenv)
 
-	tty := output.IsTerminal(os.Stdout)
+	tty := output.IsTerminal(cmd.OutOrStdout())
 	format, err := output.Resolve(outFlags, resolved.Output.Value, tty)
 	if err != nil {
 		return err

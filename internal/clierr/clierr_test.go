@@ -20,7 +20,12 @@ func TestClassifyMapsTypedErrors(t *testing.T) {
 		{&mail.NotFoundError{Kind: "message", Name: "1"}, CodeNotFound},
 		{fmt.Errorf("wrapped: %w", &mail.NotFoundError{Kind: "account", Name: "x"}), CodeNotFound},
 		{errors.New("Error: Message not found"), CodeNotFound},
+		// A resource-specific "not found" keeps its meaning despite the
+		// otherwise generic AppleScript -2700 suffix.
 		{errors.New("execution error: Message not found. (-2700)"), CodeNotFound},
+		// A missing executable must be recognized before mail.IsNotFound's
+		// broad text fallback, including when the bridge adds -2700.
+		{errors.New("fork/exec /usr/bin/osascript: executable file not found in $PATH (-2700)"), CodeUnavailable},
 		{errors.New("execution error: Apple event connection is invalid. (-2700)"), CodeUnavailable},
 		{errors.New("jxa error: exit status 1 - execution error: Not authorized to send Apple events to Mail. (-1743)"), CodeUnavailable},
 		{errors.New("sqlite3 envelope index query failed: authorization denied"), CodeUnavailable},

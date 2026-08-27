@@ -75,8 +75,16 @@ func Resolve(f Flags, configured string, stdoutIsTTY bool) (Format, error) {
 	return FormatJSON, nil
 }
 
-// IsTerminal reports whether f is a character device.
-func IsTerminal(f *os.File) bool {
+// IsTerminal reports whether w is backed by a character device. Writers that
+// do not expose file metadata, such as buffers and pipes wrapped in an
+// arbitrary io.Writer, are treated as non-terminals.
+func IsTerminal(w io.Writer) bool {
+	f, ok := w.(interface {
+		Stat() (os.FileInfo, error)
+	})
+	if !ok {
+		return false
+	}
 	info, err := f.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
 }

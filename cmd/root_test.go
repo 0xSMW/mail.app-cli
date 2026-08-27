@@ -7,10 +7,24 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/0xSMW/mail.app-cli/internal/config"
 	"github.com/0xSMW/mail.app-cli/internal/output"
 )
+
+type terminalBuffer struct{ bytes.Buffer }
+
+func (terminalBuffer) Stat() (os.FileInfo, error) { return terminalFileInfo{}, nil }
+
+type terminalFileInfo struct{}
+
+func (terminalFileInfo) Name() string       { return "terminal" }
+func (terminalFileInfo) Size() int64        { return 0 }
+func (terminalFileInfo) Mode() os.FileMode  { return os.ModeCharDevice }
+func (terminalFileInfo) ModTime() time.Time { return time.Time{} }
+func (terminalFileInfo) IsDir() bool        { return false }
+func (terminalFileInfo) Sys() any           { return nil }
 
 func run(t *testing.T, args ...string) (int, string, string) {
 	t.Helper()
@@ -34,6 +48,64 @@ func TestUnknownCommandIsUsageError(t *testing.T) {
 	}
 	if env.OK || env.Code != "usage" || env.ExitCode != 1 {
 		t.Fatalf("envelope = %+v", env)
+	}
+}
+
+func TestRunDerivesAutomaticOutputFromSuppliedStdout(t *testing.T) {
+	t.Setenv(config.EnvConfigPath, filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv(config.EnvOutput, "")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	var terminalStdout terminalBuffer
+	var stderr bytes.Buffer
+	if code := Run([]string{"version"}, &terminalStdout, &stderr); code != 0 {
+		t.Fatalf("terminal version exit = %d: %s", code, stderr.String())
+	}
+	if !strings.HasPrefix(terminalStdout.String(), "mail-app-cli "+version) {
+		t.Fatalf("terminal stdout = %q, want plain version", terminalStdout.String())
+	}
+	if writer == nil || writer.Format != output.FormatPlain || !writer.Color {
+		t.Fatalf("terminal writer = %#v, want plain color writer", writer)
+	}
+
+	var bufferedStdout bytes.Buffer
+	stderr.Reset()
+	if code := Run([]string{"version"}, &bufferedStdout, &stderr); code != 0 {
+		t.Fatalf("buffered version exit = %d: %s", code, stderr.String())
+	}
+	var env output.Envelope
+	if err := json.Unmarshal(bufferedStdout.Bytes(), &env); err != nil || !env.OK {
+		t.Fatalf("buffered stdout = %q, unmarshal error = %v", bufferedStdout.String(), err)
+	}
+	if writer == nil || writer.Format != output.FormatJSON || writer.Color {
+		t.Fatalf("buffered writer = %#v, want JSON non-color writer", writer)
+	}
+}
+
+func TestRunParseErrorDerivesFallbackOutputFromSuppliedStdout(t *testing.T) {
+	t.Setenv(config.EnvConfigPath, filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv(config.EnvOutput, "")
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	var terminalStdout terminalBuffer
+	var terminalStderr bytes.Buffer
+	if code := Run([]string{"not-a-command"}, &terminalStdout, &terminalStderr); code != 1 {
+		t.Fatalf("terminal parse error exit = %d: %s", code, terminalStderr.String())
+	}
+	if !strings.Contains(terminalStderr.String(), "mail-app-cli:") || strings.HasPrefix(strings.TrimSpace(terminalStderr.String()), "{") {
+		t.Fatalf("terminal parse error = %q, want plain error", terminalStderr.String())
+	}
+
+	var bufferedStdout bytes.Buffer
+	var bufferedStderr bytes.Buffer
+	if code := Run([]string{"not-a-command"}, &bufferedStdout, &bufferedStderr); code != 1 {
+		t.Fatalf("buffered parse error exit = %d: %s", code, bufferedStderr.String())
+	}
+	var env output.ErrorEnvelope
+	if err := json.Unmarshal(bufferedStderr.Bytes(), &env); err != nil || env.Code != "usage" {
+		t.Fatalf("buffered parse error = %q, unmarshal error = %v", bufferedStderr.String(), err)
 	}
 }
 
