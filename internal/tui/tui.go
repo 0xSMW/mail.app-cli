@@ -96,11 +96,11 @@ type model struct {
 	// markFailed remembers messages whose automatic mark-read failed, so
 	// the reader does not retry on every refresh; an explicit u clears it.
 	markFailed map[string]bool
-	notice           string
-	err              error
-	helpHidden       bool
-	ctrlCOnce        bool
-	refreshID        uint64
+	notice     string
+	err        error
+	helpHidden bool
+	ctrlCOnce  bool
+	refreshID  uint64
 
 	toast   notifyMsg
 	toastID uint64
