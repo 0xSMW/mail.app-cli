@@ -107,6 +107,25 @@ func TestNavigationSelectionAndModals(t *testing.T) {
 	}
 }
 
+func TestAutomaticMarkReadKeepsSelection(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "j", "space", "k")
+	if len(m.list.selected) != 1 {
+		t.Fatal("space did not select a row")
+	}
+	m.reader.open = true
+	if cmd := m.markCurrentRead(); cmd == nil {
+		t.Fatal("unread message under the cursor should be marked read")
+	}
+	if len(m.list.selected) != 1 {
+		t.Fatal("automatic mark-read cleared the selection")
+	}
+	m = press(m, "e")
+	if len(m.list.selected) != 0 {
+		t.Fatal("a user action should consume the selection")
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")

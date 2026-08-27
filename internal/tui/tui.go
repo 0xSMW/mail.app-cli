@@ -643,6 +643,9 @@ func (m *model) requestBody() tea.Cmd {
 		// against this one.
 		m.bodyLane.abandon()
 		m.reader.show(cached)
+		if !cached.Read {
+			return m.markCurrentRead()
+		}
 		return nil
 	}
 	m.reader.showPlaceholder(m.list.current())

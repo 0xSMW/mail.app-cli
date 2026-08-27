@@ -71,26 +71,34 @@ func (m *model) handleActionKey(key string) tea.Cmd {
 	}
 	switch key {
 	case "e":
-		return m.mutate(targets, mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+		return m.act(targets, mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
 	case "#":
 		m.modal = newConfirmModal("Move "+plural(len(targets), "message")+" to Trash?", func(m *model) tea.Cmd {
-			return m.mutate(targets, mail.BatchOptions{Action: "delete"}, mail.DeleteMutator)
+			return m.act(targets, mail.BatchOptions{Action: "delete"}, mail.DeleteMutator)
 		})
 	case "m":
 		if !sameAccount(targets) {
 			return notifyProblem("select messages from one account to move them")
 		}
 		m.modal = newMailboxPicker("Move to", m.sidebar.mailboxesFor(targets[0].Account), func(m *model, mailbox string) tea.Cmd {
-			return m.mutate(targets, mail.BatchOptions{Action: "move", TargetMailbox: mailbox}, mail.MoveMutator(false))
+			return m.act(targets, mail.BatchOptions{Action: "move", TargetMailbox: mailbox}, mail.MoveMutator(false))
 		})
 	case "u":
 		read := !targets[0].Read
-		return m.mutate(targets, mail.BatchOptions{Action: "mark", Read: read}, mail.MarkMutator(read))
+		return m.act(targets, mail.BatchOptions{Action: "mark", Read: read}, mail.MarkMutator(read))
 	case "!":
 		flagged := !targets[0].Flagged
-		return m.mutate(targets, mail.BatchOptions{Action: "flag", Flagged: flagged}, mail.FlagMutator(flagged))
+		return m.act(targets, mail.BatchOptions{Action: "flag", Flagged: flagged}, mail.FlagMutator(flagged))
 	}
 	return nil
+}
+
+// act is a user-requested action: it consumes the selection it applied to.
+// Automatic writes (marking read on open) use mutate directly and leave the
+// selection alone.
+func (m *model) act(targets []mail.Message, opts mail.BatchOptions, mutate mail.Mutator) tea.Cmd {
+	m.list.clearSelection()
+	return m.mutate(targets, opts, mutate)
 }
 
 func (m *model) markCurrentRead() tea.Cmd {
@@ -137,7 +145,6 @@ func (m *model) mutate(targets []mail.Message, opts mail.BatchOptions, mutate ma
 		m.list.update(keys, apply)
 		m.touchCached(keys, apply)
 	}
-	m.list.clearSelection()
 
 	client := m.client.WithContext(m.writeCtx)
 	run := m.writes.push(func() tea.Msg {
