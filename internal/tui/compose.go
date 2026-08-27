@@ -127,12 +127,12 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 }
 
 func (c *composeModal) prefill(original *mail.Message, ownAddresses []string) {
-	sender := mail.ParseSender(original.Sender)
+	senderAddress := senderAddressOf(original.Sender)
 	subject := strings.TrimSpace(original.Subject)
 	switch c.mode {
 	case composeReply, composeReplyAll:
-		to := []string{sender.Email}
-		if slices.Contains(ownAddresses, sender.Email) && len(original.ToRecipients) > 0 {
+		to := []string{senderAddress}
+		if containsFold(ownAddresses, senderAddress) && len(original.ToRecipients) > 0 {
 			// Replying to a message the user sent goes back to its recipients.
 			to = others(original.ToRecipients, ownAddresses...)
 		}
@@ -156,20 +156,35 @@ func (c *composeModal) prefill(original *mail.Message, ownAddresses []string) {
 	c.body.CursorStart()
 }
 
-// others lower-cases addresses and drops skipped or duplicate entries.
+// senderAddressOf extracts the address from a From header as written,
+// keeping the local part's case.
+func senderAddressOf(header string) string {
+	if parsed, err := netmail.ParseAddress(strings.TrimSpace(header)); err == nil {
+		return parsed.Address
+	}
+	return mail.ParseSender(header).Email
+}
+
+func containsFold(values []string, target string) bool {
+	return slices.ContainsFunc(values, func(v string) bool { return strings.EqualFold(strings.TrimSpace(v), target) })
+}
+
+// others drops skipped or duplicate entries, comparing case-insensitively
+// but keeping each address as written.
 func others(addresses []string, skip ...string) []string {
 	seen := make(map[string]bool, len(addresses)+len(skip))
 	for _, addr := range skip {
-		if addr = strings.ToLower(strings.TrimSpace(addr)); addr != "" {
-			seen[addr] = true
+		if key := strings.ToLower(strings.TrimSpace(addr)); key != "" {
+			seen[key] = true
 		}
 	}
 	var out []string
 	for _, addr := range addresses {
-		a := strings.ToLower(strings.TrimSpace(addr))
-		if a != "" && !seen[a] {
+		a := strings.TrimSpace(addr)
+		key := strings.ToLower(a)
+		if a != "" && !seen[key] {
 			out = append(out, a)
-			seen[a] = true
+			seen[key] = true
 		}
 	}
 	return out
@@ -255,14 +270,14 @@ func parseAddressList(value string) []string {
 	if parsed, err := netmail.ParseAddressList(value); err == nil {
 		out := make([]string, 0, len(parsed))
 		for _, addr := range parsed {
-			out = append(out, strings.ToLower(addr.Address))
+			out = append(out, addr.Address)
 		}
 		return out
 	}
 	var out []string
 	for _, part := range splitOutsideQuotes(value, ',') {
 		if part = strings.TrimSpace(part); part != "" {
-			if email := mail.ParseSender(part).Email; email != "" {
+			if email := senderAddressOf(part); email != "" {
 				out = append(out, email)
 			}
 		}

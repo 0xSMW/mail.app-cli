@@ -179,8 +179,8 @@ func TestParseAddressListKeepsNamesTogether(t *testing.T) {
 		t.Fatalf("parseAddressList = %v", got)
 	}
 	got = parseAddressList(`"Doe, Jane" <Jane@Example.test>, bob@example.test`)
-	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
-		t.Fatalf("quoted name = %v", got)
+	if strings.Join(got, ",") != "Jane@Example.test,bob@example.test" {
+		t.Fatalf("quoted name = %v (case must be preserved)", got)
 	}
 	got = parseAddressList(`"Doe; Jane" <jane@example.test>; bob@example.test`)
 	if strings.Join(got, ",") != "jane@example.test,bob@example.test" {
@@ -224,7 +224,8 @@ func TestAccountAddressesIncludesAliases(t *testing.T) {
 		EmailAddress:   "Primary@Example.test",
 		EmailAddresses: []string{"primary@example.test", "Alias@Example.test"},
 	}}}
-	if got := strings.Join(s.accountAddresses("Work"), ","); got != "primary@example.test,alias@example.test" {
+	// Addresses keep their case; the duplicate is dropped case-insensitively.
+	if got := strings.Join(s.accountAddresses("Work"), ","); got != "Primary@Example.test,Alias@Example.test" {
 		t.Fatalf("account addresses = %q", got)
 	}
 }
