@@ -346,6 +346,15 @@ func TestDeleteInSearchRemovesRowAndRefreshSyncsReader(t *testing.T) {
 	}
 }
 
+func TestUnreadFromListDoesNotSuppressAutoRead(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "j") // row 2 is read; the reader stays closed
+	m = press(m, "u")
+	if len(m.noAutoRead) != 0 {
+		t.Fatalf("marking unread from the list guarded a message nobody is reading: %v", m.noAutoRead)
+	}
+}
+
 func TestArchiveRemovesRowOptimistically(t *testing.T) {
 	m := loadedModel(t)
 	m = press(m, "e")

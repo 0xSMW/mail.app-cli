@@ -113,9 +113,10 @@ func (m *model) act(targets []mail.Message, opts mail.BatchOptions, mutate mail.
 			for key := range keys {
 				delete(m.noAutoRead, key)
 			}
-		} else {
-			// An explicit mark-unread must survive the reader's own marking.
-			m.suppressAutoRead(keys)
+		} else if m.reader.open && keys[m.readerKey] {
+			// An explicit mark-unread of the message on screen must survive
+			// the reader's own marking; rows not being read need no guard.
+			m.suppressAutoRead(map[string]bool{m.readerKey: true})
 		}
 	}
 	return m.mutate(targets, opts, mutate)
