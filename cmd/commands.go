@@ -80,8 +80,16 @@ func lastWord(path string) string {
 }
 
 // describeCommand builds the record for cmd and, when recurse is set, its
-// visible subcommands. Cobra's own help and completion commands are skipped.
+// subcommands. The public help and completion commands are part of the CLI
+// contract; only Cobra's hidden completion protocol commands are omitted.
 func describeCommand(cmd *cobra.Command, recurse bool) commandRecord {
+	// Cobra adds these commands and each command's --help flag lazily. Inventory
+	// output must not depend on whether another command happened to initialize
+	// them first.
+	cmd.Root().InitDefaultHelpCmd()
+	cmd.Root().InitDefaultCompletionCmd()
+	cmd.InitDefaultHelpFlag()
+
 	record := commandRecord{
 		Path:          commandPath(cmd),
 		Use:           cmd.Use,
@@ -98,17 +106,26 @@ func describeCommand(cmd *cobra.Command, recurse bool) commandRecord {
 	if !cmd.HasParent() {
 		record.GlobalFlags = describeFlags(cmd.PersistentFlags())
 		record.Flags = []flagRecord{}
+	} else {
+		// Agent help for a subcommand must describe the root persistent flags it
+		// can accept as well as its own flags. InheritedFlags excludes locals
+		// which shadow an inherited flag, keeping the two fields disjoint.
+		record.GlobalFlags = describeFlags(cmd.InheritedFlags())
 	}
 	if !recurse {
 		return record
 	}
 	for _, sub := range cmd.Commands() {
-		if sub.Hidden || sub.Name() == "help" || sub.Name() == "completion" {
+		if isCompletionProtocolCommand(sub) {
 			continue
 		}
 		record.Subcommands = append(record.Subcommands, describeCommand(sub, true))
 	}
 	return record
+}
+
+func isCompletionProtocolCommand(cmd *cobra.Command) bool {
+	return cmd.Name() == "__complete" || cmd.Name() == "__completeNoDesc"
 }
 
 func describeFlags(set *pflag.FlagSet) []flagRecord {

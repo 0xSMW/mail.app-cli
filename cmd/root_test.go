@@ -357,9 +357,14 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 		}
 	}
 	walk(env.Data)
-	for _, want := range []string{"inbox", "show", "archive", "messages list", "messages batch archive", "config set", "skill install"} {
+	for _, want := range []string{"inbox", "show", "archive", "messages list", "messages batch archive", "config set", "skill install", "help", "completion", "completion bash"} {
 		if _, ok := paths[want]; !ok {
 			t.Fatalf("command %q missing from tree", want)
+		}
+	}
+	for _, protocol := range []string{"__complete", "__completeNoDesc"} {
+		if _, ok := paths[protocol]; ok {
+			t.Fatalf("hidden completion protocol command %q present in tree", protocol)
 		}
 	}
 	if !paths["messages archive"].Compatibility || paths["messages list"].Compatibility {
@@ -388,6 +393,22 @@ func TestCommandsTreeAndAgentHelp(t *testing.T) {
 	}
 	if record.Path != "archive" || len(record.Flags) == 0 {
 		t.Fatalf("agent help record = %+v", record)
+	}
+	global := map[string]bool{}
+	for _, f := range record.GlobalFlags {
+		global[f.Name] = true
+	}
+	for _, want := range []string{"account", "mailbox", "json", "jq", "ids-only", "count"} {
+		if !global[want] {
+			t.Fatalf("archive agent help globals missing --%s: %+v", want, record.GlobalFlags)
+		}
+	}
+	local := map[string]bool{}
+	for _, f := range record.Flags {
+		local[f.Name] = true
+		if global[f.Name] {
+			t.Fatalf("archive agent help repeats --%s in flags and globalFlags", f.Name)
+		}
 	}
 }
 
