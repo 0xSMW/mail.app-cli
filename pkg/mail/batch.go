@@ -167,6 +167,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			result.Items = append(result.Items, item)
 		}
 		result.EndedAt = time.Now().Format(time.RFC3339)
+		if result.Failed > 0 {
+			return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Attempted: len(items)}
+		}
 		return result, nil
 	}
 
@@ -323,7 +326,11 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		}
 	}
 	if r.DryRun {
-		return fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), count, target)
+		summary := fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), countNoun(r.Skipped, "message"), target)
+		if r.Failed > 0 {
+			summary += fmt.Sprintf("; %d cannot be %s", r.Failed, strings.ToLower(verb))
+		}
+		return summary
 	}
 	if r.Failed == 0 && r.Skipped == 0 {
 		return fmt.Sprintf("%s %s%s", verb, count, target)

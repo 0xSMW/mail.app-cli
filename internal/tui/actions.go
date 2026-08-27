@@ -178,9 +178,10 @@ func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, notify(summary))
 	}
 	// Read and flag toggles were applied on screen already; anything that
-	// moved a message needs the index's view of where things are now.
+	// moved a message needs the index's view of where things are now. The
+	// refresh itself waits until the write queue drains.
 	if msg.opts.Action != "mark" && msg.opts.Action != "flag" || result.Failed > 0 {
-		cmds = append(cmds, m.scheduleRefresh())
+		m.refreshWanted = true
 	}
 	return m, tea.Batch(cmds...)
 }

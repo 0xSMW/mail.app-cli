@@ -80,11 +80,14 @@ type model struct {
 
 	spinning     bool
 	spinnerFrame int
-	notice       string
-	err          error
-	helpHidden   bool
-	ctrlCOnce    bool
-	refreshID    uint64
+	// refreshWanted defers the index refresh until every queued write has
+	// finished, so a reload cannot resurrect rows a pending write removes.
+	refreshWanted bool
+	notice        string
+	err           error
+	helpHidden    bool
+	ctrlCOnce     bool
+	refreshID     uint64
 
 	toast   notifyMsg
 	toastID uint64
@@ -211,7 +214,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		updated, cmd := m.Update(msg.inner)
-		return updated, tea.Batch(next, cmd)
+		m = updated.(model)
+		if next == nil && m.refreshWanted {
+			m.refreshWanted = false
+			cmd = tea.Batch(cmd, m.scheduleRefresh())
+		}
+		return m, tea.Batch(next, cmd)
 
 	case mutationDoneMsg:
 		return m.onMutationDone(msg)
