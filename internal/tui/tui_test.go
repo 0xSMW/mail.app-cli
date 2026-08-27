@@ -366,7 +366,8 @@ func TestComposePrefillSanitizesHeaders(t *testing.T) {
 func TestPickerSanitizesNames(t *testing.T) {
 	m := loadedModel(t)
 	p := newMailboxPicker("Move to", []string{"Bad\x1b[2Jname"}, func(*model, string) tea.Cmd { return nil })
-	if view := p.view(&m); strings.ContainsRune(view, '\x1b') && strings.Contains(view, "[2J") {
+	// Styling adds its own escapes; the name's clear-screen sequence must not survive.
+	if view := p.view(&m); strings.Contains(view, "\x1b[2J") {
 		t.Fatalf("picker rendered a control sequence: %q", view)
 	}
 }
