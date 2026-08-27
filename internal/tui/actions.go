@@ -227,19 +227,35 @@ func (m *model) touchCached(keys map[string]bool, apply func(*mail.Message)) {
 	}
 }
 
+// failedKeys is the cache keys of the items a run did not succeed on; with
+// no receipt items at all, every requested key.
+func failedKeys(result mail.BatchResult, requested map[string]bool) map[string]bool {
+	if len(result.Items) == 0 {
+		return requested
+	}
+	failed := map[string]bool{}
+	for _, item := range result.Items {
+		if item.Status == "failed" {
+			failed[item.Account+"\x00"+item.SourceMailbox+"\x00"+item.ID] = true
+		}
+	}
+	return failed
+}
+
 func (m model) onMutationDone(msg mutationDoneMsg) (tea.Model, tea.Cmd) {
 	result := msg.result
 	summary := result.Summary(msg.opts)
-	if result.Failed > 0 || (msg.err != nil && len(result.Items) == 0) {
-		// The optimistic change may be wrong; drop cached copies so a
-		// reopen fetches Mail.app's state, and stop the reader from
-		// re-arming a mark that Mail.app just refused.
-		m.reader.forget(msg.keys)
+	// Items that failed (or every item, when the run never produced a
+	// receipt) may be showing an optimistic state Mail.app refused: drop
+	// their cached copies so a reopen fetches the truth, and stop the
+	// reader from re-arming a mark on them.
+	if failed := failedKeys(result, msg.keys); len(failed) > 0 {
+		m.reader.forget(failed)
 		if msg.opts.Action == "mark" {
 			if m.markFailed == nil {
 				m.markFailed = map[string]bool{}
 			}
-			for key := range msg.keys {
+			for key := range failed {
 				m.markFailed[key] = true
 			}
 		}
