@@ -35,6 +35,8 @@ func (r *reader) cached(key string) (*mail.Message, bool) {
 }
 
 // remember keeps a fetched body, evicting the oldest beyond bodyCacheSize.
+// The body on screen is spared by moving it to the back of the order, so
+// it stays eligible for eviction later.
 func (r *reader) remember(key string, msg *mail.Message) {
 	if _, ok := r.cache[key]; !ok {
 		r.order = append(r.order, key)
@@ -43,9 +45,11 @@ func (r *reader) remember(key string, msg *mail.Message) {
 	for len(r.order) > bodyCacheSize {
 		oldest := r.order[0]
 		r.order = r.order[1:]
-		if r.message == nil || bodyKey(*r.message) != oldest {
-			delete(r.cache, oldest)
+		if r.message != nil && bodyKey(*r.message) == oldest {
+			r.order = append(r.order, oldest)
+			continue
 		}
+		delete(r.cache, oldest)
 	}
 }
 
