@@ -86,11 +86,11 @@ type model struct {
 	// reloadAfterMailboxes makes ctrl+r reload the list once the refreshed
 	// sidebar has settled the selection, rather than racing it.
 	reloadAfterMailboxes bool
-	notice        string
-	err           error
-	helpHidden    bool
-	ctrlCOnce     bool
-	refreshID     uint64
+	notice               string
+	err                  error
+	helpHidden           bool
+	ctrlCOnce            bool
+	refreshID            uint64
 
 	toast   notifyMsg
 	toastID uint64
