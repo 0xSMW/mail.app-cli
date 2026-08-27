@@ -109,9 +109,10 @@ func TestNavigationSelectionAndModals(t *testing.T) {
 
 func TestAutomaticMarkReadKeepsSelection(t *testing.T) {
 	m := loadedModel(t)
-	m = press(m, "j", "space", "k")
-	if len(m.list.selected) != 1 {
-		t.Fatal("space did not select a row")
+	// space selects row 2 and advances; two k presses return to unread row 1.
+	m = press(m, "j", "space", "k", "k")
+	if len(m.list.selected) != 1 || m.list.current().ID != "1" {
+		t.Fatalf("selection = %v, cursor = %v", m.list.selected, m.list.current())
 	}
 	m.reader.open = true
 	if cmd := m.markCurrentRead(); cmd == nil {
