@@ -76,7 +76,7 @@ var exportMessagesCmd = &cobra.Command{
 			},
 			Messages: messages,
 		}
-		if exportOutput != "" && exportOutput != "-" {
+		if exportMessagesWritesFile() {
 			if err := writeJSONFile(exportOutput, payload); err != nil {
 				return err
 			}
@@ -92,6 +92,10 @@ var exportMessagesCmd = &cobra.Command{
 			Plain:   renderMessages(messages, false),
 		})
 	},
+}
+
+func exportMessagesWritesFile() bool {
+	return exportOutput != "" && exportOutput != "-"
 }
 
 var exportAttachmentsCmd = &cobra.Command{

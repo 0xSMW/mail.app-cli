@@ -36,6 +36,9 @@ const (
 	// annotationMutation marks commands that can change Mail.app or local
 	// state. Their receipts must never be hidden by a post-action --jq error.
 	annotationMutation = "mutation"
+	// annotationFileOutputMutation marks commands that only change local state
+	// when their parsed output target is a file rather than stdout.
+	annotationFileOutputMutation = "fileOutputMutation"
 )
 
 var (
@@ -257,7 +260,7 @@ func prepare(cmd *cobra.Command, args []string) error {
 		return clierr.Usage("--ids-only only applies to lists whose items carry an id").
 			WithHint("use --count to count this list, or --jq to pick fields from its data")
 	}
-	if outFlags.JQ != "" && cmd.Annotations[annotationMutation] == "true" {
+	if outFlags.JQ != "" && jqWouldHideMutationReceipt(cmd) {
 		return clierr.Usage("--jq cannot be combined with a command that changes state").
 			WithHint("run the mutation without --jq so its receipt remains available")
 	}
@@ -269,6 +272,17 @@ func prepare(cmd *cobra.Command, args []string) error {
 	mail.Warn = writer.AddNotice
 	mailClient = mail.NewClient()
 	return nil
+}
+
+// jqWouldHideMutationReceipt reports whether this invocation can change state
+// before the writer evaluates --jq. Exporting messages to stdout is read-only;
+// selecting a file makes it a local mutation and therefore needs the same
+// preflight protection as other receipt-bearing commands.
+func jqWouldHideMutationReceipt(cmd *cobra.Command) bool {
+	if cmd.Annotations[annotationMutation] == "true" {
+		return true
+	}
+	return cmd.Annotations[annotationFileOutputMutation] == "true" && exportMessagesWritesFile()
 }
 
 // isConfigRecoveryCommand reports commands that can identify the broken
@@ -320,6 +334,18 @@ func markMutation(cmds ...*cobra.Command) {
 			cmd.Annotations = map[string]string{}
 		}
 		cmd.Annotations[annotationMutation] = "true"
+	}
+}
+
+// markFileOutputMutation tags commands whose output target determines whether
+// they change local state. The command's predicate is evaluated in prepare
+// after Cobra has parsed its flags.
+func markFileOutputMutation(cmds ...*cobra.Command) {
+	for _, cmd := range cmds {
+		if cmd.Annotations == nil {
+			cmd.Annotations = map[string]string{}
+		}
+		cmd.Annotations[annotationFileOutputMutation] = "true"
 	}
 }
 

@@ -465,12 +465,15 @@ func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
 func TestStateChangingCommandsRejectJQBeforeRun(t *testing.T) {
 	for _, cmd := range []*cobra.Command{
 		archiveCmd, sendCmd, attachmentsSaveCmd, configSetCmd, draftsCreateCmd,
-		exportMessagesCmd, messagesBatchArchiveCmd, recentClearCmd,
+		exportAttachmentsCmd, messagesBatchArchiveCmd, recentClearCmd,
 		skillInstallCmd, syncCmd, threadsArchiveCmd,
 	} {
 		if cmd.Annotations[annotationMutation] != "true" {
 			t.Fatalf("%s is not annotated as a mutation", cmd.CommandPath())
 		}
+	}
+	if exportMessagesCmd.Annotations[annotationFileOutputMutation] != "true" {
+		t.Fatalf("%s is not annotated as a file-output mutation", exportMessagesCmd.CommandPath())
 	}
 }
 

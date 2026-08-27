@@ -95,6 +95,37 @@ func TestExportAttachmentsIDsOnlyIsRejectedBeforeSaving(t *testing.T) {
 	}
 }
 
+func TestExportMessagesStdoutAllowsJQ(t *testing.T) {
+	binDir := t.TempDir()
+	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+	script := `#!/bin/sh
+case "$*" in
+  *"const accounts = mail.accounts()"*) printf '%s' '[{"id":"work","name":"Work","enabled":true}]' ;;
+  *) printf '%s' '[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}]' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake osascript: %v", err)
+	}
+
+	code, stdout, stderr := run(t, "export", "messages", "--account", "Work", "--jq", ".data.messages[0].id")
+	if code != 0 || stdout != "42\n" || stderr != "" {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+}
+
+func TestExportMessagesFileRejectsJQBeforeCreation(t *testing.T) {
+	outputPath := filepath.Join(t.TempDir(), "messages.json")
+	code, stdout, stderr := run(t, "export", "messages", "--output", outputPath, "--jq", "1 / 0")
+	if code != 1 || stdout != "" || !strings.Contains(stderr, "--jq cannot be combined with a command that changes state") {
+		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("output file was created before --jq was rejected: %v", err)
+	}
+}
+
 func TestExportAttachmentsPartialFailureWritesOneFailedEnvelope(t *testing.T) {
 	binDir := t.TempDir()
 	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")

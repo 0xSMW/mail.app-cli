@@ -9,7 +9,7 @@ func init() {
 		attachmentsSaveCmd,
 		configSetCmd, configUnsetCmd,
 		draftsCreateCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd,
-		exportMessagesCmd, exportAttachmentsCmd,
+		exportAttachmentsCmd,
 		messagesMarkCmd, messagesFlagCmd, messagesDeleteCmd, messagesArchiveCmd, messagesMoveCmd,
 		messagesBatchArchiveCmd, messagesBatchDeleteCmd, messagesBatchMoveCmd, messagesBatchMarkCmd, messagesBatchFlagCmd,
 		recentClearCmd,
@@ -18,4 +18,5 @@ func init() {
 		syncCmd,
 		threadsArchiveCmd,
 	)
+	markFileOutputMutation(exportMessagesCmd)
 }

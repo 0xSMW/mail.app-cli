@@ -12,30 +12,27 @@ import (
 
 var vipLimit int
 
+type vipMailboxRequest = struct {
+	AccountName string
+	MailboxName string
+	Limit       int
+	Offset      int
+	UnreadOnly  bool
+	FlaggedOnly bool
+	WithContent bool
+	Since       string
+}
+
 var messagesVIPCmd = &cobra.Command{
 	Use:   "vip",
 	Short: "List messages from VIP mailboxes when Mail.app exposes them",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		mailboxes, err := mailClient.GetMailboxesJSON("")
+		account := strings.TrimSpace(resolved.Account.Value)
+		mailboxes, err := mailClient.GetMailboxesJSON(account)
 		if err != nil {
 			return err
 		}
-		type req = struct {
-			AccountName string
-			MailboxName string
-			Limit       int
-			Offset      int
-			UnreadOnly  bool
-			FlaggedOnly bool
-			WithContent bool
-			Since       string
-		}
-		var requests []req
-		for _, mailbox := range mailboxes {
-			if strings.EqualFold(mailbox.Name, "VIP") || strings.EqualFold(mailbox.Name, "VIPs") {
-				requests = append(requests, req{AccountName: mailbox.Account, MailboxName: mailbox.Name, Limit: vipLimit})
-			}
-		}
+		requests := vipMailboxRequests(mailboxes, account, vipLimit)
 		if len(requests) == 0 {
 			return clierr.New(clierr.CodeNotFound, "no VIP mailbox exposed by Mail.app")
 		}
@@ -50,6 +47,28 @@ var messagesVIPCmd = &cobra.Command{
 			Plain:   renderMessages(messages, true),
 		})
 	},
+}
+
+// vipMailboxRequests keeps the unscoped view across all accounts while
+// defending an explicitly scoped request from a mailbox response that includes
+// another account.
+func vipMailboxRequests(mailboxes []mail.Mailbox, account string, limit int) []vipMailboxRequest {
+	account = strings.TrimSpace(account)
+	var requests []vipMailboxRequest
+	for _, mailbox := range mailboxes {
+		if !strings.EqualFold(mailbox.Name, "VIP") && !strings.EqualFold(mailbox.Name, "VIPs") {
+			continue
+		}
+		if account != "" && !strings.EqualFold(mailbox.Account, account) {
+			continue
+		}
+		requestAccount := mailbox.Account
+		if account != "" {
+			requestAccount = account
+		}
+		requests = append(requests, vipMailboxRequest{AccountName: requestAccount, MailboxName: mailbox.Name, Limit: limit})
+	}
+	return requests
 }
 
 func sortAndSliceMessages(messages []mail.Message, offset, limit int) []mail.Message {

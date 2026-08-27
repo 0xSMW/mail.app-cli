@@ -90,7 +90,7 @@ Errors go to stderr with a code and a hint:
 | `--quiet`, `-q` | bare `data`, no envelope |
 | `--ids-only` | one ID per line from inbox/unread, search, account, message, draft, thread, smart-query, or recent-search lists; attachments do not support it |
 | `--count` | just the number of items |
-| `--jq EXPR` | on read commands, run a jq expression over the envelope (over `data` with `--quiet`); strings print raw |
+| `--jq EXPR` | on read commands and `export messages` to stdout, run a jq expression over the envelope (over `data` with `--quiet`); strings print raw. Commands that change state, including file exports, reject it. |
 | `--no-color` | no ANSI; `NO_COLOR=1` does the same |
 
 Set a default with `config set output json` or `MAIL_APP_CLI_OUTPUT=json`.
