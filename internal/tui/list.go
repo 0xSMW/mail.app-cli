@@ -243,9 +243,7 @@ func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	if m.reader.open {
 		cmds = append(cmds, m.requestBody())
 	}
-	if l.nearEnd() {
-		cmds = append(cmds, m.loadMore())
-	}
+	cmds = append(cmds, m.loadMore())
 	return tea.Batch(cmds...)
 }
 

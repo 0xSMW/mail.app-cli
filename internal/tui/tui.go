@@ -96,6 +96,8 @@ type model struct {
 	// initCmd is the first load, begun in newModel so the request lane's
 	// bookkeeping lands on the model Bubble Tea keeps rather than a copy.
 	initCmd tea.Cmd
+	// fatal is why the program quit on its own; Run returns it.
+	fatal error
 }
 
 func newModel(client *mail.Client, opts Options) model {
@@ -122,10 +124,16 @@ func Run(client *mail.Client, opts Options) error {
 	m := newModel(client, opts)
 	p := tea.NewProgram(m)
 	client.SetWarn(func(text string) { p.Send(warnMsg{text: text}) })
-	_, err := p.Run()
+	final, err := p.Run()
 	m.cancel()
 	m.stopWrite()
-	return err
+	if err != nil {
+		return err
+	}
+	if fm, ok := final.(model); ok && fm.fatal != nil {
+		return fm.fatal
+	}
+	return nil
 }
 
 func (m model) Init() tea.Cmd {
@@ -465,7 +473,10 @@ func (m model) onMailboxesLoaded(msg mailboxesLoadedMsg) (tea.Model, tea.Cmd) {
 	first := len(m.sidebar.entries) == 0
 	m.sidebar.setData(msg.accounts, msg.mailboxes)
 	if first {
-		m.sidebar.selectInitial(m.opts.Account, m.opts.Mailbox)
+		if err := m.sidebar.selectInitial(m.opts.Account, m.opts.Mailbox); err != nil {
+			m.fatal = err
+			return m, tea.Quit
+		}
 		return m, m.spin(m.reloadList(false))
 	}
 	return m, nil
@@ -517,7 +528,7 @@ func listPage(client *mail.Client, source listSource, limit, offset int) ([]mail
 // loadMore fetches the page after the last loaded row. It is a separate
 // lane so it never cancels, and is never mistaken for, a reload.
 func (m *model) loadMore() tea.Cmd {
-	if !m.list.hasMore || m.pageLane.loading || m.listLane.loading {
+	if !m.list.nearEnd() || m.pageLane.loading || m.listLane.loading {
 		return nil
 	}
 	source := m.list.source
@@ -551,6 +562,7 @@ func (m *model) openPending(id string, source listSource) tea.Cmd {
 		return m.openReader()
 	}
 	if m.list.hasMore {
+		m.list.cursor = max(len(m.list.messages)-1, 0)
 		return m.loadMore()
 	}
 	m.pendingOpen = ""

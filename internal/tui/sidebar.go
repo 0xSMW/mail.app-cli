@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -116,20 +117,32 @@ func (s *sidebar) setData(accounts []mail.Account, mailboxes []mail.Mailbox) {
 	s.cursor = min(s.cursor, max(len(entries)-1, 0))
 }
 
-func (s *sidebar) selectInitial(account, mailbox string) {
+// selectInitial opens the requested scope. An account or mailbox that does
+// not match an enabled entry is an error rather than a silent fallback, so
+// a typo never lands the user in a different account.
+func (s *sidebar) selectInitial(account, mailbox string) error {
 	s.selected, s.cursor = 0, 0
 	if account == "" {
-		return
+		return nil
 	}
 	if mailbox == "" {
 		mailbox = "INBOX"
 	}
+	accountSeen := false
 	for i, entry := range s.entries {
-		if entry.kind == entryMailbox && strings.EqualFold(entry.account, account) && strings.EqualFold(entry.mailbox, mailbox) {
+		if entry.kind != entryMailbox || !strings.EqualFold(entry.account, account) {
+			continue
+		}
+		accountSeen = true
+		if strings.EqualFold(entry.mailbox, mailbox) {
 			s.selected, s.cursor = i, i
-			return
+			return nil
 		}
 	}
+	if !accountSeen {
+		return fmt.Errorf("account %q is not an enabled Mail.app account", account)
+	}
+	return fmt.Errorf("mailbox %q not found in %s", mailbox, account)
 }
 
 func (s *sidebar) current() sidebarEntry {
