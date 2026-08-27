@@ -166,7 +166,7 @@ mailbox  INBOX   default
 output   auto    default
 ```
 
-Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (a no-op), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
+Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (reported as skipped, exit 0), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
 
 After archive, delete, or move, Mail.app gives the message a new ID in the destination mailbox. The receipt reports the ID you passed; find the message again with `search` or `recent search` before touching it a second time.
 
