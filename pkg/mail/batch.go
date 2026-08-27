@@ -186,6 +186,15 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				result.Items = append(result.Items, item)
 				continue
 			}
+			if err := client.Done(); err != nil {
+				// A cancelled run is a failure for everything it did not reach.
+				item.Status = "failed"
+				item.Error = "cancelled: " + err.Error()
+				result.Attempted++
+				result.Failed++
+				result.Items = append(result.Items, item)
+				continue
+			}
 			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
 				item.Error = skip
@@ -237,12 +246,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	return result, nil
 }
 
-// skipReason says why an item is not attempted: the run was cancelled, or
-// the message is already where the action would put it.
-func skipReason(client *Client, opts BatchOptions, item BatchItem) string {
-	if client.Done() != nil {
-		return "cancelled"
-	}
+// skipReason says why an item is not attempted: the message is already
+// where the action would put it.
+func skipReason(_ *Client, opts BatchOptions, item BatchItem) string {
 	switch opts.Action {
 	case "move":
 		if strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
