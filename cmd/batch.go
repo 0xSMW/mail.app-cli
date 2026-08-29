@@ -3,9 +3,13 @@ package cmd
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
@@ -21,15 +25,21 @@ type (
 )
 
 // runMessageBatch runs the engine and invalidates the message-list cache for
-// every mailbox the run touched. An explicit --mailbox is trusted as the
-// source; otherwise archive resolves it through the Envelope Index.
+// every mailbox the run touched. An explicit --mailbox is trusted for ordinary
+// moves, but never for archive: Gmail messages can be listed in Important and
+// INBOX simultaneously, and archive must remove the INBOX label.
 func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator) (batchResult, error) {
-	opts.TrustSource = mailboxExplicit()
+	opts.TrustSource = trustExplicitSource(opts.Action, mailboxExplicit())
+	opts.ExplicitSource = mailboxExplicit()
 	result, err := mail.RunBatch(client, opts, items, mutate)
 	if !opts.DryRun {
 		invalidateBatchCaches(opts.Action, result.Items)
 	}
 	return result, err
+}
+
+func trustExplicitSource(action string, mailboxWasExplicit bool) bool {
+	return mailboxWasExplicit && action != "archive"
 }
 
 func invalidateBatchCaches(action string, items []batchItem) {
@@ -99,19 +109,11 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 // mutation error, if any, so the process exits non-zero after reporting.
 func writeReceipt(result batchResult, opts batchOptions, notices []string, mutationErr error, reportFile string) error {
 	var reportErr error
-	if reportFile != "" {
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			reportErr = fmt.Errorf("encode batch report: %w", err)
-		} else if err := os.WriteFile(reportFile, append(data, '\n'), 0o644); err != nil {
-			reportErr = fmt.Errorf("write batch report %q: %w", reportFile, err)
+	if reportFile != "" && result.ReceiptPath != "" {
+		reportErr = writeBatchReport(reportFile, result)
+		if reportErr != nil {
+			notices = append(notices, reportErr.Error())
 		}
-	}
-	if reportErr != nil {
-		// The report is supplemental: mutations have already happened, so their
-		// receipt must remain the sole stdout result. Keep this failure as a
-		// notice rather than turning a successful receipt into a mutation error.
-		notices = append(notices, reportErr.Error())
 	}
 	if err := writer.Write(output.Result{
 		Data:    result,
@@ -126,14 +128,108 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 		return err
 	}
 	if reportErr != nil {
-		// The receipt above already describes the completed mutation. Return a
-		// reported supplemental failure to retain a non-zero status without
-		// emitting a second or conflicting error envelope.
 		failure := clierr.Wrap(clierr.CodeInternal, reportErr, reportErr.Error())
 		failure.Reported = true
 		return failure
 	}
 	return nil
+}
+
+// preflightBatchReceipt verifies the legacy final report target before Mail
+// state can change, then creates a separate append-only sidecar journal.
+func preflightBatchReceipt(opts *batchOptions, reportFile string) (*mail.BatchJournal, error) {
+	journalPath := ""
+	if reportFile != "" {
+		absoluteReport, err := filepath.Abs(reportFile)
+		if err != nil {
+			return nil, fmt.Errorf("resolve batch report path: %w", err)
+		}
+		if err := preflightBatchReport(absoluteReport); err != nil {
+			return nil, err
+		}
+		journalPath = absoluteReport + ".journal.jsonl"
+	}
+	var (
+		journal *mail.BatchJournal
+		err     error
+	)
+	if journalPath == "" {
+		journal, err = mail.CreateDefaultBatchJournal()
+	} else {
+		journal, err = mail.CreateBatchJournal(journalPath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	opts.Receipt = journal
+	fmt.Fprintf(writer.Stderr, "receipt journal: %s\n", journal.Path())
+	return journal, nil
+}
+
+func preflightBatchReport(path string) error {
+	dir := filepath.Dir(path)
+	probe, err := os.CreateTemp(dir, ".mail-app-cli-report-*")
+	if err != nil {
+		return fmt.Errorf("preflight batch report %q: %w", path, err)
+	}
+	probeName := probe.Name()
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(probeName)
+		return fmt.Errorf("preflight batch report %q: %w", path, err)
+	}
+	if err := os.Remove(probeName); err != nil {
+		return fmt.Errorf("preflight batch report %q: %w", path, err)
+	}
+	if file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600); err != nil {
+		return fmt.Errorf("preflight batch report %q: %w", path, err)
+	} else if err := file.Close(); err != nil {
+		return fmt.Errorf("preflight batch report %q: %w", path, err)
+	}
+	return nil
+}
+
+func writeBatchReport(path string, result batchResult) error {
+	data, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode batch report: %w", err)
+	}
+	dir := filepath.Dir(path)
+	temporary, err := os.CreateTemp(dir, ".mail-app-cli-report-*")
+	if err != nil {
+		return fmt.Errorf("write batch report %q: %w", path, err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if _, err := temporary.Write(append(data, '\n')); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write batch report %q: %w", path, err)
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write batch report %q: %w", path, err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("write batch report %q: %w", path, err)
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return fmt.Errorf("write batch report %q: %w", path, err)
+	}
+	return nil
+}
+
+func runDurableMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator, reportFile string) (result batchResult, mutationErr error) {
+	journal, err := preflightBatchReceipt(&opts, reportFile)
+	if err != nil {
+		return batchResult{Action: opts.Action, DryRun: opts.DryRun}, err
+	}
+	ctx, stop := signal.NotifyContext(client.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result, mutationErr = runMessageBatch(client.WithContext(ctx), opts, items, mutate)
+	if err := journal.Close(); err != nil {
+		result.JournalError = err.Error()
+		mutationErr = errors.Join(mutationErr, err)
+	}
+	return result, mutationErr
 }
 
 // itemsFromRefs turns located messages into receipt items.
@@ -143,6 +239,10 @@ func itemsFromRefs(refs []messageRef) []batchItem {
 		item := batchItem{ID: ref.ID, Account: ref.Account, SourceMailbox: ref.Mailbox}
 		if ref.Envelope != nil {
 			item.Subject = ref.Envelope.Subject
+			item.Sender = ref.Envelope.Sender
+			item.DateSent = ref.Envelope.DateSent
+			item.MessageSize = ref.Envelope.MessageSize
+			item.Identity = mail.StableIdentityFromMessage(*ref.Envelope)
 		}
 		items = append(items, item)
 	}
@@ -155,7 +255,7 @@ func mutateByIDs(ids []string, opts batchOptions, mutate mail.Mutator) error {
 	if err != nil {
 		return err
 	}
-	result, mutationErr := runMessageBatch(mailClient, opts, itemsFromRefs(refs), mutate)
+	result, mutationErr := runDurableMessageBatch(mailClient, opts, itemsFromRefs(refs), mutate, "")
 	return writeReceipt(result, opts, notices, mutationErr, "")
 }
 
@@ -268,7 +368,11 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 			return err
 		}
 		for _, message := range messages {
-			items = append(items, batchItem{ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox, Subject: message.Subject})
+			items = append(items, batchItem{
+				ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox,
+				Subject: message.Subject, Sender: message.Sender, DateSent: message.DateSent,
+				MessageSize: message.MessageSize, Identity: mail.StableIdentityFromMessage(message),
+			})
 		}
 	} else {
 		ids, err := collectBatchIDs(argIDs)
@@ -285,7 +389,7 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 	if len(items) == 0 {
 		return clierr.New(clierr.CodeNotFound, "no messages selected")
 	}
-	result, mutationErr := runMessageBatch(mailClient, opts, items, mutate)
+	result, mutationErr := runDurableMessageBatch(mailClient, opts, items, mutate, batchReportFile)
 	return writeReceipt(result, opts, notices, mutationErr, batchReportFile)
 }
 
@@ -358,7 +462,7 @@ func init() {
 		cmd.Flags().BoolVar(&batchVerify, "verify", false, "Re-read each message after mutation and record the outcome")
 		cmd.Flags().BoolVar(&batchProgress, "progress", false, "Print per-chunk and per-message progress to stderr")
 		cmd.Flags().IntVar(&batchChunkSize, "chunk-size", 0, "Process selected messages in chunks of this size")
-		cmd.Flags().StringVar(&batchReportFile, "report-file", "", "Also write the receipt JSON to this path")
+		cmd.Flags().StringVar(&batchReportFile, "report-file", "", "Also write the receipt JSON to this path; journal uses .journal.jsonl")
 		cmd.Flags().IntVarP(&batchLimit, "limit", "l", 100, "Maximum selector-selected messages")
 	}
 	messagesBatchMarkCmd.Flags().BoolVar(&batchRead, "read", true, "Mark messages read; use --read=false for unread")

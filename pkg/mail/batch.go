@@ -1,6 +1,8 @@
 package mail
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -11,31 +13,40 @@ import (
 // BatchItem is one message inside a mutation receipt. The same shape is used
 // whether one ID or five hundred were requested.
 type BatchItem struct {
-	ID            string `json:"id"`
-	Account       string `json:"account"`
-	SourceMailbox string `json:"sourceMailbox"`
-	TargetMailbox string `json:"targetMailbox,omitempty"`
-	Subject       string `json:"subject,omitempty"`
-	Status        string `json:"status"`
-	Error         string `json:"error,omitempty"`
-	MarkedRead    bool   `json:"markedRead,omitempty"`
-	VerifyStatus  string `json:"verifyStatus,omitempty"`
-	VerifyError   string `json:"verifyError,omitempty"`
+	ID               string `json:"id"`
+	Account          string `json:"account"`
+	SourceMailbox    string `json:"sourceMailbox"`
+	TargetMailbox    string `json:"targetMailbox,omitempty"`
+	Subject          string `json:"subject,omitempty"`
+	Sender           string `json:"sender,omitempty"`
+	DateSent         string `json:"dateSent,omitempty"`
+	MessageSize      int    `json:"messageSize,omitempty"`
+	GmailInboxSource bool   `json:"gmailInboxSource,omitempty"`
+	// Identity is captured before a move so verification survives Mail.app
+	// assigning the logical message a new local ID.
+	Identity     StableIdentity `json:"identity,omitempty"`
+	Status       string         `json:"status"`
+	Error        string         `json:"error,omitempty"`
+	MarkedRead   bool           `json:"markedRead,omitempty"`
+	VerifyStatus string         `json:"verifyStatus,omitempty"`
+	VerifyError  string         `json:"verifyError,omitempty"`
 }
 
 // BatchResult is the mutation receipt.
 type BatchResult struct {
-	Action    string      `json:"action"`
-	DryRun    bool        `json:"dryRun"`
-	StartedAt string      `json:"startedAt,omitempty"`
-	EndedAt   string      `json:"endedAt,omitempty"`
-	Matched   int         `json:"matched"`
-	Attempted int         `json:"attempted"`
-	Succeeded int         `json:"succeeded"`
-	Failed    int         `json:"failed"`
-	Skipped   int         `json:"skipped"`
-	Chunks    int         `json:"chunks,omitempty"`
-	Items     []BatchItem `json:"items"`
+	Action       string      `json:"action"`
+	DryRun       bool        `json:"dryRun"`
+	StartedAt    string      `json:"startedAt,omitempty"`
+	EndedAt      string      `json:"endedAt,omitempty"`
+	ReceiptPath  string      `json:"receiptPath,omitempty"`
+	JournalError string      `json:"journalError,omitempty"`
+	Matched      int         `json:"matched"`
+	Attempted    int         `json:"attempted"`
+	Succeeded    int         `json:"succeeded"`
+	Failed       int         `json:"failed"`
+	Skipped      int         `json:"skipped"`
+	Chunks       int         `json:"chunks,omitempty"`
+	Items        []BatchItem `json:"items"`
 }
 
 // BatchOptions controls one mutation run.
@@ -58,6 +69,14 @@ type BatchOptions struct {
 	// INBOX or the backing mailbox, never from a user label, and skips
 	// messages that are already archived.
 	TrustSource bool
+	// ExplicitSource preserves an explicit non-Gmail source when the Envelope
+	// Index is unavailable. Gmail remains fail-closed because labels cannot be
+	// resolved safely without the index.
+	ExplicitSource bool
+	// Receipt is an append-only durable journal written before and after every
+	// mailbox-side phase. It is optional so library callers retain the existing
+	// in-memory receipt behavior.
+	Receipt *BatchJournal
 }
 
 // BatchFailedError reports how many items failed.
@@ -132,14 +151,46 @@ func FlagMutator(flagged bool) Mutator {
 // is a *BatchFailedError when at least one item failed; the receipt is
 // always complete. Cancelling the client's context stops the run between
 // items.
-func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (BatchResult, error) {
-	result := BatchResult{
+func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (result BatchResult, retErr error) {
+	result = BatchResult{
 		Action:    opts.Action,
 		DryRun:    opts.DryRun,
 		StartedAt: time.Now().Format(time.RFC3339),
 		Matched:   len(items),
 		Items:     make([]BatchItem, 0, len(items)),
 	}
+	autoReceipt := false
+	if opts.Receipt == nil {
+		journal, err := CreateDefaultBatchJournal()
+		if err != nil {
+			return result, err
+		}
+		opts.Receipt = journal
+		autoReceipt = true
+	}
+	result.ReceiptPath = opts.Receipt.Path()
+	if err := opts.Receipt.Record("started", map[string]any{
+		"action": opts.Action, "dryRun": opts.DryRun, "matched": len(items),
+	}); err != nil {
+		return result, err
+	}
+	defer func() {
+		result.EndedAt = time.Now().Format(time.RFC3339)
+		terminal := "completed"
+		if client.Done() != nil || isUnknownMutationError(client, retErr) || hasUnknownItem(result.Items) {
+			terminal = "interrupted"
+		}
+		if err := opts.Receipt.Record(terminal, map[string]any{"result": result}); err != nil {
+			result.JournalError = err.Error()
+			retErr = errors.Join(retErr, err)
+		}
+		if autoReceipt {
+			if err := opts.Receipt.Close(); err != nil {
+				result.JournalError = err.Error()
+				retErr = errors.Join(retErr, err)
+			}
+		}
+	}()
 	for i := range items {
 		if opts.TargetMailbox != "" {
 			items[i].TargetMailbox = opts.TargetMailbox
@@ -148,7 +199,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	chunkSize := normalizedChunkSize(len(items), opts.ChunkSize)
 	result.Chunks = (len(items) + chunkSize - 1) / chunkSize
 	if opts.Action == "archive" && !opts.TrustSource {
-		items = client.archiveSources(items)
+		items = client.archiveSources(items, opts.ExplicitSource)
 	}
 	if opts.DryRun {
 		// A preview shows the same sources and skips the real run would use.
@@ -166,11 +217,24 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			result.Skipped++
 			result.Items = append(result.Items, item)
 		}
-		result.EndedAt = time.Now().Format(time.RFC3339)
 		if result.Failed > 0 {
 			return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Attempted: len(items)}
 		}
 		return result, nil
+	}
+	if opts.Verify && (opts.Action == "archive" || opts.Action == "move") {
+		for i := range items {
+			if items[i].Status == "failed" {
+				continue
+			}
+			identity, err := client.captureStableIdentity(items[i])
+			if err != nil {
+				items[i].Status = "failed"
+				items[i].Error = "capture stable identity: " + err.Error()
+				continue
+			}
+			items[i].Identity = identity
+		}
 	}
 
 	for start := 0; start < len(items); start += chunkSize {
@@ -184,50 +248,93 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				result.Attempted++
 				result.Failed++
 				result.Items = append(result.Items, item)
+				if err := opts.Receipt.Record("mutation_failed", journalItem(item)); err != nil {
+					return result, err
+				}
 				continue
 			}
 			if err := client.Done(); err != nil {
-				// A cancelled run is a failure for everything it did not reach.
-				item.Status = "failed"
-				item.Error = "cancelled: " + err.Error()
-				result.Attempted++
-				result.Failed++
-				result.Items = append(result.Items, item)
-				continue
+				return result, err
 			}
 			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
 				item.Error = skip
 				result.Skipped++
 				result.Items = append(result.Items, item)
+				if err := opts.Receipt.Record("skipped", journalItem(item)); err != nil {
+					return result, err
+				}
 				continue
 			}
 			result.Attempted++
 			if opts.MarkReadBefore && opts.Action != "mark" {
 				if err := client.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
 					item.Status = "failed"
+					if isUnknownMutationError(client, err) {
+						item.Status = "unknown"
+					}
 					item.Error = fmt.Sprintf("mark-read before %s failed: %v", opts.Action, err)
 					result.Failed++
 					result.Items = append(result.Items, item)
+					if journalErr := opts.Receipt.Record("mark_read_failed", journalItem(item)); journalErr != nil {
+						return result, journalErr
+					}
 					continue
 				}
 				item.MarkedRead = true
+				if err := opts.Receipt.Record("mark_read_succeeded", journalItem(item)); err != nil {
+					item.Status = "unknown"
+					item.Error = "receipt durability after mark-read: " + err.Error()
+					result.Failed++
+					result.Items = append(result.Items, item)
+					return result, err
+				}
+			}
+			if err := opts.Receipt.Record("mutation_started", journalItem(item)); err != nil {
+				item.Status = "failed"
+				item.Error = "receipt durability before mutation: " + err.Error()
+				result.Failed++
+				result.Items = append(result.Items, item)
+				return result, err
 			}
 			if err := mutate(client, &item); err != nil {
+				phase := "mutation_failed"
 				item.Status = "failed"
+				if isUnknownMutationError(client, err) {
+					item.Status = "unknown"
+					phase = "mutation_unknown"
+				}
 				item.Error = err.Error()
 				result.Failed++
+				if journalErr := opts.Receipt.Record(phase, journalItem(item)); journalErr != nil {
+					result.Items = append(result.Items, item)
+					return result, journalErr
+				}
 			} else {
 				item.Status = "succeeded"
+				if err := opts.Receipt.Record("mutation_succeeded", journalItem(item)); err != nil {
+					item.Status = "unknown"
+					item.Error = "receipt durability after mutation: " + err.Error()
+					result.Failed++
+					result.Items = append(result.Items, item)
+					return result, err
+				}
 				if opts.Verify {
 					verifyStatus, verifyErr := VerifyMutation(client, opts, item)
 					item.VerifyStatus = verifyStatus
 					if verifyErr != nil {
 						item.Status = "failed"
+						if isUnknownMutationError(client, verifyErr) {
+							item.Status = "unknown"
+						}
 						item.VerifyError = verifyErr.Error()
 						result.Failed++
 					} else {
 						result.Succeeded++
+					}
+					if err := opts.Receipt.Record("verification_result", journalItem(item)); err != nil {
+						result.Items = append(result.Items, item)
+						return result, err
 					}
 				} else {
 					result.Succeeded++
@@ -239,11 +346,33 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			result.Items = append(result.Items, item)
 		}
 	}
-	result.EndedAt = time.Now().Format(time.RFC3339)
 	if result.Failed > 0 {
 		return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Attempted: result.Attempted}
 	}
 	return result, nil
+}
+
+func isUnknownMutationError(client *Client, err error) bool {
+	if err == nil {
+		return false
+	}
+	if client.Done() != nil {
+		return true
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isAutomationTimeout(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timeout") || strings.Contains(message, "timed out") || strings.Contains(message, "deadline exceeded") || strings.Contains(message, "context canceled")
+}
+
+func hasUnknownItem(items []BatchItem) bool {
+	for _, item := range items {
+		if item.Status == "unknown" {
+			return true
+		}
+	}
+	return false
 }
 
 // skipReason says why an item is not attempted: the message is already
@@ -267,10 +396,11 @@ func skipReason(_ *Client, opts BatchOptions, item BatchItem) string {
 // All Mail (a Gmail search hit, say) is looked up too, because it may still
 // carry the INBOX label. An item under a label that the index cannot place
 // is marked failed rather than archived from that label.
-func (c *Client) archiveSources(items []BatchItem) []BatchItem {
-	needsLookup := func(item BatchItem) bool {
-		return !strings.EqualFold(item.SourceMailbox, "INBOX")
-	}
+func (c *Client) archiveSources(items []BatchItem, explicitSource bool) []BatchItem {
+	// Resolve every archive source, including an explicitly supplied INBOX:
+	// the label set is needed both to select the right source and to prove the
+	// narrow Gmail INBOX-label transition verification outcome.
+	needsLookup := func(BatchItem) bool { return true }
 	ids := make([]string, 0, len(items))
 	for _, item := range items {
 		if needsLookup(item) {
@@ -291,8 +421,23 @@ func (c *Client) archiveSources(items []BatchItem) []BatchItem {
 			// Without the index a message listed under All Mail is left
 			// there; the skip below reports it.
 		case err != nil:
+			if explicitSource {
+				gmail, gmailErr := c.isGmailAccount(item.Account)
+				if gmailErr == nil && !gmail {
+					// A non-Gmail IMAP/iCloud mailbox has no label alias to
+					// resolve, so the human's explicit source remains usable.
+					continue
+				}
+				items[i].Status = "failed"
+				if gmailErr != nil {
+					items[i].Error = fmt.Sprintf("cannot determine whether %s uses Gmail labels while the Envelope Index is unavailable (%v)", item.Account, gmailErr)
+				} else {
+					items[i].Error = "cannot safely archive a Gmail message while the Envelope Index is unavailable because INBOX labels cannot be resolved"
+				}
+				continue
+			}
 			items[i].Status = "failed"
-			items[i].Error = fmt.Sprintf("cannot resolve a safe archive source without the Envelope Index (%v); archive from INBOX with --mailbox", err)
+			items[i].Error = fmt.Sprintf("cannot resolve a safe archive source without the Envelope Index (%v)", err)
 		case !ok || !strings.EqualFold(loc.Account, item.Account):
 			if IsArchiveAlias(item.SourceMailbox) {
 				continue
@@ -300,10 +445,16 @@ func (c *Client) archiveSources(items []BatchItem) []BatchItem {
 			items[i].Status = "failed"
 			items[i].Error = "message not in the Envelope Index; archive from INBOX with --mailbox"
 		default:
-			items[i].SourceMailbox = loc.ArchiveMailbox
+			items[i] = archiveItemFromLocation(item, loc)
 		}
 	}
 	return items
+}
+
+func archiveItemFromLocation(item BatchItem, location MessageLocation) BatchItem {
+	item.SourceMailbox = location.ArchiveMailbox
+	item.GmailInboxSource = location.IsGmail && strings.EqualFold(location.ArchiveMailbox, "INBOX")
+	return item
 }
 
 // Summary is the one-line human description of a receipt.
@@ -389,42 +540,23 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 	}
 	switch opts.Action {
 	case "archive", "move":
-		// Mail.app may keep the ID (Gmail label changes) or assign a new one
-		// (real moves), and Gmail keeps every message in All Mail. So: a
-		// no-op is fine; archiving into All Mail is proven by absence from
-		// the source; moving out of All Mail is proven by presence in the
-		// destination; anything else accepts either proof.
 		if item.TargetMailbox == "" || strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
 			return "already-in-destination", nil
 		}
-		if IsArchiveAlias(item.TargetMailbox) {
-			inSource, err := present(item.SourceMailbox)
+		if !item.Identity.valid() {
+			return "unknown_after_timeout", fmt.Errorf("stable identity was not captured before mutation")
+		}
+		return verifyRelocationWithLookup(client.Context(), item, func() (verificationPresence, error) {
+			inSource, err := client.hasMessageIdentityForVerification(item.Account, item.SourceMailbox, item.Identity)
 			if err != nil {
-				return "verification-failed", err
+				return verificationPresence{}, err
 			}
-			if inSource {
-				return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
+			inDestination, err := client.hasMessageIdentityForVerification(item.Account, item.TargetMailbox, item.Identity)
+			if err != nil {
+				return verificationPresence{}, err
 			}
-			return "absent-from-source", nil
-		}
-		inDestination, err := present(item.TargetMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if inDestination {
-			return "present-in-destination", nil
-		}
-		if IsArchiveAlias(item.SourceMailbox) {
-			return "destination-unverified", fmt.Errorf("message not found in %s by its old ID; Mail.app may have renumbered it", item.TargetMailbox)
-		}
-		inSource, err := present(item.SourceMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if !inSource {
-			return "absent-from-source", nil
-		}
-		return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
+			return verificationPresence{Source: inSource, Destination: inDestination}, nil
+		}, time.Sleep)
 	case "delete":
 		inSource, err := present(item.SourceMailbox)
 		if err != nil {

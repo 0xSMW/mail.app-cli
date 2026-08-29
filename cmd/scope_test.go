@@ -54,6 +54,28 @@ func TestResolveLocatedMessagesFallsBackOnlyWhenIndexUnavailable(t *testing.T) {
 	}
 }
 
+func TestExplicitMessageRefsAttachIndexedEnvelopeButPreserveActionScope(t *testing.T) {
+	envelope := mail.Message{ID: "42", Account: "Work", Mailbox: "INBOX", Sender: "sender@example.com", Subject: "Subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}
+	refs := explicitMessageRefs([]string{"42"}, "Work", "All Mail", map[string]mail.MessageLocation{
+		"42": {ID: "42", Account: "Work", Mailbox: "INBOX", Envelope: envelope},
+	})
+	if len(refs) != 1 || refs[0].Account != "Work" || refs[0].Mailbox != "All Mail" || refs[0].Envelope == nil || refs[0].Envelope.Subject != "Subject" {
+		t.Fatalf("refs = %+v, want explicit All Mail with indexed envelope", refs)
+	}
+}
+
+func TestExplicitMessageRefsKeepExplicitScopeWhenIndexIsMissingOrAnotherAccount(t *testing.T) {
+	for _, located := range []map[string]mail.MessageLocation{
+		nil,
+		{"42": {ID: "42", Account: "Other", Envelope: mail.Message{ID: "42", Account: "Other", Subject: "wrong account"}}},
+	} {
+		refs := explicitMessageRefs([]string{"42"}, "Work", "All Mail", located)
+		if len(refs) != 1 || refs[0].Account != "Work" || refs[0].Mailbox != "All Mail" || refs[0].Envelope != nil {
+			t.Fatalf("refs = %+v, want explicit ref without cross-account envelope", refs)
+		}
+	}
+}
+
 func TestRequireAccountUsesLiveInventoryInsteadOfCachedAccounts(t *testing.T) {
 	previousResolved, previousClient := resolved, mailClient
 	t.Cleanup(func() {

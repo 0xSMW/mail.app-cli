@@ -302,6 +302,7 @@ try {
 
 		result = {
 			id: String(msg.id()),
+			rfcMessageId: rfcMessageId(msg),
 			subject: msg.subject() || '',
 			sender: msg.sender() || '',
 			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
@@ -322,7 +323,7 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -389,6 +390,7 @@ if (msg !== null) {
 	}
 	result = {
 		id: String(msg.id()),
+		rfcMessageId: rfcMessageId(msg),
 		subject: msg.subject() || '',
 		sender: msg.sender() || '',
 		dateReceived: (msg.dateReceived() || new Date()).toISOString(),
@@ -406,7 +408,7 @@ if (msg !== null) {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
