@@ -15,7 +15,8 @@ type SmartMailbox struct {
 func (c *Client) ListSmartMailboxes() ([]SmartMailbox, error) {
 	// Mail does not expose its custom Smart Mailboxes through its public
 	// Apple-event dictionary. Today is the one built-in view we can reproduce
-	// from the documented local Envelope Index data without UI automation.
+	// from received-message timestamps in the local Envelope Index without UI
+	// automation.
 	today, err := c.todaySmartMailbox(time.Now(), time.Local)
 	if err != nil {
 		return nil, err
@@ -31,8 +32,8 @@ select
 	coalesce(sum(case when m.read = 0 then 1 else 0 end), 0) as UnreadCount
 from messages m
 where m.deleted = 0
-	and m.date_last_viewed >= ` + strconv.FormatInt(start.Unix(), 10) + `
-	and m.date_last_viewed < ` + strconv.FormatInt(end.Unix(), 10) + `;`
+	and m.date_received >= ` + strconv.FormatInt(start.Unix(), 10) + `
+	and m.date_received < ` + strconv.FormatInt(end.Unix(), 10) + `;`
 
 	var rows []struct {
 		TotalCount  int `json:"TotalCount"`

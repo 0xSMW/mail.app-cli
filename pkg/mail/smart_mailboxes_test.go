@@ -62,7 +62,7 @@ func TestListSmartMailboxesReturnsCapabilityUnavailableWhenIndexDisabled(t *test
 	}
 }
 
-func TestTodaySmartMailboxUsesHalfOpenLocalDay(t *testing.T) {
+func TestTodaySmartMailboxUsesReceivedDateInHalfOpenLocalDay(t *testing.T) {
 	loc := time.FixedZone("test", 7*60*60)
 	now := time.Date(2026, time.August, 29, 13, 0, 0, 0, loc)
 	start, end := todayBounds(now, loc)
@@ -90,9 +90,12 @@ func TestTodaySmartMailboxUsesHalfOpenLocalDay(t *testing.T) {
 		t.Fatalf("read query: %v", err)
 	}
 	text := string(query)
-	if !strings.Contains(text, "m.date_last_viewed >= "+strconv.FormatInt(start.Unix(), 10)) ||
-		!strings.Contains(text, "m.date_last_viewed < "+strconv.FormatInt(end.Unix(), 10)) {
+	if !strings.Contains(text, "m.date_received >= "+strconv.FormatInt(start.Unix(), 10)) ||
+		!strings.Contains(text, "m.date_received < "+strconv.FormatInt(end.Unix(), 10)) {
 		t.Fatalf("query %q does not use [%d, %d)", text, start.Unix(), end.Unix())
+	}
+	if strings.Contains(text, "date_last_viewed") {
+		t.Fatalf("query %q uses view time instead of received time", text)
 	}
 }
 

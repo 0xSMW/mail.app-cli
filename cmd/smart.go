@@ -18,7 +18,7 @@ var smartCmd = &cobra.Command{
 	Long: `List the built-in Today view and query across accounts.
 
 Mail does not expose custom Smart Mailboxes through its public Apple-event
-dictionary. Today is calculated from Envelope Index last-viewed timestamps;
+dictionary. Today is calculated from Envelope Index received timestamps;
 if that index is unavailable the command returns an unavailable capability
 error rather than a successful empty list.`,
 }
