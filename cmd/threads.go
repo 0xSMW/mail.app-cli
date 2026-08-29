@@ -100,7 +100,7 @@ var threadsArchiveCmd = &cobra.Command{
 				items = append(items, batchItem{ID: message.ID, Account: message.Account, SourceMailbox: message.Mailbox, Subject: message.Subject})
 			}
 			opts := batchOptions{Action: "archive", DryRun: threadDryRun, Verify: threadVerify}
-			result, mutationErr := runMessageBatch(mailClient, opts, items, mail.ArchiveMutator(false))
+			result, mutationErr := runDurableMessageBatch(mailClient, opts, items, mail.ArchiveMutator(false), "")
 			return writeReceipt(result, opts, nil, mutationErr, "")
 		}
 		return clierr.New(clierr.CodeNotFound, "thread not found: "+args[0])

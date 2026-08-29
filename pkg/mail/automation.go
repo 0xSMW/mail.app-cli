@@ -99,6 +99,19 @@ func escapeAppleScriptString(s string) string {
 	return s
 }
 
+// jxaRFCMessageIDHelper reads Mail's optional messageId property without
+// confusing its numeric local id with an RFC Message-ID header.
+func jxaRFCMessageIDHelper() string {
+	return `
+function rfcMessageId(msg) {
+	try {
+		const value = String(msg.messageId() || '').trim();
+		return /^<[^<>\\s]+>$/.test(value) ? value : '';
+	} catch (e) { return ''; }
+}
+`
+}
+
 func (c *Client) runAppleScript(script string) (string, error) {
 	return runAutomation(c.Context(), "applescript", defaultAutomationTimeout, "-e", script)
 }

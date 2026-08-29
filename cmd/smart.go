@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
@@ -13,7 +14,25 @@ var smartLimit int
 
 var smartCmd = &cobra.Command{
 	Use:   "smart",
-	Short: "List and query smart mailboxes",
+	Short: "List Today and query across accounts",
+	Long: `List the built-in Today view and query across accounts.
+
+Mail does not expose custom Smart Mailboxes through its public Apple-event
+dictionary. Today is calculated from Envelope Index last-viewed timestamps;
+if that index is unavailable the command returns an unavailable capability
+error rather than a successful empty list.`,
+}
+
+func smartCapabilityError(err error) error {
+	var capability *mail.CapabilityError
+	if !errors.As(err, &capability) {
+		return err
+	}
+	result := clierr.Wrap(clierr.CodeUnavailable, err, capability.Error())
+	if capability.Status == mail.CapabilityUnavailable {
+		return result.WithHint("grant Full Disk Access to the app launching mail-app-cli, then rerun")
+	}
+	return result.WithHint("Mail's public automation API does not expose custom Smart Mailboxes")
 }
 
 func renderSmart(boxes []mail.SmartMailbox) func(*output.Printer) {
@@ -26,13 +45,21 @@ func renderSmart(boxes []mail.SmartMailbox) func(*output.Printer) {
 
 var smartListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List smart mailboxes",
+	Short: "Show the supported built-in Today view",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		boxes, err := mailClient.ListSmartMailboxes()
 		if err != nil {
-			return fmt.Errorf("list smart mailboxes: %w", err)
+			return smartCapabilityError(err)
 		}
-		return writer.Write(output.Result{Data: boxes, Summary: plural(len(boxes), "smart mailbox"), Plain: renderSmart(boxes)})
+		return writer.Write(output.Result{
+			Data:    boxes,
+			Summary: "Today (built-in view; custom Smart Mailboxes unsupported)",
+			Plain:   renderSmart(boxes),
+			Meta: map[string]any{
+				"scope":                "built_in_today",
+				"customSmartMailboxes": "unsupported",
+			},
+		})
 	},
 }
 
@@ -43,14 +70,17 @@ var smartShowCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		boxes, err := mailClient.ListSmartMailboxes()
 		if err != nil {
-			return err
+			return smartCapabilityError(err)
 		}
 		for _, box := range boxes {
 			if box.Name == args[0] {
 				return writer.Write(output.Result{Data: box, Summary: "Smart mailbox " + box.Name, Plain: renderSmart([]mail.SmartMailbox{box})})
 			}
 		}
-		return clierr.New(clierr.CodeNotFound, "smart mailbox not found: "+args[0])
+		return smartCapabilityError(&mail.CapabilityError{
+			Capability: "custom Smart Mailbox " + args[0],
+			Status:     mail.CapabilityUnsupported,
+		})
 	},
 }
 

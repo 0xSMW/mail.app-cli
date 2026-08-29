@@ -120,15 +120,29 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		refs := make([]messageRef, 0, len(ids))
-		for _, id := range ids {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
-		}
-		return refs, nil, nil
+		// Explicit scope remains authoritative for the mutation location, but
+		// the index can still cheaply provide the stable fallback identity used
+		// by verified moves. An unavailable or lagging index never invalidates
+		// the human's explicit account/mailbox address.
+		located, _ := mailClient.LocateMessages(ids)
+		return explicitMessageRefs(ids, account, mailboxInScope(), located), nil, nil
 	}
 
 	located, err := mailClient.LocateMessages(ids)
 	return resolveLocatedMessages(ids, located, err)
+}
+
+func explicitMessageRefs(ids []string, account, mailbox string, located map[string]mail.MessageLocation) []messageRef {
+	refs := make([]messageRef, 0, len(ids))
+	for _, id := range ids {
+		ref := messageRef{ID: id, Account: account, Mailbox: mailbox}
+		if location, ok := located[id]; ok && strings.EqualFold(location.Account, account) {
+			envelope := location.Envelope
+			ref.Envelope = &envelope
+		}
+		refs = append(refs, ref)
+	}
+	return refs
 }
 
 // resolveLocatedMessages applies Envelope Index lookup results. A successful

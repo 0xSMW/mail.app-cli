@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -21,6 +22,7 @@ type MessageLocation struct {
 	// from a user label would strip the label instead of leaving INBOX.
 	ArchiveMailbox string   `json:"archiveMailbox"`
 	Labels         []string `json:"labels"`
+	IsGmail        bool     `json:"-"`
 	Envelope       Message  `json:"-"`
 }
 
@@ -129,6 +131,7 @@ where l.message_id in (%s);
 			BackingMailbox: backing,
 			ArchiveMailbox: archiveSourceMailbox(backing, labels),
 			Labels:         labels,
+			IsGmail:        strings.Contains(row.URL, "/%5BGmail%5D/"),
 		}
 		location.Envelope = Message{
 			ID:           id,
@@ -159,6 +162,111 @@ func (c *Client) LocateMessage(id string) (*MessageLocation, error) {
 		return nil, notFound("message", id)
 	}
 	return &location, nil
+}
+
+// HasMessageIdentityInMailbox finds a logical message after a move may have
+// replaced its local Mail.app ID. The Envelope Index has no RFC header column,
+// so a header-only identity is resolved through Mail.app by the caller; the
+// index path intentionally requires the complete guarded fallback.
+func (c *Client) HasMessageIdentityInMailbox(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	if !identity.hasFallback() {
+		return false, fmt.Errorf("Envelope Index cannot look up an RFC Message-ID directly")
+	}
+	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, fmt.Errorf("mailbox not found: %s", mailboxName)
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
+where %s
+	and m.deleted = 0
+	and coalesce(s.subject, '') = %s
+	and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
+	and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
+	and m.size = %d
+limit 1;
+`, indexMailboxMembershipCondition(mbox), sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize)
+	var rows []indexMessage
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return false, err
+	}
+	return len(rows) > 0, nil
+}
+
+func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	if identity.RFCMessageID != "" {
+		return c.hasRFCMessageIDInMailbox(accountName, mailboxName, identity.RFCMessageID)
+	}
+	if !identity.hasFallback() {
+		return false, fmt.Errorf("invalid stable identity")
+	}
+	return c.HasMessageIdentityInMailbox(accountName, mailboxName, identity)
+}
+
+// hasRFCMessageIDInMailbox is deliberately mailbox-scoped.  A matching
+// fallback tuple elsewhere must never override a captured RFC Message-ID.
+func (c *Client) hasRFCMessageIDInMailbox(accountName, mailboxName, rfcMessageID string) (bool, error) {
+	encoded, err := json.Marshal(rfcMessageID)
+	if err != nil {
+		return false, err
+	}
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const requestedMailbox = '%s';
+%s
+const wanted = %s;
+const acc = mail.accounts.byName('%s');
+acc.name();
+const mbox = %s;
+if (mbox === null) throw new Error('mailbox not found: ' + requestedMailbox);
+const messages = mbox.messages();
+let found = false;
+for (let i = 0; i < messages.length; i++) {
+	if (rfcMessageId(messages[i]) === wanted) { found = true; break; }
+}
+JSON.stringify(found);
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), string(encoded), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+	output, err := c.runJXA(script)
+	if err != nil {
+		return false, err
+	}
+	var found bool
+	if err := json.Unmarshal([]byte(output), &found); err != nil {
+		return false, fmt.Errorf("parse RFC Message-ID lookup: %w", err)
+	}
+	return found, nil
+}
+
+// isGmailAccount performs the narrow live check needed when the Envelope
+// Index is unavailable. A recursively visible All Mail mailbox is treated as
+// Gmail-like and therefore fail-closed: only the index can prove whether a
+// selected Important message also has INBOX.
+func (c *Client) isGmailAccount(accountName string) (bool, error) {
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const acc = mail.accounts.byName('%s');
+acc.name();
+function hasAllMail(boxes) {
+	for (let i = 0; i < boxes.length; i++) {
+		const box = boxes[i];
+		if (String(box.name()).toLowerCase() === 'all mail') return true;
+		try { if (hasAllMail(box.mailboxes())) return true; } catch (e) {}
+	}
+	return false;
+}
+JSON.stringify(hasAllMail(acc.mailboxes()));
+`, escapeJSString(accountName))
+	output, err := c.runJXA(script)
+	if err != nil {
+		return false, err
+	}
+	var gmail bool
+	if err := json.Unmarshal([]byte(output), &gmail); err != nil {
+		return false, fmt.Errorf("parse Gmail mailbox capability: %w", err)
+	}
+	return gmail, nil
 }
 
 // PrimeAccounts seeds the in-process account cache so callers holding a

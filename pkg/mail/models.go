@@ -24,7 +24,10 @@ type Mailbox struct {
 }
 
 type Message struct {
-	ID           string `json:"id"`
+	ID string `json:"id"`
+	// RFCMessageID is the RFC 5322 Message-ID header when Mail.app exposes it.
+	// It deliberately differs from the numeric local id above.
+	RFCMessageID string `json:"rfcMessageId,omitempty"`
 	Subject      string `json:"subject"`
 	Sender       string `json:"sender"`
 	DateSent     string `json:"dateSent"`

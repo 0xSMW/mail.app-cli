@@ -1,43 +1,69 @@
 package mail
 
 import (
-	"encoding/json"
-	"fmt"
+	"strconv"
+	"time"
 )
 
 type SmartMailbox struct {
 	Name       string `json:"name"`
 	Account    string `json:"account,omitempty"`
-	Unread     int    `json:"unreadCount,omitempty"`
-	TotalCount int    `json:"totalCount,omitempty"`
+	Unread     int    `json:"unreadCount"`
+	TotalCount int    `json:"totalCount"`
 }
 
 func (c *Client) ListSmartMailboxes() ([]SmartMailbox, error) {
-	script := `
-const mail = Application('Mail');
-const result = [];
-try {
-	const boxes = mail.smartMailboxes ? mail.smartMailboxes() : [];
-	for (let i = 0; i < boxes.length; i++) {
-		const box = boxes[i];
-		let total = 0;
-		let unread = 0;
-		try { total = box.messages().length; } catch (e) {}
-		try { unread = box.unreadCount(); } catch (e) {}
-		result.push({name: box.name(), totalCount: total, unreadCount: unread});
-	}
-} catch (e) {
-	JSON.stringify({error: String(e)});
-}
-JSON.stringify(result);
-`
-	output, err := c.runJXA(script)
+	// Mail does not expose its custom Smart Mailboxes through its public
+	// Apple-event dictionary. Today is the one built-in view we can reproduce
+	// from the documented local Envelope Index data without UI automation.
+	today, err := c.todaySmartMailbox(time.Now(), time.Local)
 	if err != nil {
 		return nil, err
 	}
-	var boxes []SmartMailbox
-	if err := json.Unmarshal([]byte(output), &boxes); err != nil {
-		return nil, fmt.Errorf("failed to parse smart mailboxes JSON: %w", err)
+	return []SmartMailbox{today}, nil
+}
+
+func (c *Client) todaySmartMailbox(now time.Time, loc *time.Location) (SmartMailbox, error) {
+	start, end := todayBounds(now, loc)
+	query := `
+select
+	count(*) as TotalCount,
+	coalesce(sum(case when m.read = 0 then 1 else 0 end), 0) as UnreadCount
+from messages m
+where m.deleted = 0
+	and m.date_last_viewed >= ` + strconv.FormatInt(start.Unix(), 10) + `
+	and m.date_last_viewed < ` + strconv.FormatInt(end.Unix(), 10) + `;`
+
+	var rows []struct {
+		TotalCount  int `json:"TotalCount"`
+		UnreadCount int `json:"UnreadCount"`
 	}
-	return boxes, nil
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		if isEnvelopeIndexUnavailable(err) {
+			return SmartMailbox{}, &CapabilityError{
+				Capability: "Today smart mailbox",
+				Status:     CapabilityUnavailable,
+				Cause:      err,
+			}
+		}
+		return SmartMailbox{}, err
+	}
+
+	result := SmartMailbox{Name: "Today"}
+	if len(rows) > 0 {
+		result.TotalCount = rows[0].TotalCount
+		result.Unread = rows[0].UnreadCount
+	}
+	return result, nil
+}
+
+// todayBounds uses local calendar boundaries. AddDate advances to the next
+// local midnight across DST changes instead of assuming every day is 24 hours.
+func todayBounds(now time.Time, loc *time.Location) (start, end time.Time) {
+	if loc == nil {
+		loc = time.Local
+	}
+	local := now.In(loc)
+	start = time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
+	return start, start.AddDate(0, 0, 1)
 }
