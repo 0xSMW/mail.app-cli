@@ -70,12 +70,12 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 		summary := result.Summary(opts)
 		if result.Failed > 0 {
 			p.Line("%s", p.Red(summary))
-		} else if result.DryRun {
+		} else if result.DryRun || result.Unverified > 0 {
 			p.Line("%s", p.Yellow(summary))
 		} else {
 			p.Line("%s", p.Green(summary))
 		}
-		if !result.DryRun && result.Failed == 0 && result.Skipped == 0 && len(result.Items) <= 1 {
+		if !result.DryRun && result.Failed == 0 && result.Unverified == 0 && result.Skipped == 0 && len(result.Items) <= 1 {
 			return
 		}
 		rows := make([][]string, 0, len(result.Items))
@@ -97,7 +97,7 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 			if item.Error != "" {
 				detail = p.Red(output.Truncate(item.Error, 60))
 			} else if item.VerifyError != "" {
-				detail = p.Red(output.Truncate(item.VerifyError, 60))
+				detail = p.Yellow(output.Truncate(item.VerifyError, 60))
 			}
 			rows = append(rows, []string{p.Dim(item.ID), status, location, detail})
 		}

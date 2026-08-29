@@ -24,6 +24,21 @@ func TestDryRunSummaryCountsOnlyPreviewedItems(t *testing.T) {
 	}
 }
 
+func TestSummarySeparatesAppliedMutationFromUnverifiedDestination(t *testing.T) {
+	result := BatchResult{Action: "move", Matched: 1, Attempted: 1, Succeeded: 1, Unverified: 1}
+	got := result.Summary(BatchOptions{Action: "move", TargetMailbox: "Archive"})
+	if got != "Moved 1 message to Archive; 1 unverified" {
+		t.Fatalf("Summary = %q", got)
+	}
+}
+
+func TestVerificationTimeoutKeepsReceiptOutcomeUnknown(t *testing.T) {
+	items := []BatchItem{{Status: "succeeded", VerifyStatus: "unknown_after_timeout"}}
+	if !hasUnknownItem(items) {
+		t.Fatal("unknown_after_timeout verification should make the receipt interrupted")
+	}
+}
+
 func TestBatchJournalSurvivesInterruptedRunAfterCompletedItems(t *testing.T) {
 	journalPath := filepath.Join(t.TempDir(), "receipt.jsonl")
 	journal, err := CreateBatchJournal(journalPath)

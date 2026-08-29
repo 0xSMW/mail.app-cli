@@ -104,21 +104,27 @@ type verificationPresence struct {
 }
 
 type verificationLookup func() (verificationPresence, error)
+type verificationPause func(context.Context, time.Duration) error
 
-func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause func(time.Duration)) (string, error) {
+func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause verificationPause) (string, error) {
 	for attempt, delay := range verificationBackoff {
 		if attempt > 0 {
-			pause(delay)
+			if err := pause(ctx, delay); err != nil {
+				return "unknown_after_timeout", err
+			}
 		}
 		if err := ctx.Err(); err != nil {
 			return "unknown_after_timeout", err
 		}
 		presence, err := lookup()
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isAutomationTimeout(err) {
+			if isVerificationTimeout(err) {
 				return "unknown_after_timeout", err
 			}
-			return "unknown_after_timeout", err
+			if isRetryableVerificationError(err) && attempt < len(verificationBackoff)-1 {
+				continue
+			}
+			return "applied_destination_unverified", err
 		}
 		if presence.Destination {
 			return "confirmed_destination", nil
@@ -130,10 +136,46 @@ func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup veri
 			if presence.Source {
 				return "present_in_source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 			}
-			return "source_removed_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
+			return "applied_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
 		}
 	}
-	return "unknown_after_timeout", context.DeadlineExceeded
+	return "applied_destination_unverified", fmt.Errorf("message destination could not be verified")
+}
+
+func isRetryableVerificationError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsNotFound(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "apple event connection is invalid") ||
+		strings.Contains(message, "connection invalid") ||
+		strings.Contains(message, "connection interrupted") ||
+		strings.Contains(message, "(-609)")
+}
+
+func isVerificationTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isAutomationTimeout(err) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "timed out") || strings.Contains(message, "timeout") || strings.Contains(message, "(-1712)")
+}
+
+func waitForVerificationBackoff(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func isAutomationTimeout(err error) bool {

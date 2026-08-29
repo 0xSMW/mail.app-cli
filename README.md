@@ -191,7 +191,7 @@ ID      STATUS   LOCATION      DETAIL
  "items": [{"id": "100001", "account": "Example Account", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
 ```
 
-`--verify` re-reads each message afterwards and records `verifyStatus`. A receipt with failures is still written, with `ok: false`, `code: "mutation_failed"`, and `exitCode: 6` in the same envelope, and the process exits 6. `ok` means "this command did what you asked", so check it, or check the exit code, before trusting a receipt.
+`--verify` re-reads each message afterwards and records `verifyStatus`. Mutation counts remain separate from verification: a move accepted by Mail.app can be `succeeded` while its destination is `applied_destination_unverified`. The receipt records `unverified`, returns `ok: false` with `code: "mutation_failed"`, and exits 6 so callers know the requested proof is incomplete. `ok` means "this command did what you asked and any requested verification completed", so check it, or check the exit code, before trusting a receipt.
 
 Bulk selection by query, sender, or domain lives under `messages batch` and needs `--yes` for archive, delete, and move unless `--dry-run` is set:
 

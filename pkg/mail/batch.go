@@ -44,6 +44,7 @@ type BatchResult struct {
 	Attempted    int         `json:"attempted"`
 	Succeeded    int         `json:"succeeded"`
 	Failed       int         `json:"failed"`
+	Unverified   int         `json:"unverified,omitempty"`
 	Skipped      int         `json:"skipped"`
 	Chunks       int         `json:"chunks,omitempty"`
 	Items        []BatchItem `json:"items"`
@@ -79,14 +80,22 @@ type BatchOptions struct {
 	Receipt *BatchJournal
 }
 
-// BatchFailedError reports how many items failed.
+// BatchFailedError reports mutation failures and requested verifications that
+// remained inconclusive after the mutation was applied.
 type BatchFailedError struct {
-	Action    string
-	Failed    int
-	Attempted int
+	Action     string
+	Failed     int
+	Unverified int
+	Attempted  int
 }
 
 func (e *BatchFailedError) Error() string {
+	if e.Failed == 0 && e.Unverified > 0 {
+		return fmt.Sprintf("%s applied for %d message(s), but verification was inconclusive for %d", e.Action, e.Attempted, e.Unverified)
+	}
+	if e.Unverified > 0 {
+		return fmt.Sprintf("%s failed for %d of %d message(s); verification was inconclusive for %d", e.Action, e.Failed, e.Attempted, e.Unverified)
+	}
 	return fmt.Sprintf("%s failed for %d of %d message(s)", e.Action, e.Failed, e.Attempted)
 }
 
@@ -319,25 +328,18 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 					result.Items = append(result.Items, item)
 					return result, err
 				}
+				result.Succeeded++
 				if opts.Verify {
 					verifyStatus, verifyErr := VerifyMutation(client, opts, item)
 					item.VerifyStatus = verifyStatus
 					if verifyErr != nil {
-						item.Status = "failed"
-						if isUnknownMutationError(client, verifyErr) {
-							item.Status = "unknown"
-						}
 						item.VerifyError = verifyErr.Error()
-						result.Failed++
-					} else {
-						result.Succeeded++
+						result.Unverified++
 					}
 					if err := opts.Receipt.Record("verification_result", journalItem(item)); err != nil {
 						result.Items = append(result.Items, item)
 						return result, err
 					}
-				} else {
-					result.Succeeded++
 				}
 			}
 			if opts.Progress != nil {
@@ -346,8 +348,8 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			result.Items = append(result.Items, item)
 		}
 	}
-	if result.Failed > 0 {
-		return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Attempted: result.Attempted}
+	if result.Failed > 0 || result.Unverified > 0 {
+		return result, &BatchFailedError{Action: opts.Action, Failed: result.Failed, Unverified: result.Unverified, Attempted: result.Attempted}
 	}
 	return result, nil
 }
@@ -368,7 +370,7 @@ func isUnknownMutationError(client *Client, err error) bool {
 
 func hasUnknownItem(items []BatchItem) bool {
 	for _, item := range items {
-		if item.Status == "unknown" {
+		if item.Status == "unknown" || item.VerifyStatus == "unknown_after_timeout" {
 			return true
 		}
 	}
@@ -508,12 +510,20 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		}
 		return summary
 	}
-	if r.Failed == 0 && r.Skipped == 0 {
+	if r.Failed == 0 && r.Unverified == 0 && r.Skipped == 0 {
 		return fmt.Sprintf("%s %s%s", verb, count, target)
 	}
-	summary := fmt.Sprintf("%s %d of %s%s", verb, r.Succeeded, count, target)
+	var summary string
+	if r.Failed == 0 && r.Succeeded == r.Matched-r.Skipped {
+		summary = fmt.Sprintf("%s %s%s", verb, countNoun(r.Succeeded, "message"), target)
+	} else {
+		summary = fmt.Sprintf("%s %d of %s%s", verb, r.Succeeded, count, target)
+	}
 	if r.Failed > 0 {
 		summary += fmt.Sprintf("; %d failed", r.Failed)
+	}
+	if r.Unverified > 0 {
+		summary += fmt.Sprintf("; %d unverified", r.Unverified)
 	}
 	if r.Skipped > 0 {
 		summary += fmt.Sprintf("; %d already there", r.Skipped)
@@ -544,7 +554,7 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 			return "already-in-destination", nil
 		}
 		if !item.Identity.valid() {
-			return "unknown_after_timeout", fmt.Errorf("stable identity was not captured before mutation")
+			return "applied_destination_unverified", fmt.Errorf("stable identity was not captured before mutation")
 		}
 		return verifyRelocationWithLookup(client.Context(), item, func() (verificationPresence, error) {
 			inSource, err := client.hasMessageIdentityForVerification(item.Account, item.SourceMailbox, item.Identity)
@@ -556,7 +566,7 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 				return verificationPresence{}, err
 			}
 			return verificationPresence{Source: inSource, Destination: inDestination}, nil
-		}, time.Sleep)
+		}, waitForVerificationBackoff)
 	case "delete":
 		inSource, err := present(item.SourceMailbox)
 		if err != nil {
