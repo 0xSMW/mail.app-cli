@@ -200,6 +200,30 @@ limit 1;
 		}
 		return nil, false, err
 	}
+	// "Archive" is provider-ambiguous. An exact Gmail system mailbox wins,
+	// but a literal Archive must beat the broad nested All Mail fallback so an
+	// iCloud/IMAP account cannot verify against an unrelated mailbox.
+	if len(rows) == 0 && normalizeMailboxAlias(mailboxName) == "archive" {
+		literalURL := "imap://" + account.ID + "/Archive"
+		query = fmt.Sprintf(`
+select
+	ROWID as ID,
+	url as URL,
+	total_count as TotalCount,
+	unread_count as UnreadCount
+from mailboxes
+where url = %s or url like %s
+order by case when url = %s then 0 else 1 end, ROWID
+limit 1;
+`, sqlQuote(literalURL), sqlQuote("imap://"+account.ID+"/%/Archive"), sqlQuote(literalURL))
+		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+			if isEnvelopeIndexUnavailable(err) {
+				c.warnEnvelopeIndexFallback(err)
+				return nil, false, nil
+			}
+			return nil, false, err
+		}
+	}
 	if len(rows) == 0 {
 		query = fmt.Sprintf(`
 select
@@ -230,9 +254,6 @@ limit 1;
 		Name:        mailboxLeafFromURL(rows[0].URL),
 		TotalCount:  rows[0].TotalCount,
 		UnreadCount: rows[0].UnreadCount,
-	}
-	if isArchiveAlias(mailboxName) {
-		mbox.Name = "All Mail"
 	}
 	return mbox, true, nil
 }

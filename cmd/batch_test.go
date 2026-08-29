@@ -86,7 +86,7 @@ func TestVerifyBatchMutationRefusesUncapturedIdentity(t *testing.T) {
 			status, err := mail.VerifyMutation(mail.NewClient(), batchOptions{Action: tt.action}, batchItem{
 				ID: "123", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: tt.target,
 			})
-			if err == nil || status != "unknown_after_timeout" {
+			if err == nil || status != "applied_destination_unverified" {
 				t.Fatalf("verifyBatchMutation() = (%q, %v), want uncaptured identity failure", status, err)
 			}
 		})
@@ -171,6 +171,42 @@ func TestWriteReceiptKeepsMutationFailureAuthoritative(t *testing.T) {
 	}
 	if envelope.OK || envelope.Code != string(clierr.CodeMutationFailed) || len(envelope.Notices) != 0 {
 		t.Fatalf("envelope = %+v, want mutation failure without report notice", envelope)
+	}
+}
+
+func TestWriteReceiptReportsAppliedMoveAndIncompleteVerificationSeparately(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages move", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousWriter := writer
+	writer = w
+	t.Cleanup(func() { writer = previousWriter })
+
+	result := batchResult{
+		Action: "move", Matched: 1, Attempted: 1, Succeeded: 1, Unverified: 1,
+		Items: []batchItem{{ID: "old", Status: "succeeded", VerifyStatus: "applied_destination_unverified", VerifyError: "mailbox not found: Archive"}},
+	}
+	mutationErr := &mail.BatchFailedError{Action: "move", Unverified: 1, Attempted: 1}
+	err = writeReceipt(result, batchOptions{Action: "move", TargetMailbox: "Archive"}, nil, mutationErr, "")
+	var failure *clierr.Error
+	if !errors.As(err, &failure) || failure.Code != clierr.CodeMutationFailed || !failure.Reported {
+		t.Fatalf("writeReceipt error = %#v, want reported incomplete verification", err)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+	var envelope output.Envelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("stdout is not a receipt envelope: %v\n%s", err, stdout.String())
+	}
+	data, ok := envelope.Data.(map[string]any)
+	if envelope.OK || envelope.Code != string(clierr.CodeMutationFailed) || envelope.ExitCode != 6 || !ok {
+		t.Fatalf("envelope = %+v, want mutation_failed receipt", envelope)
+	}
+	if data["succeeded"] != float64(1) || data["failed"] != float64(0) || data["unverified"] != float64(1) {
+		t.Fatalf("receipt data = %#v, want succeeded=1 failed=0 unverified=1", data)
 	}
 }
 

@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -197,7 +198,15 @@ limit 1;
 
 func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName string, identity StableIdentity) (bool, error) {
 	if identity.RFCMessageID != "" {
-		return c.hasRFCMessageIDInMailbox(accountName, mailboxName, identity.RFCMessageID)
+		found, err := c.hasRFCMessageIDInMailbox(accountName, mailboxName, identity.RFCMessageID)
+		if err == nil || !identity.hasFallback() {
+			return found, err
+		}
+		found, fallbackErr := c.HasMessageIdentityInMailbox(accountName, mailboxName, identity)
+		if fallbackErr != nil {
+			return false, errors.Join(err, fallbackErr)
+		}
+		return found, nil
 	}
 	if !identity.hasFallback() {
 		return false, fmt.Errorf("invalid stable identity")
