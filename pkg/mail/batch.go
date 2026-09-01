@@ -556,6 +556,16 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 		if !item.Identity.valid() {
 			return "applied_destination_unverified", fmt.Errorf("stable identity was not captured before mutation")
 		}
+		if isValidGmailInboxTransition(item) {
+			// Force Mail.app to reconcile the Gmail labels before the bounded
+			// settling loop decides whether INBOX stayed removed.
+			if err := client.SyncAccount(item.Account); err != nil {
+				if isVerificationTimeout(err) {
+					return "unknown_after_timeout", fmt.Errorf("sync before Gmail archive verification: %w", err)
+				}
+				return "applied_destination_unverified", fmt.Errorf("sync before Gmail archive verification: %w", err)
+			}
+		}
 		return verifyRelocationWithLookup(client.Context(), item, func() (verificationPresence, error) {
 			inSource, err := client.hasMessageIdentityForVerification(item.Account, item.SourceMailbox, item.Identity)
 			if err != nil {

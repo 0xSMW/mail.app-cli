@@ -181,6 +181,78 @@ func TestVerifyRelocationPollsDestinationLag(t *testing.T) {
 	}
 }
 
+func TestVerifyGmailArchiveWaitsForSourceToStayRemoved(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		if calls == len(verificationBackoff) {
+			return verificationPresence{Destination: true}, nil
+		}
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want settled Gmail destination with source absent", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRejectsDestinationWhileSourcePersists(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want persistent Gmail source rejected", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRejectsSourceThatReappearsAfterSync(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: calls == len(verificationBackoff), Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want regenerated Gmail source rejected", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRecognizesArchiveAlias(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	item.TargetMailbox = "Archive"
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want Gmail archive alias to require source absence", status, err, calls)
+	}
+}
+
+func TestGmailArchiveSyncTimeoutIsUnknown(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' 'execution error: AppleEvent timed out. (-1712)' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
+	item := verificationItem()
+	item.GmailInboxSource = true
+	status, err := VerifyMutation(NewClient(), BatchOptions{Action: "archive"}, item)
+	if status != "unknown_after_timeout" || err == nil {
+		t.Fatalf("verification = (%q, %v), want unknown_after_timeout", status, err)
+	}
+}
+
 func TestVerifyRelocationRetriesMailboxResolutionUntilRegeneratedDestinationAppears(t *testing.T) {
 	item := verificationItem()
 	item.ID = "old-mail-id"
@@ -305,14 +377,14 @@ func TestVerifyRelocationDoesNotAcceptSourceOnlyDisappearance(t *testing.T) {
 	}
 }
 
-func TestVerifyRelocationAcceptsExplicitGmailInboxLabelTransition(t *testing.T) {
+func TestVerifyRelocationRequiresGmailArchiveDestination(t *testing.T) {
 	item := verificationItem()
 	item.GmailInboxSource = true
 	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
 		return verificationPresence{}, nil
 	}, noVerificationPause)
-	if err != nil || status != "confirmed_source_removed" {
-		t.Fatalf("verification = (%q, %v), want confirmed_source_removed", status, err)
+	if status != "applied_destination_unverified" || err == nil {
+		t.Fatalf("verification = (%q, %v), want unverified without Gmail destination", status, err)
 	}
 }
 

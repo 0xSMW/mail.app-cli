@@ -107,6 +107,7 @@ type verificationLookup func() (verificationPresence, error)
 type verificationPause func(context.Context, time.Duration) error
 
 func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause verificationPause) (string, error) {
+	gmailInboxTransition := isValidGmailInboxTransition(item)
 	for attempt, delay := range verificationBackoff {
 		if attempt > 0 {
 			if err := pause(ctx, delay); err != nil {
@@ -126,15 +127,19 @@ func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup veri
 			}
 			return "applied_destination_unverified", err
 		}
-		if presence.Destination {
+		// Gmail's All Mail contains messages that still have the INBOX label,
+		// so destination presence alone cannot prove an archive succeeded. Let
+		// the full settling window elapse and decide from the final identity-based
+		// observation in case synchronization regenerates the local Mail row.
+		if presence.Destination && !gmailInboxTransition {
 			return "confirmed_destination", nil
-		}
-		if !presence.Source && isValidGmailInboxTransition(item) {
-			return "confirmed_source_removed", nil
 		}
 		if attempt == len(verificationBackoff)-1 {
 			if presence.Source {
 				return "present_in_source", fmt.Errorf("message still present in %s", item.SourceMailbox)
+			}
+			if presence.Destination && gmailInboxTransition {
+				return "confirmed_destination", nil
 			}
 			return "applied_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
 		}
@@ -184,5 +189,5 @@ func isAutomationTimeout(err error) bool {
 }
 
 func isValidGmailInboxTransition(item BatchItem) bool {
-	return item.GmailInboxSource && strings.EqualFold(item.SourceMailbox, "INBOX") && strings.EqualFold(item.TargetMailbox, "All Mail")
+	return item.GmailInboxSource && strings.EqualFold(item.SourceMailbox, "INBOX") && IsArchiveAlias(item.TargetMailbox)
 }
