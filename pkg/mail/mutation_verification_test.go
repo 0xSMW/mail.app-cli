@@ -61,7 +61,7 @@ func TestDryRunVerifySkipsLiveIdentityCapture(t *testing.T) {
 	}
 }
 
-func TestRFCIdentityLookupWinsOverDuplicateFallback(t *testing.T) {
+func TestRFCOnlyIdentityRefusesMailboxWideLookup(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "osascript.log")
 	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$MAIL_APP_CLI_TEST_LOG\"\nprintf true\n"
@@ -71,21 +71,18 @@ func TestRFCIdentityLookupWinsOverDuplicateFallback(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
 	t.Setenv("MAIL_APP_CLI_TEST_LOG", logPath)
-	identity := StableIdentity{RFCMessageID: "<unique@example.com>", Sender: "duplicate@example.com", Subject: "duplicate", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}
+	identity := StableIdentity{RFCMessageID: "<unique@example.com>"}
 	found, err := NewClient().hasMessageIdentityForVerification("Work", "Processed", identity)
-	if err != nil || !found {
-		t.Fatalf("RFC lookup = (%v, %v)", found, err)
+	if err == nil || found || !strings.Contains(err.Error(), "refusing mailbox-wide RFC lookup") {
+		t.Fatalf("RFC-only lookup = (%v, %v), want bounded refusal", found, err)
 	}
-	logged, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(logged), `const wanted = "\u003cunique@example.com\u003e"`) || strings.Contains(string(logged), "duplicate@example.com") {
-		t.Fatalf("lookup script did not use RFC identity exclusively: %s", logged)
+	logged, readErr := os.ReadFile(logPath)
+	if readErr == nil && strings.Contains(string(logged), `const wanted =`) {
+		t.Fatalf("RFC-only verification enumerated mailbox: %s", logged)
 	}
 }
 
-func TestRFCIdentityLookupFallsBackToEnvelopeIndexAfterArchiveResolutionError(t *testing.T) {
+func TestCompleteIdentityUsesEnvelopeIndexWithoutRFCMailboxScan(t *testing.T) {
 	binDir := t.TempDir()
 	osaLog := filepath.Join(t.TempDir(), "osascript.log")
 	sqlLog := filepath.Join(t.TempDir(), "sqlite.log")
@@ -126,8 +123,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(osaCalls), `const wanted = "\u003cstable@example.com\u003e"`) {
-		t.Fatalf("RFC lookup was not attempted first: %s", osaCalls)
+	if strings.Contains(string(osaCalls), `const wanted =`) {
+		t.Fatalf("complete identity triggered mailbox-wide RFC lookup: %s", osaCalls)
 	}
 	sqlCalls, err := os.ReadFile(sqlLog)
 	if err != nil {
@@ -357,8 +354,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(osaCalls), "const wanted ="); got != len(verificationBackoff) {
-		t.Fatalf("RFC verification attempts = %d, want %d", got, len(verificationBackoff))
+	if got := strings.Count(string(osaCalls), "const messages = mbox.messages()"); got != 0 {
+		t.Fatalf("mailbox-wide verification attempts = %d, want none", got)
 	}
 	events := readJournalEvents(t, journal.Path())
 	if got := events[len(events)-1]["event"]; got != "completed" {

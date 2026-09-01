@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -51,6 +52,10 @@ func (identity StableIdentity) hasFallback() bool {
 
 func (identity StableIdentity) valid() bool {
 	return identity.RFCMessageID != "" || identity.hasFallback()
+}
+
+func (identity StableIdentity) fallbackKey() string {
+	return identity.Sender + "\x00" + identity.Subject + "\x00" + identity.DateSent + "\x00" + strconv.Itoa(identity.MessageSize)
 }
 
 func (c *Client) captureStableIdentity(item BatchItem) (StableIdentity, error) {

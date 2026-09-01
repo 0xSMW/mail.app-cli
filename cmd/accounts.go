@@ -47,7 +47,7 @@ var accountsShowCmd = &cobra.Command{
 		// account-list cache is intentionally long-lived, so use a separate
 		// client to bypass both its on-disk entry and any in-process cache
 		// primed from it.
-		accounts, err := mail.NewClient().GetAccountsJSON()
+		accounts, err := mail.NewClient().WithContext(cmd.Context()).GetAccountsJSON()
 		if err != nil {
 			return fmt.Errorf("get accounts: %w", err)
 		}

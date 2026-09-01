@@ -48,7 +48,7 @@ ctrl+r refresh, ? help, q quit.`,
 			opts.Account = account
 			opts.Mailbox = mailboxInScope()
 		}
-		return tui.Run(mail.NewClient(), opts)
+		return tui.Run(mail.NewClient().WithContext(cmd.Context()), opts)
 	},
 }
 

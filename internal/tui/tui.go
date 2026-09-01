@@ -119,8 +119,8 @@ type model struct {
 }
 
 func newModel(client *mail.Client, opts Options) model {
-	ctx, cancel := context.WithCancel(context.Background())
-	writeCtx, stopWrite := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(client.Context())
+	writeCtx, stopWrite := context.WithCancel(client.Context())
 	m := model{
 		client:      client,
 		ctx:         ctx,
@@ -142,10 +142,19 @@ func Run(client *mail.Client, opts Options) error {
 	m := newModel(client, opts)
 	p := tea.NewProgram(m)
 	client.SetWarn(func(text string) { p.Send(warnMsg{text: text}) })
+	if done := client.Context().Done(); done != nil {
+		go func() {
+			<-done
+			p.Quit()
+		}()
+	}
 	final, err := p.Run()
 	m.cancel()
 	m.stopWrite()
 	if err != nil {
+		return err
+	}
+	if err := client.Context().Err(); err != nil {
 		return err
 	}
 	if fm, ok := final.(model); ok && fm.fatal != nil {

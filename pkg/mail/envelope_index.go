@@ -443,6 +443,86 @@ limit 1;
 	return &messages[0], nil
 }
 
+// getMessageEnvelopesForVerification reads every requested local message ID
+// from one mailbox-scoped Envelope Index snapshot. Its cost depends on the
+// batch size, not on the total number of messages in the mailbox.
+func (c *Client) getMessageEnvelopesForVerification(accountName, mailboxName string, messageIDs []string) (map[string]Message, error) {
+	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s", mailboxName)
+	}
+	numeric := make([]string, 0, len(messageIDs))
+	for _, messageID := range messageIDs {
+		if id, parseErr := strconv.ParseInt(strings.TrimSpace(messageID), 10, 64); parseErr == nil {
+			numeric = append(numeric, strconv.FormatInt(id, 10))
+		}
+	}
+	if len(numeric) == 0 {
+		return map[string]Message{}, nil
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
+where %s
+	and m.deleted = 0
+	and m.ROWID in (%s);
+`, indexMailboxMembershipCondition(mbox), strings.Join(numeric, ", "))
+	var rows []indexMessage
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return nil, err
+	}
+	messages := indexMessagesToMessages(rows)
+	byID := make(map[string]Message, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	return byID, nil
+}
+
+func (c *Client) getIdentityCountsForVerification(accountName, mailboxName string, identities []StableIdentity) (map[string]int, error) {
+	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s", mailboxName)
+	}
+	conditions := make([]string, 0, len(identities))
+	seen := make(map[string]bool)
+	for _, identity := range identities {
+		if !identity.hasFallback() {
+			return nil, fmt.Errorf("stable identity lacks complete indexed metadata")
+		}
+		key := identity.fallbackKey()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		conditions = append(conditions, fmt.Sprintf(`(coalesce(s.subject, '') = %s
+		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
+		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
+		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
+	}
+	if len(conditions) == 0 {
+		return map[string]int{}, nil
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
+where %s
+	and m.deleted = 0
+	and (%s);
+`, indexMailboxMembershipCondition(mbox), strings.Join(conditions, " or "))
+	var rows []indexMessage
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int, len(rows))
+	for _, message := range indexMessagesToMessages(rows) {
+		counts[StableIdentityFromMessage(message).fallbackKey()]++
+	}
+	return counts, nil
+}
+
 func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *indexMailbox, limit int, since string) ([]Message, error) {
 	if limit <= 0 {
 		limit = 50

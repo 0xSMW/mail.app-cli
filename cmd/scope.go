@@ -47,7 +47,7 @@ func requireAccount() (string, error) {
 	// a command silently scoped to an account after another account is added or
 	// enabled. A new client also bypasses any in-process cache primed from that
 	// disk entry.
-	accounts, err := mail.NewClient().GetAccountsJSON()
+	accounts, err := mail.NewClient().WithContext(mailClient.Context()).GetAccountsJSON()
 	if err != nil {
 		return "", err
 	}
