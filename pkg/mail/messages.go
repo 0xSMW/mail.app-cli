@@ -360,16 +360,20 @@ const mbox = %s;
 if (mbox === null) {
 	throw new Error('mailbox not found: ' + requestedMailbox);
 }
+
 // Force resolution so a stale mailbox object remains an automation error.
 mbox.name();
 
-// Enumerate strictly. This avoids treating any failed byId lookup as absence.
-const allIds = mbox.messages.id();
-const targetIdx = allIds.findIndex(id => String(id) === '%s');
 let msg = null;
-if (targetIdx >= 0) {
-	msg = mbox.messages.at(targetIdx);
+
+// Verification callers only use this read while the pre-mutation local ID is
+// known to exist. Resolve that ID directly so large mailboxes are never
+// enumerated merely to capture stable identity or state.
+try {
+	msg = mbox.messages.byId(Number('%s'));
 	msg.id();
+} catch (e) {
+	throw new Error('message not found by id: %s');
 }
 
 if (msg !== null) {
@@ -408,7 +412,7 @@ if (msg !== null) {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -421,6 +425,48 @@ JSON.stringify(result);
 	var message Message
 	if err := json.Unmarshal([]byte(output), &message); err != nil {
 		return nil, fmt.Errorf("failed to parse verification message JSON: %w", err)
+	}
+	return &message, nil
+}
+
+// GetMessageStateForVerificationJSON performs a bounded ID query through
+// Mail.app. It is the verification fallback when the Envelope Index is not
+// available; it never enumerates all IDs in the mailbox.
+func (c *Client) GetMessageStateForVerificationJSON(accountName, mailboxName, messageID string) (*Message, error) {
+	script := fmt.Sprintf(`
+const mail = Application('Mail');
+const requestedMailbox = '%s';
+%s
+const acc = mail.accounts.byName('%s');
+acc.name();
+const mbox = %s;
+if (mbox === null) throw new Error('mailbox not found: ' + requestedMailbox);
+mbox.name();
+const matches = mbox.messages.whose({id: {_equals: Number('%s')}})();
+if (matches.length > 1) throw new Error('message ID is ambiguous: %s');
+let result = null;
+if (matches.length === 1) {
+	const msg = matches[0];
+	result = {
+		id: String(msg.id()),
+		read: msg.readStatus(),
+		flagged: msg.flaggedStatus(),
+		mailbox: mbox.name(),
+		account: acc.name()
+	};
+}
+JSON.stringify(result);
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
+	output, err := c.runJXA(script)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(output) == "null" {
+		return nil, nil
+	}
+	var message Message
+	if err := json.Unmarshal([]byte(output), &message); err != nil {
+		return nil, fmt.Errorf("failed to parse verification state JSON: %w", err)
 	}
 	return &message, nil
 }

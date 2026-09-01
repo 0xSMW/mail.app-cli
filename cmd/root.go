@@ -1,11 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/config"
@@ -15,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "2.1.2"
+const version = "2.1.3"
 
 const (
 	groupMail   = "mail"
@@ -90,7 +93,11 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	rootCmd.SetArgs(args)
 	rootCmd.SetOut(stdout)
 	rootCmd.SetErr(stderr)
-	err := rootCmd.Execute()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	setCommandContext(rootCmd, ctx)
+	defer setCommandContext(rootCmd, context.Background())
+	err := rootCmd.ExecuteContext(ctx)
 	if err == nil {
 		return 0
 	}
@@ -109,6 +116,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 	w.Error(cerr)
 	return clierr.ExitCode(cerr.Code)
+}
+
+func setCommandContext(cmd *cobra.Command, ctx context.Context) {
+	cmd.SetContext(ctx)
+	for _, child := range cmd.Commands() {
+		setCommandContext(child, ctx)
+	}
 }
 
 // resetCommandFlags restores every registered flag value and Changed bit on a
@@ -269,7 +283,7 @@ func prepare(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	mailClient = mail.NewClient()
+	mailClient = mail.NewClient().WithContext(cmd.Context())
 	mailClient.SetWarn(writer.AddNotice)
 	return nil
 }

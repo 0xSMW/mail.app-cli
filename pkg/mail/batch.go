@@ -184,6 +184,21 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		return result, err
 	}
 	defer func() {
+		if opts.Verify && client.Done() != nil {
+			for i := range result.Items {
+				item := &result.Items[i]
+				if item.Status != "succeeded" || item.VerifyStatus != "" {
+					continue
+				}
+				item.VerifyStatus = "unknown_after_timeout"
+				item.VerifyError = "verification not completed: " + client.Done().Error()
+				result.Unverified++
+				if err := opts.Receipt.Record("verification_result", journalItem(*item)); err != nil {
+					result.JournalError = err.Error()
+					retErr = errors.Join(retErr, err)
+				}
+			}
+		}
 		result.EndedAt = time.Now().Format(time.RFC3339)
 		terminal := "completed"
 		if client.Done() != nil || isUnknownMutationError(client, retErr) || hasUnknownItem(result.Items) {
@@ -329,23 +344,32 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 					return result, err
 				}
 				result.Succeeded++
-				if opts.Verify {
-					verifyStatus, verifyErr := VerifyMutation(client, opts, item)
-					item.VerifyStatus = verifyStatus
-					if verifyErr != nil {
-						item.VerifyError = verifyErr.Error()
-						result.Unverified++
-					}
-					if err := opts.Receipt.Record("verification_result", journalItem(item)); err != nil {
-						result.Items = append(result.Items, item)
-						return result, err
-					}
-				}
 			}
 			if opts.Progress != nil {
 				fmt.Fprintf(opts.Progress, "%s: %d/%d %s %s\n", opts.Action, result.Attempted, len(items), item.ID, item.Status)
 			}
 			result.Items = append(result.Items, item)
+		}
+	}
+	if opts.Verify {
+		if opts.Progress != nil {
+			fmt.Fprintf(opts.Progress, "%s: verifying %d applied message(s)\n", opts.Action, result.Succeeded)
+		}
+		verified := VerifyMutations(client, opts, result.Items)
+		for i := range verified {
+			if verified[i].Status != "succeeded" {
+				continue
+			}
+			result.Items[i] = verified[i]
+			if verified[i].VerifyError != "" {
+				result.Unverified++
+			}
+			if err := opts.Receipt.Record("verification_result", journalItem(verified[i])); err != nil {
+				return result, err
+			}
+			if opts.Progress != nil {
+				fmt.Fprintf(opts.Progress, "%s: verified %d/%d %s %s\n", opts.Action, i+1, len(verified), verified[i].ID, verified[i].VerifyStatus)
+			}
 		}
 	}
 	if result.Failed > 0 || result.Unverified > 0 {
@@ -538,16 +562,217 @@ func countNoun(n int, noun string) string {
 	return strconv.Itoa(n) + " " + noun + "s"
 }
 
-// VerifyMutation re-reads a message after a mutation and reports whether
-// Mail.app shows the requested end state.
-func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, error) {
-	present := func(mailbox string) (bool, error) {
-		message, err := client.GetMessageDetailsForVerificationJSON(item.Account, mailbox, item.ID)
-		if err != nil {
-			return false, err
+// VerifyMutations verifies a completed mutation batch. State-only mutations
+// share one indexed snapshot per account/mailbox instead of enumerating the
+// entire Mail.app mailbox once per item.
+func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []BatchItem {
+	verified := append([]BatchItem(nil), items...)
+	type groupKey struct{ account, mailbox string }
+	groups := make(map[groupKey][]int)
+	if opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" {
+		for i := range verified {
+			if verified[i].Status == "succeeded" {
+				key := groupKey{verified[i].Account, verified[i].SourceMailbox}
+				groups[key] = append(groups[key], i)
+			}
 		}
-		return message != nil, nil
+		if len(groups) == 0 {
+			return verified
+		}
+		snapshots := make(map[groupKey]map[string]Message)
+		snapshotErrors := make(map[groupKey]error)
+		for attempt, delay := range verificationBackoff {
+			if attempt > 0 {
+				if err := waitForVerificationBackoff(client.Context(), delay); err != nil {
+					for key := range groups {
+						snapshotErrors[key] = err
+					}
+					break
+				}
+			}
+			for key, indices := range groups {
+				ids := make([]string, 0, len(indices))
+				for _, index := range indices {
+					ids = append(ids, verified[index].ID)
+				}
+				snapshots[key], snapshotErrors[key] = client.getMessageEnvelopesForVerification(key.account, key.mailbox, ids)
+			}
+		}
+		for key, indices := range groups {
+			for _, index := range indices {
+				item := &verified[index]
+				if err := snapshotErrors[key]; err != nil {
+					message, fallbackErr := client.GetMessageStateForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
+					if fallbackErr == nil {
+						if message != nil {
+							snapshots[key] = map[string]Message{item.ID: *message}
+						} else {
+							snapshots[key] = map[string]Message{}
+						}
+					} else {
+						item.VerifyStatus = "verification-failed"
+						if isVerificationTimeout(fallbackErr) {
+							item.VerifyStatus = "unknown_after_timeout"
+						}
+						item.VerifyError = fallbackErr.Error()
+						continue
+					}
+				}
+				message, present := snapshots[key][item.ID]
+				switch opts.Action {
+				case "delete":
+					if present {
+						item.VerifyStatus = "present-in-source"
+						item.VerifyError = fmt.Sprintf("message still present in %s", item.SourceMailbox)
+					} else {
+						item.VerifyStatus = "absent-from-source"
+					}
+				case "mark":
+					item.VerifyStatus, item.VerifyError = verifyBoolState(present, message.Read, opts.Read, "read")
+				case "flag":
+					item.VerifyStatus, item.VerifyError = verifyBoolState(present, message.Flagged, opts.Flagged, "flagged")
+				}
+			}
+		}
+		return verified
 	}
+
+	syncErrors := make(map[string]error)
+	successful := 0
+	for _, item := range verified {
+		if item.Status == "succeeded" {
+			successful++
+		}
+		if item.Status == "succeeded" && isValidGmailInboxTransition(item) {
+			if _, seen := syncErrors[item.Account]; !seen {
+				syncErrors[item.Account] = client.SyncAccount(item.Account)
+			}
+		}
+	}
+	if successful == 0 {
+		return verified
+	}
+	type relocationRef struct {
+		index  int
+		source bool
+	}
+	identityGroups := make(map[groupKey][]relocationRef)
+	for i, item := range verified {
+		if item.Status != "succeeded" || syncErrors[item.Account] != nil {
+			continue
+		}
+		identityGroups[groupKey{item.Account, item.SourceMailbox}] = append(identityGroups[groupKey{item.Account, item.SourceMailbox}], relocationRef{index: i, source: true})
+		identityGroups[groupKey{item.Account, item.TargetMailbox}] = append(identityGroups[groupKey{item.Account, item.TargetMailbox}], relocationRef{index: i})
+	}
+	presences := make([]verificationPresence, len(verified))
+	lookupErrors := make([]error, len(verified))
+	for attempt, delay := range verificationBackoff {
+		if attempt > 0 {
+			if err := waitForVerificationBackoff(client.Context(), delay); err != nil {
+				for i := range verified {
+					if verified[i].Status == "succeeded" {
+						lookupErrors[i] = err
+					}
+				}
+				break
+			}
+		}
+		presences = make([]verificationPresence, len(verified))
+		lookupErrors = make([]error, len(verified))
+		for key, refs := range identityGroups {
+			identities := make([]StableIdentity, 0, len(refs))
+			for _, ref := range refs {
+				identities = append(identities, verified[ref.index].Identity)
+			}
+			counts, groupErr := client.getIdentityCountsForVerification(key.account, key.mailbox, identities)
+			for _, ref := range refs {
+				item := verified[ref.index]
+				present := false
+				err := groupErr
+				if err == nil {
+					count := counts[item.Identity.fallbackKey()]
+					switch count {
+					case 0:
+					case 1:
+						present = true
+					default:
+						present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
+					}
+				} else if !isVerificationTimeout(err) {
+					present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
+				}
+				if err != nil {
+					lookupErrors[ref.index] = err
+					continue
+				}
+				if ref.source {
+					presences[ref.index].Source = present
+				} else {
+					presences[ref.index].Destination = present
+				}
+			}
+		}
+	}
+	for i := range verified {
+		item := &verified[i]
+		if item.Status != "succeeded" {
+			continue
+		}
+		if syncErr, ok := syncErrors[item.Account]; ok && syncErr != nil {
+			item.VerifyStatus, item.VerifyError = classifyGmailSyncError(syncErr)
+			continue
+		}
+		if err := lookupErrors[i]; err != nil {
+			item.VerifyStatus = "applied_destination_unverified"
+			if isVerificationTimeout(err) {
+				item.VerifyStatus = "unknown_after_timeout"
+			}
+			item.VerifyError = err.Error()
+			continue
+		}
+		presence := presences[i]
+		switch {
+		case presence.Source:
+			item.VerifyStatus = "present_in_source"
+			item.VerifyError = fmt.Sprintf("message still present in %s", item.SourceMailbox)
+		case presence.Destination:
+			item.VerifyStatus = "confirmed_destination"
+		default:
+			item.VerifyStatus = "applied_destination_unverified"
+			item.VerifyError = fmt.Sprintf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
+		}
+	}
+	return verified
+}
+
+func verifyBoolState(present, actual, expected bool, field string) (string, string) {
+	if !present {
+		return "verification-failed", "message not found after mutation"
+	}
+	if actual == expected {
+		return "matched", ""
+	}
+	return "mismatch", field + " status mismatch"
+}
+
+func classifyGmailSyncError(err error) (string, string) {
+	wrapped := fmt.Errorf("sync before Gmail archive verification: %w", err)
+	if isVerificationTimeout(err) {
+		return "unknown_after_timeout", wrapped.Error()
+	}
+	return "applied_destination_unverified", wrapped.Error()
+}
+
+// VerifyMutation verifies one mutation for library callers. RunBatch uses
+// VerifyMutations so a whole batch can share indexed snapshots and Gmail sync.
+func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, error) {
+	if item.Status == "" {
+		item.Status = "succeeded"
+	}
+	return verifyMutation(client, opts, item, true)
+}
+
+func verifyMutation(client *Client, opts BatchOptions, item BatchItem, syncGmail bool) (string, error) {
 	switch opts.Action {
 	case "archive", "move":
 		if item.TargetMailbox == "" || strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
@@ -555,6 +780,16 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 		}
 		if !item.Identity.valid() {
 			return "applied_destination_unverified", fmt.Errorf("stable identity was not captured before mutation")
+		}
+		if syncGmail && isValidGmailInboxTransition(item) {
+			// Force Mail.app to reconcile the Gmail labels before the bounded
+			// settling loop decides whether INBOX stayed removed.
+			if err := client.SyncAccount(item.Account); err != nil {
+				if isVerificationTimeout(err) {
+					return "unknown_after_timeout", fmt.Errorf("sync before Gmail archive verification: %w", err)
+				}
+				return "applied_destination_unverified", fmt.Errorf("sync before Gmail archive verification: %w", err)
+			}
 		}
 		return verifyRelocationWithLookup(client.Context(), item, func() (verificationPresence, error) {
 			inSource, err := client.hasMessageIdentityForVerification(item.Account, item.SourceMailbox, item.Identity)
@@ -567,36 +802,15 @@ func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, 
 			}
 			return verificationPresence{Source: inSource, Destination: inDestination}, nil
 		}, waitForVerificationBackoff)
-	case "delete":
-		inSource, err := present(item.SourceMailbox)
-		if err != nil {
-			return "verification-failed", err
-		}
-		if inSource {
-			return "present-in-source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-		}
-		return "absent-from-source", nil
 	}
-	message, err := client.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
-	if err != nil {
-		return "verification-failed", err
+	verified := VerifyMutations(client, opts, []BatchItem{item})
+	if len(verified) != 1 {
+		return "verification-failed", fmt.Errorf("verification snapshot returned no item")
 	}
-	if message == nil {
-		return "verification-failed", fmt.Errorf("message not found after mutation")
+	if verified[0].VerifyError != "" {
+		return verified[0].VerifyStatus, errors.New(verified[0].VerifyError)
 	}
-	if opts.Action == "mark" {
-		if message.Read == opts.Read {
-			return "matched", nil
-		}
-		return "mismatch", fmt.Errorf("read status mismatch")
-	}
-	if opts.Action == "flag" {
-		if message.Flagged == opts.Flagged {
-			return "matched", nil
-		}
-		return "mismatch", fmt.Errorf("flagged status mismatch")
-	}
-	return "unchecked", nil
+	return verified[0].VerifyStatus, nil
 }
 
 func normalizedChunkSize(total, requested int) int {

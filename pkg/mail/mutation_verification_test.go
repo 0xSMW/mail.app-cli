@@ -61,7 +61,7 @@ func TestDryRunVerifySkipsLiveIdentityCapture(t *testing.T) {
 	}
 }
 
-func TestRFCIdentityLookupWinsOverDuplicateFallback(t *testing.T) {
+func TestRFCOnlyIdentityRefusesMailboxWideLookup(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "osascript.log")
 	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$MAIL_APP_CLI_TEST_LOG\"\nprintf true\n"
@@ -71,21 +71,18 @@ func TestRFCIdentityLookupWinsOverDuplicateFallback(t *testing.T) {
 	t.Setenv("PATH", binDir)
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
 	t.Setenv("MAIL_APP_CLI_TEST_LOG", logPath)
-	identity := StableIdentity{RFCMessageID: "<unique@example.com>", Sender: "duplicate@example.com", Subject: "duplicate", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}
+	identity := StableIdentity{RFCMessageID: "<unique@example.com>"}
 	found, err := NewClient().hasMessageIdentityForVerification("Work", "Processed", identity)
-	if err != nil || !found {
-		t.Fatalf("RFC lookup = (%v, %v)", found, err)
+	if err == nil || found || !strings.Contains(err.Error(), "refusing mailbox-wide RFC lookup") {
+		t.Fatalf("RFC-only lookup = (%v, %v), want bounded refusal", found, err)
 	}
-	logged, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(logged), `const wanted = "\u003cunique@example.com\u003e"`) || strings.Contains(string(logged), "duplicate@example.com") {
-		t.Fatalf("lookup script did not use RFC identity exclusively: %s", logged)
+	logged, readErr := os.ReadFile(logPath)
+	if readErr == nil && strings.Contains(string(logged), `const wanted =`) {
+		t.Fatalf("RFC-only verification enumerated mailbox: %s", logged)
 	}
 }
 
-func TestRFCIdentityLookupFallsBackToEnvelopeIndexAfterArchiveResolutionError(t *testing.T) {
+func TestCompleteIdentityUsesEnvelopeIndexWithoutRFCMailboxScan(t *testing.T) {
 	binDir := t.TempDir()
 	osaLog := filepath.Join(t.TempDir(), "osascript.log")
 	sqlLog := filepath.Join(t.TempDir(), "sqlite.log")
@@ -126,8 +123,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(osaCalls), `const wanted = "\u003cstable@example.com\u003e"`) {
-		t.Fatalf("RFC lookup was not attempted first: %s", osaCalls)
+	if strings.Contains(string(osaCalls), `const wanted =`) {
+		t.Fatalf("complete identity triggered mailbox-wide RFC lookup: %s", osaCalls)
 	}
 	sqlCalls, err := os.ReadFile(sqlLog)
 	if err != nil {
@@ -178,6 +175,78 @@ func TestVerifyRelocationPollsDestinationLag(t *testing.T) {
 	}, noVerificationPause)
 	if err != nil || status != "confirmed_destination" || calls != 3 {
 		t.Fatalf("verification = (%q, %v), calls=%d", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveWaitsForSourceToStayRemoved(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		if calls == len(verificationBackoff) {
+			return verificationPresence{Destination: true}, nil
+		}
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want settled Gmail destination with source absent", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRejectsDestinationWhileSourcePersists(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want persistent Gmail source rejected", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRejectsSourceThatReappearsAfterSync(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: calls == len(verificationBackoff), Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want regenerated Gmail source rejected", status, err, calls)
+	}
+}
+
+func TestVerifyGmailArchiveRecognizesArchiveAlias(t *testing.T) {
+	item := verificationItem()
+	item.GmailInboxSource = true
+	item.TargetMailbox = "Archive"
+	calls := 0
+	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
+		calls++
+		return verificationPresence{Source: true, Destination: true}, nil
+	}, noVerificationPause)
+	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
+		t.Fatalf("verification = (%q, %v), calls=%d; want Gmail archive alias to require source absence", status, err, calls)
+	}
+}
+
+func TestGmailArchiveSyncTimeoutIsUnknown(t *testing.T) {
+	binDir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' 'execution error: AppleEvent timed out. (-1712)' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
+	item := verificationItem()
+	item.GmailInboxSource = true
+	status, err := VerifyMutation(NewClient(), BatchOptions{Action: "archive"}, item)
+	if status != "unknown_after_timeout" || err == nil {
+		t.Fatalf("verification = (%q, %v), want unknown_after_timeout", status, err)
 	}
 }
 
@@ -285,8 +354,8 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(osaCalls), "const wanted ="); got != len(verificationBackoff) {
-		t.Fatalf("RFC verification attempts = %d, want %d", got, len(verificationBackoff))
+	if got := strings.Count(string(osaCalls), "const messages = mbox.messages()"); got != 0 {
+		t.Fatalf("mailbox-wide verification attempts = %d, want none", got)
 	}
 	events := readJournalEvents(t, journal.Path())
 	if got := events[len(events)-1]["event"]; got != "completed" {
@@ -305,14 +374,14 @@ func TestVerifyRelocationDoesNotAcceptSourceOnlyDisappearance(t *testing.T) {
 	}
 }
 
-func TestVerifyRelocationAcceptsExplicitGmailInboxLabelTransition(t *testing.T) {
+func TestVerifyRelocationRequiresGmailArchiveDestination(t *testing.T) {
 	item := verificationItem()
 	item.GmailInboxSource = true
 	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
 		return verificationPresence{}, nil
 	}, noVerificationPause)
-	if err != nil || status != "confirmed_source_removed" {
-		t.Fatalf("verification = (%q, %v), want confirmed_source_removed", status, err)
+	if status != "applied_destination_unverified" || err == nil {
+		t.Fatalf("verification = (%q, %v), want unverified without Gmail destination", status, err)
 	}
 }
 

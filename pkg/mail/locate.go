@@ -2,7 +2,6 @@ package mail
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -170,15 +169,20 @@ func (c *Client) LocateMessage(id string) (*MessageLocation, error) {
 // so a header-only identity is resolved through Mail.app by the caller; the
 // index path intentionally requires the complete guarded fallback.
 func (c *Client) HasMessageIdentityInMailbox(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	matches, err := c.countMessageIdentityInMailbox(accountName, mailboxName, identity)
+	return matches > 0, err
+}
+
+func (c *Client) countMessageIdentityInMailbox(accountName, mailboxName string, identity StableIdentity) (int, error) {
 	if !identity.hasFallback() {
-		return false, fmt.Errorf("Envelope Index cannot look up an RFC Message-ID directly")
+		return 0, fmt.Errorf("Envelope Index cannot look up an RFC Message-ID directly")
 	}
 	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if !ok {
-		return false, fmt.Errorf("mailbox not found: %s", mailboxName)
+		return 0, fmt.Errorf("mailbox not found: %s", mailboxName)
 	}
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
@@ -187,37 +191,44 @@ where %s
 	and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
 	and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
 	and m.size = %d
-limit 1;
+limit 2;
 `, indexMailboxMembershipCondition(mbox), sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize)
 	var rows []indexMessage
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		return false, err
+		return 0, err
 	}
-	return len(rows) > 0, nil
+	return len(rows), nil
 }
 
 func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	// A unique complete tuple is safe to use without enumerating a potentially
+	// enormous Mail.app mailbox. Ambiguous or incomplete identities fail closed;
+	// verification never falls back to a mailbox-wide RFC scan.
+	if identity.hasFallback() {
+		matches, err := c.countMessageIdentityInMailbox(accountName, mailboxName, identity)
+		if err != nil {
+			if isVerificationTimeout(err) {
+				return false, err
+			}
+			return c.hasMessageIdentityWithWhoseJXA(accountName, mailboxName, identity)
+		}
+		switch matches {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		default:
+			return false, fmt.Errorf("stable identity is ambiguous in %s", mailboxName)
+		}
+	}
 	if identity.RFCMessageID != "" {
-		found, err := c.hasRFCMessageIDInMailbox(accountName, mailboxName, identity.RFCMessageID)
-		if err == nil || !identity.hasFallback() {
-			return found, err
-		}
-		found, fallbackErr := c.HasMessageIdentityInMailbox(accountName, mailboxName, identity)
-		if fallbackErr != nil {
-			return false, errors.Join(err, fallbackErr)
-		}
-		return found, nil
+		return false, fmt.Errorf("stable identity lacks complete indexed metadata; refusing mailbox-wide RFC lookup in %s", mailboxName)
 	}
-	if !identity.hasFallback() {
-		return false, fmt.Errorf("invalid stable identity")
-	}
-	return c.HasMessageIdentityInMailbox(accountName, mailboxName, identity)
+	return false, fmt.Errorf("invalid stable identity")
 }
 
-// hasRFCMessageIDInMailbox is deliberately mailbox-scoped.  A matching
-// fallback tuple elsewhere must never override a captured RFC Message-ID.
-func (c *Client) hasRFCMessageIDInMailbox(accountName, mailboxName, rfcMessageID string) (bool, error) {
-	encoded, err := json.Marshal(rfcMessageID)
+func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	identityJSON, err := json.Marshal(identity)
 	if err != nil {
 		return false, err
 	}
@@ -225,27 +236,39 @@ func (c *Client) hasRFCMessageIDInMailbox(accountName, mailboxName, rfcMessageID
 const mail = Application('Mail');
 const requestedMailbox = '%s';
 %s
+%s
 const wanted = %s;
 const acc = mail.accounts.byName('%s');
 acc.name();
 const mbox = %s;
 if (mbox === null) throw new Error('mailbox not found: ' + requestedMailbox);
-const messages = mbox.messages();
-let found = false;
-for (let i = 0; i < messages.length; i++) {
-	if (rfcMessageId(messages[i]) === wanted) { found = true; break; }
+mbox.name();
+const candidates = mbox.messages.whose({subject: {_equals: wanted.subject}})();
+const wantedSent = Date.parse(wanted.dateSent);
+let matches = 0;
+for (let i = 0; i < candidates.length && matches < 2; i++) {
+	const msg = candidates[i];
+	if ((msg.sender() || '').trim() !== wanted.sender) continue;
+	const actualSent = (msg.dateSent() || new Date(0)).getTime();
+	if (!Number.isFinite(wantedSent) || actualSent !== wantedSent) continue;
+	if (msg.messageSize() !== wanted.messageSize) continue;
+	if (wanted.rfcMessageId && rfcMessageId(msg) !== wanted.rfcMessageId) continue;
+	matches++;
 }
-JSON.stringify(found);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), string(encoded), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
+JSON.stringify(matches);
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaRFCMessageIDHelper(), string(identityJSON), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 	output, err := c.runJXA(script)
 	if err != nil {
 		return false, err
 	}
-	var found bool
-	if err := json.Unmarshal([]byte(output), &found); err != nil {
-		return false, fmt.Errorf("parse RFC Message-ID lookup: %w", err)
+	var matches int
+	if err := json.Unmarshal([]byte(output), &matches); err != nil {
+		return false, fmt.Errorf("parse bounded identity lookup: %w", err)
 	}
-	return found, nil
+	if matches > 1 {
+		return false, fmt.Errorf("stable identity is ambiguous in %s", mailboxName)
+	}
+	return matches == 1, nil
 }
 
 // isGmailAccount performs the narrow live check needed when the Envelope
