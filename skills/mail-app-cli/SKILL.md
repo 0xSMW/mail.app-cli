@@ -43,6 +43,7 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Attachments | `mail-app-cli attachments list 12345 --json`, `attachments save 12345 "file.pdf" -o ~/Downloads/file.pdf` |
 | Send | `mail-app-cli send -t recipient@example.test -s "Subject" --body "text" --dry-run --json` |
 | Draft for review | `mail-app-cli drafts create -a "Example Account" --to recipient@example.test --subject "S" --body-file body.md --json` |
+| Attach files to a draft | `mail-app-cli drafts update <draft-id> --attach report.pdf --attach chart.png --json` |
 | Recently handled | `mail-app-cli recent search "sample invoice" --json` |
 | Settings | `mail-app-cli config show --json`, `config set account "Example Account"` |
 | Every command and flag | `mail-app-cli commands --json` |

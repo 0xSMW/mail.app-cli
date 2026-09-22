@@ -10,21 +10,22 @@ import (
 )
 
 var (
-	draftTo       []string
-	draftCc       []string
-	draftBcc      []string
-	draftSubject  string
-	draftBody     string
-	draftBodyFile string
-	draftDryRun   bool
-	draftLimit    int
+	draftTo          []string
+	draftCc          []string
+	draftBcc         []string
+	draftSubject     string
+	draftBody        string
+	draftBodyFile    string
+	draftAttachments []string
+	draftDryRun      bool
+	draftLimit       int
 )
 
 var draftsCmd = &cobra.Command{
 	Use:   "drafts",
 	Short: "Create and manage drafts",
 	Annotations: map[string]string{
-		annotationAgentNotes: "Drafts are the review-before-send lane: create, have a person look, then 'drafts send <id>'. Creating a draft takes about five seconds while Mail.app saves it.",
+		annotationAgentNotes: "Drafts are the review-before-send lane: create, have a person look, then 'drafts send <id>'. Creation waits for Mail.app to save the draft and verify attached files. Repeat --attach for multiple files; updates preserve existing attachments.",
 	},
 }
 
@@ -64,7 +65,11 @@ var draftsCreateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		input := mail.DraftInput{Account: account, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc}
+		attachments, err := mail.ValidateDraftAttachments(draftAttachments)
+		if err != nil {
+			return err
+		}
+		input := mail.DraftInput{Account: account, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments}
 		if draftDryRun {
 			return writer.Write(output.Result{
 				Data:    map[string]any{"dryRun": true, "draft": input},
@@ -104,18 +109,23 @@ var draftsShowCmd = &cobra.Command{
 
 var draftsUpdateCmd = &cobra.Command{
 	Use:   "update <draft-id>",
-	Short: "Update a draft's subject or body",
+	Short: "Update a draft's subject or body, or add attachments",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		body, err := readBodyValue(draftBody, draftBodyFile)
 		if err != nil {
 			return err
 		}
+		attachments, err := mail.ValidateDraftAttachments(draftAttachments)
+		if err != nil {
+			return err
+		}
 		input := mail.DraftInput{
-			Subject:    draftSubject,
-			Body:       body,
-			SubjectSet: cmd.Flags().Changed("subject"),
-			BodySet:    cmd.Flags().Changed("body") || cmd.Flags().Changed("body-file"),
+			Attachments: attachments,
+			Subject:     draftSubject,
+			Body:        body,
+			SubjectSet:  cmd.Flags().Changed("subject"),
+			BodySet:     cmd.Flags().Changed("body") || cmd.Flags().Changed("body-file"),
 		}
 		if draftDryRun {
 			return writer.Write(output.Result{
@@ -200,6 +210,7 @@ func init() {
 		cmd.Flags().StringVar(&draftSubject, "subject", "", "Draft subject")
 		cmd.Flags().StringVar(&draftBody, "body", "", "Draft body")
 		cmd.Flags().StringVar(&draftBodyFile, "body-file", "", "Read the draft body from a file")
+		cmd.Flags().StringArrayVar(&draftAttachments, "attach", nil, "File to attach (repeatable; update preserves existing attachments)")
 	}
 	for _, cmd := range []*cobra.Command{draftsCreateCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd} {
 		cmd.Flags().BoolVar(&draftDryRun, "dry-run", false, "Report what would change without touching Mail.app")

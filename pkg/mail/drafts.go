@@ -1,7 +1,9 @@
 package mail
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -26,6 +28,10 @@ func (c *Client) CreateDraft(input DraftInput) (*Message, error) {
 	if len(input.To) == 0 {
 		return nil, fmt.Errorf("at least one to recipient is required")
 	}
+	attachments, err := ValidateDraftAttachments(input.Attachments)
+	if err != nil {
+		return nil, err
+	}
 	script := fmt.Sprintf(`
 tell application "Mail"
 	set targetAccount to account "%s"
@@ -37,22 +43,54 @@ tell application "Mail"
 		end repeat
 		%s
 		%s
+		%s
 	end tell
 	close newMessage saving yes
 	return "ok"
 end tell
-`, escapeAppleScriptString(input.Account), escapeAppleScriptString(input.Subject), escapeAppleScriptString(input.Body), appleScriptStringList(input.To), appleScriptRecipientBlock("cc", input.Cc), appleScriptRecipientBlock("bcc", input.Bcc))
+`, escapeAppleScriptString(input.Account), escapeAppleScriptString(input.Subject), escapeAppleScriptString(input.Body), appleScriptStringList(input.To), appleScriptRecipientBlock("cc", input.Cc), appleScriptRecipientBlock("bcc", input.Bcc), draftAttachmentScript(attachments))
 	if _, err := c.runAppleScript(script); err != nil {
 		return nil, err
 	}
-	time.Sleep(5 * time.Second)
-	if draft, err := c.findDraftBySubjectContentSince(input.Account, input.Subject, input.Body, startedAt); err == nil {
+	// Mail can save intermediate versions and assign another local ID as the
+	// attachments finish loading. Re-resolve on each attempt, and never remove
+	// an original draft until the complete replacement is visible.
+	verificationCtx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
+	defer cancel()
+	verifier := c.WithContext(verificationCtx)
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		delay := time.Second
+		if attempt == 0 {
+			delay = 5 * time.Second
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-verificationCtx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("created draft but save verification incomplete (%v): %w", lastErr, verificationCtx.Err())
+		case <-timer.C:
+		}
+		draft, err := verifier.findDraftBySubjectContentSince(input.Account, input.Subject, input.Body, startedAt)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(attachments) > 0 {
+			if err := verifier.verifyDraftAttachments(draft, attachments); err != nil {
+				lastErr = fmt.Errorf("draft %s attachment verification: %w", draft.ID, err)
+				continue
+			}
+		}
 		return draft, nil
 	}
-	return nil, fmt.Errorf("created draft but could not resolve saved draft metadata")
 }
 
 func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Message, error) {
+	attachments, err := ValidateDraftAttachments(input.Attachments)
+	if err != nil {
+		return nil, err
+	}
 	draft, err := c.GetDraft(accountName, draftID)
 	if err != nil {
 		return nil, err
@@ -60,6 +98,12 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	details, err := c.GetMessageDetailsJSON(draft.Account, draft.Mailbox, draft.ID)
 	if err != nil {
 		return nil, err
+	}
+	if details == nil {
+		return nil, notFound("draft", draftID)
+	}
+	if details.ContentError != "" {
+		return nil, fmt.Errorf("cannot preserve draft body: %s", details.ContentError)
 	}
 	replacement := DraftInput{
 		Account: draft.Account,
@@ -75,12 +119,24 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if input.BodySet {
 		replacement.Body = input.Body
 	}
-	if replacement.Subject == details.Subject && replacement.Body == details.Content {
+	if replacement.Subject == details.Subject && replacement.Body == details.Content && len(attachments) == 0 {
 		return draft, nil
 	}
 	if len(replacement.To) == 0 {
 		return nil, fmt.Errorf("draft has no to recipients to preserve")
 	}
+	// Saved drafts are replaced, so export every attachment before creating the
+	// replacement. Fail closed on enumeration/save errors; keep the original.
+	dir, err := os.MkdirTemp("", "mail-app-cli-draft-attachments-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	preserved, err := c.exportDraftAttachments(draft, dir)
+	if err != nil {
+		return nil, fmt.Errorf("preserve draft attachments: %w", err)
+	}
+	replacement.Attachments = append(preserved, attachments...)
 	updated, err := c.CreateDraft(replacement)
 	if err != nil {
 		return nil, err
