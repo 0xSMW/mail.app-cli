@@ -21,8 +21,9 @@ type clientState struct {
 // through sqlite3. Every subprocess it starts is bound to its context, so a
 // caller that cancels stops waiting on a queued automation call.
 type Client struct {
-	ctx    context.Context
-	shared *clientState
+	ctx     context.Context
+	shared  *clientState
+	session *jxaSession
 }
 
 func NewClient() *Client {
