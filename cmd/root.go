@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/pflag"
 )
 
-const version = "2.1.3"
+const version = "2.2.0"
 
 const (
 	groupMail   = "mail"

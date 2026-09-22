@@ -80,6 +80,41 @@ mail-app-cli send -t recipient@example.test -s "Hello" --body "Hi" --dry-run
 
 Every command has `--help`. `mail-app-cli help output`, `help exit-codes`, `help environment`, and `help agents` cover the contract.
 
+## Efficient serial triage
+
+Read metadata across explicit mailboxes, fetch only the bodies you need, then
+mark and move each selected message in one batch:
+
+```bash
+mail-app-cli messages scan INBOX 'All Mail' Spam -a "Example Account" --since 2026-01-15 --limit 200 --json
+mail-app-cli messages scan INBOX 'All Mail' Trash -a "Example Account" --query 'sample invoice' --json
+mail-app-cli messages read 100001 100002 -a "Example Account" --timeout 10s --budget 45s --json
+mail-app-cli messages batch archive 100001 100002 --mark-read --verify --dry-run --json
+mail-app-cli messages batch archive 100001 100002 --mark-read --verify --json
+```
+
+`scan` always reads live state, returning `messages` with their observed
+`mailboxes` and a `coverage` entry for every requested scope. A failed mailbox
+or a result exceeding the per-mailbox limit sets `complete:false` and exits 5;
+increase the limit or narrow the scope. `--limit 0` removes the limit. An empty
+query lists messages. These are sequential observations, not an atomic snapshot;
+rerun after mutations. `--since` filters receipt time, not last-modified time.
+Scan coverage requires the Envelope Index; an unavailable index or unresolved
+mailbox is reported as incomplete rather than silently using a limited fallback.
+
+`read` returns one result per selected ID. A missing body or timeout sets
+`complete:false` and exits 5 while retaining successful reads. Each message has
+its own timeout within an overall budget. Failed IDs are not retried automatically.
+The existing single-message `show` output is unchanged apart from an optional
+`contentError` when Mail cannot provide a body.
+
+Batch mark, flag, delete, and move reuse a serial bridge in chunks of at most 25
+messages. Receipts remain durable between every message phase. Mark/flag
+verification stops polling each ID when its requested state is observed;
+delete and Gmail archive retain their settling checks. `--mark-read` marks the
+source before relocation; still check destination read status and visible copies
+when your workflow requires them.
+
 ## Output
 
 On a terminal:

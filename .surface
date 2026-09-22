@@ -267,6 +267,16 @@ messages move
 messages move --dry-run
 messages move --help (-h)
 messages move --verify
+messages read
+messages read --budget
+messages read --help (-h)
+messages read --timeout
+messages scan
+messages scan --help (-h)
+messages scan --limit
+messages scan --query
+messages scan --since
+messages scan --unread
 messages sent
 messages sent --help (-h)
 messages sent --limit (-l)

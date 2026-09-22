@@ -37,6 +37,7 @@ type Message struct {
 	Deleted      bool   `json:"deleted"`
 	MessageSize  int    `json:"messageSize"`
 	Content      string `json:"content"`
+	ContentError string `json:"contentError,omitempty"`
 	// Snippet is Mail's indexed summary, present on index-backed listings.
 	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`

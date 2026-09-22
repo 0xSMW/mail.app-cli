@@ -60,7 +60,7 @@ func Table() []struct {
 		{CodeNotFound, 2, "message, account, mailbox, rule, draft, signature, or attachment does not exist"},
 		{CodeUnavailable, 3, "Mail.app is missing, automation permission is denied, or the Envelope Index cannot be read"},
 		{CodeTimeout, 4, "a Mail.app automation call or its queue wait exceeded its deadline"},
-		{CodePartial, 5, "a cross-mailbox search was incomplete and --allow-partial was not set"},
+		{CodePartial, 5, "a search, mailbox scan, or selected body read was incomplete"},
 		{CodeMutationFailed, 6, "one or more requested mutations failed or could not be verified"},
 		{CodeInternal, 7, "anything else"},
 	}

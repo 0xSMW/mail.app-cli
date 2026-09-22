@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func (c *Client) GetMessages(accountName, mailboxName string, limit int) ([]Message, error) {
@@ -255,6 +256,10 @@ JSON.stringify(result);
 }
 
 func (c *Client) GetMessageDetailsJSON(accountName, mailboxName, messageID string) (*Message, error) {
+	return c.getMessageDetailsWithTimeout(accountName, mailboxName, messageID, defaultAutomationTimeout)
+}
+
+func (c *Client) getMessageDetailsWithTimeout(accountName, mailboxName, messageID string, timeout time.Duration) (*Message, error) {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 let result = null;
@@ -280,7 +285,8 @@ try {
 	}
 	if (msg !== null) {
 		let content = '';
-		try { content = msg.content() || ''; } catch(e) {}
+		let contentError = '';
+		try { content = msg.content() || ''; } catch(e) { contentError = String(e); }
 
 		const toRecipients = [];
 		const toRecs = msg.toRecipients();
@@ -311,6 +317,7 @@ try {
 			flagged: msg.flaggedStatus(),
 			messageSize: msg.messageSize(),
 			content: content,
+			contentError: contentError,
 			mailbox: mbox.name(),
 			account: acc.name(),
 			toRecipients: toRecipients,
@@ -325,7 +332,7 @@ try {
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
-	output, err := c.runJXA(script)
+	output, err := c.runJXAWithTimeout(script, timeout)
 	if err != nil {
 		return nil, err
 	}

@@ -10,7 +10,7 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 ## Invariants
 
 - Add `--json` to every call and check `ok` (or the exit code) before trusting `data`. `ok: false` with data present means a receipt with failures or an unhealthy `doctor`; pure failures are on stderr as `{"ok": false, "code", "error", "hint", "exitCode"}`. Warnings are `notices` in the envelope.
-- Exit codes: 1 usage, 2 not found, 3 Mail.app unavailable (run `doctor`), 4 timeout, 5 partial search, 6 mutation failed, 7 internal.
+- Exit codes: 1 usage, 2 not found, 3 Mail.app unavailable (run `doctor`), 4 timeout, 5 incomplete search/scan/body read, 6 mutation failed, 7 internal.
 - IDs are numeric strings from `inbox`, `search`, `messages list`, and `show`. An ID alone is enough for every verb; the CLI finds the mailbox. Pass `--account`/`--mailbox` only when you know the CLI is wrong.
 - Every message mutation (`seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, `messages batch`) takes `--dry-run` and `--verify` and returns a receipt: `{action, dryRun, matched, succeeded, failed, skipped, items: [{id, account, sourceMailbox, targetMailbox, status, error}]}`. `send`, `drafts`, and `rules` take `--dry-run` and return their own shapes. Preview before acting on more than a couple of messages.
 - `send` is irreversible. Use `send --dry-run` to show the user the message, or `drafts create` when they should review in Mail.app.
@@ -27,8 +27,12 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Inbox across accounts | `mail-app-cli inbox --json --limit 25` |
 | Unread only | `mail-app-cli unread --json` |
 | One mailbox with filters | `mail-app-cli messages list -a "Example Account" -m INBOX --unread --since 2026-01-01 --json` |
+| Explicit live mailbox scan | `mail-app-cli messages scan INBOX 'All Mail' Spam -a "Example Account" --since 2026-01-01 --limit 200 --json` |
+| Search selected mailboxes | `mail-app-cli messages scan INBOX 'All Mail' Trash -a "Example Account" --query 'sample invoice' --json` |
 | Search | `mail-app-cli search "sample invoice" --json --limit 20` |
 | Read a message | `mail-app-cli show 12345 --json` |
+| Read selected bodies | `mail-app-cli messages read 12345 67890 --timeout 10s --budget 45s --json` |
+| Mark read before relocating | `mail-app-cli messages batch archive 12345 67890 --mark-read --verify --dry-run --json`, then without `--dry-run` |
 | Headers only, no body fetch | `mail-app-cli show 12345 --metadata-only --json` |
 | Mark read / unread | `mail-app-cli seen 12345 67890 --json`, `unseen` |
 | Flag / unflag | `mail-app-cli flag 12345 --json`, `unflag` |
@@ -48,6 +52,22 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 Shortcuts on read-only lists: `--count`, `--jq '.data[] | select(.read == false) | .id'`, and `--quiet` for bare data. State-changing commands reject `--jq` before doing any work. Use `--ids-only` on ID-bearing inbox, search, account, message, draft, thread, smart-query, and recent-search lists.
 
 ## Workflow
+
+For repeated triage, scan metadata first and deduplicate account/local-ID pairs
+before reading selected bodies. Avoid broad `list --with-content` calls. `scan`
+is always live; inspect `complete` and each coverage entry before concluding a
+mailbox is clear. Truncation exits 5 just like failed coverage; increase `--limit`
+or narrow discovery. Keep required unfiltered completion checks. A scan preserves
+observed mailbox memberships and is not an atomic snapshot or change cursor.
+
+Selected `read` returns successful bodies alongside per-message errors; missing
+or timed-out content is unknown, not empty. Retry only the unresolved IDs after
+checking the failure. Keep Mail operations serial. Group compatible cleanup into
+previewed batches with `--mark-read --verify`, rather than separate mark and move
+passes. Leave the default chunk size unless needed; compatible batches reuse a
+serial bridge with durable receipts. After mutations, use fresh scans to check
+source absence, destination read state, and duplicate copies as required. Gmail
+All Mail presence alone does not prove INBOX absence.
 
 1. If a command exits 3, run `doctor --json`. `healthy` covers the live Mail.app bridge only. `envelopeIndexAvailable: false` means Full Disk Access is missing for the terminal or agent host; reads still work but are slow, and cross-mailbox `search` is refused.
 2. When the user has several accounts and none is configured, account-scoped commands exit 1 listing the names. Ask which, or use `-a`.

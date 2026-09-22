@@ -58,8 +58,10 @@ type BatchOptions struct {
 	Verify         bool
 	MarkReadBefore bool
 	ChunkSize      int
-	Read           bool
-	Flagged        bool
+	// ReuseBridge is for built-in JXA mutators, never custom mutators.
+	ReuseBridge bool
+	Read        bool
+	Flagged     bool
 	// Journal records each message in the recent-message journal. It costs
 	// index queries per message, so bulk selections leave it off.
 	Journal bool
@@ -184,14 +186,17 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		return result, err
 	}
 	defer func() {
-		if opts.Verify && client.Done() != nil {
+		if opts.Verify && retErr != nil {
 			for i := range result.Items {
 				item := &result.Items[i]
 				if item.Status != "succeeded" || item.VerifyStatus != "" {
 					continue
 				}
-				item.VerifyStatus = "unknown_after_timeout"
-				item.VerifyError = "verification not completed: " + client.Done().Error()
+				item.VerifyStatus = "applied_destination_unverified"
+				if isUnknownMutationError(client, retErr) {
+					item.VerifyStatus = "unknown_after_timeout"
+				}
+				item.VerifyError = "verification not completed: " + retErr.Error()
 				result.Unverified++
 				if err := opts.Receipt.Record("verification_result", journalItem(*item)); err != nil {
 					result.JournalError = err.Error()
@@ -221,6 +226,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		}
 	}
 	chunkSize := normalizedChunkSize(len(items), opts.ChunkSize)
+	if opts.ReuseBridge && opts.Action != "archive" {
+		chunkSize = min(chunkSize, 25)
+	}
 	result.Chunks = (len(items) + chunkSize - 1) / chunkSize
 	if opts.Action == "archive" && !opts.TrustSource {
 		items = client.archiveSources(items, opts.ExplicitSource)
@@ -263,6 +271,19 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 
 	for start := 0; start < len(items); start += chunkSize {
 		end := min(start+chunkSize, len(items))
+		chunkClient := client
+		var session *jxaSession
+		if opts.ReuseBridge && end-start > 1 && (opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" || opts.Action == "move") {
+			var err error
+			session, err = newJXASession(client.Context())
+			if err != nil {
+				return result, err
+			}
+			defer session.Close()
+			copy := *client
+			copy.session = session
+			chunkClient = &copy
+		}
 		if opts.Progress != nil {
 			fmt.Fprintf(opts.Progress, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
 		}
@@ -292,7 +313,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			}
 			result.Attempted++
 			if opts.MarkReadBefore && opts.Action != "mark" {
-				if err := client.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
+				if err := chunkClient.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
 					item.Status = "failed"
 					if isUnknownMutationError(client, err) {
 						item.Status = "unknown"
@@ -302,6 +323,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 					result.Items = append(result.Items, item)
 					if journalErr := opts.Receipt.Record("mark_read_failed", journalItem(item)); journalErr != nil {
 						return result, journalErr
+					}
+					if item.Status == "unknown" {
+						return result, err
 					}
 					continue
 				}
@@ -321,7 +345,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				result.Items = append(result.Items, item)
 				return result, err
 			}
-			if err := mutate(client, &item); err != nil {
+			if err := mutate(chunkClient, &item); err != nil {
 				phase := "mutation_failed"
 				item.Status = "failed"
 				if isUnknownMutationError(client, err) {
@@ -333,6 +357,10 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				if journalErr := opts.Receipt.Record(phase, journalItem(item)); journalErr != nil {
 					result.Items = append(result.Items, item)
 					return result, journalErr
+				}
+				if item.Status == "unknown" {
+					result.Items = append(result.Items, item)
+					return result, err
 				}
 			} else {
 				item.Status = "succeeded"
@@ -349,6 +377,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				fmt.Fprintf(opts.Progress, "%s: %d/%d %s %s\n", opts.Action, result.Attempted, len(items), item.ID, item.Status)
 			}
 			result.Items = append(result.Items, item)
+		}
+		if session != nil {
+			session.Close()
 		}
 	}
 	if opts.Verify {
@@ -385,7 +416,7 @@ func isUnknownMutationError(client *Client, err error) bool {
 	if client.Done() != nil {
 		return true
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || isAutomationTimeout(err) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, errSessionInterrupted) || isAutomationTimeout(err) {
 		return true
 	}
 	message := strings.ToLower(err.Error())
@@ -596,6 +627,30 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 					ids = append(ids, verified[index].ID)
 				}
 				snapshots[key], snapshotErrors[key] = client.getMessageEnvelopesForVerification(key.account, key.mailbox, ids)
+				// Read/flag changes can finish as soon as their requested state is
+				// observed. Delete still needs the full settling window: an old
+				// local ID disappearing does not preclude a regenerated copy.
+				if snapshotErrors[key] == nil && opts.Action != "delete" {
+					pending := make([]int, 0, len(indices))
+					for _, index := range indices {
+						item := &verified[index]
+						message, present := snapshots[key][item.ID]
+						matched := present && ((opts.Action == "mark" && message.Read == opts.Read) || (opts.Action == "flag" && message.Flagged == opts.Flagged))
+						if matched {
+							item.VerifyStatus = "matched"
+						} else {
+							pending = append(pending, index)
+						}
+					}
+					if len(pending) == 0 {
+						delete(groups, key)
+					} else {
+						groups[key] = pending
+					}
+				}
+			}
+			if len(groups) == 0 {
+				break
 			}
 		}
 		for key, indices := range groups {

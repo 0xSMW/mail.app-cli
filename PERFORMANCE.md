@@ -24,6 +24,13 @@ or unsupported mailbox shapes require it.
 - Per-command cache setup only when caching is enabled.
 - Per-client account caching within a single CLI invocation.
 - Top-N sorting for paged unified views.
+- Explicit multi-mailbox scans amortize account discovery and command overhead,
+  retaining coverage and matching mailbox membership instead of repeating rows.
+- Selected-body reads reuse bounded serial bridge sessions and preserve per-ID
+  results across failures; compatible mutation batches reuse the same bridge
+  while retaining Go-side durable journaling between each phase.
+- Mark/flag verification stops polling confirmed IDs. Delete and Gmail archive
+  still use the full settling window to guard against regenerated message IDs.
 
 ## Before/After Benchmarks
 
@@ -62,5 +69,6 @@ the benchmarked cases.
 
 - Prefer metadata-only list/search commands for interactive workflows.
 - Use `--with-content` only when message bodies are needed.
-- Keep cache enabled for repeated automation over the same mailbox/query.
+- Keep cache enabled for browsing; use live scans or `--no-cache` lists for
+  post-mutation completion checks.
 - Prefer narrow account or mailbox filters when searching large mail stores.

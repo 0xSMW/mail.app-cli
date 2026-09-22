@@ -336,6 +336,7 @@ func batchOptionsFromFlags(action, target string) batchOptions {
 		Verify:         batchVerify,
 		MarkReadBefore: batchMarkReadBefore,
 		ChunkSize:      batchChunkSize,
+		ReuseBridge:    true,
 		Read:           batchRead,
 		Flagged:        batchFlagged,
 	}
