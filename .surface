@@ -66,6 +66,7 @@ doctor --help (-h)
 drafts
 drafts --help (-h)
 drafts create
+drafts create --attach
 drafts create --bcc
 drafts create --body
 drafts create --body-file
@@ -86,6 +87,7 @@ drafts send --help (-h)
 drafts show
 drafts show --help (-h)
 drafts update
+drafts update --attach
 drafts update --body
 drafts update --body-file
 drafts update --dry-run

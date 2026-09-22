@@ -53,8 +53,10 @@ curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.s
 Or with Go 1.25 or newer:
 
 ```bash
-go install github.com/0xSMW/mail.app-cli/v2@latest
+go install github.com/0xSMW/mail.app-cli/v2/cmd/mail-app-cli@latest
 ```
+
+The named command installs `mail-app-cli` into `GOBIN` (or `$(go env GOPATH)/bin`). The legacy module-root install remains supported but produces `mail.app-cli` with a dot.
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.
 
@@ -242,12 +244,15 @@ mail-app-cli messages batch mark --read=false 100003 100004
 ```bash
 mail-app-cli send -a "Example Account" -t recipient@example.test -s "Hello" --body "Message" --attach ~/sample.pdf --signature "Example Account"
 mail-app-cli send -t recipient@example.test -s "Hello" --body-file body.md --dry-run
-mail-app-cli drafts create -a "Example Account" --to recipient@example.test --subject "Review" --body-file body.md
+mail-app-cli drafts create -a "Example Account" --to recipient@example.test --subject "Review" --body-file body.md --attach ~/sample.pdf
 mail-app-cli drafts list
 mail-app-cli drafts update <draft-id> --subject "Updated"
+mail-app-cli drafts update <draft-id> --attach ~/another.pdf
 mail-app-cli drafts send <draft-id>
 mail-app-cli drafts delete <draft-id> --dry-run
 ```
+
+Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. `--dry-run` validates paths and previews the requested files without changing Mail.
 
 ## Search
 
