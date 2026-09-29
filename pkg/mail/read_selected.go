@@ -53,7 +53,7 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 			}
 			client.session = session
 		}
-		return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout)
+		return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout, !c.shared.bodyFromMail)
 	})
 }
 

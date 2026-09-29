@@ -10,6 +10,8 @@ require (
 	github.com/itchyny/gojq v0.12.19
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/pflag v1.0.5
+	golang.org/x/net v0.46.0
+	golang.org/x/text v0.30.0
 )
 
 require (

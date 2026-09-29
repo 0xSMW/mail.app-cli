@@ -121,6 +121,16 @@ first page is not part of the traversal.
 message whose read state or labels changed, so check those with `--unread` or a
 full traversal.
 
+`read` and `show` take the body from the message file Mail.app keeps on disk
+and ask Mail.app only for metadata. Asking Mail.app to render a body is slow,
+and some messages stall it for every later request. `contentSource` is `disk`
+or `mail`. A message with no readable file falls back to Mail.app. The disk
+text follows Mail.app's rendering: the HTML part when there is one, without
+`display:none` elements, with list markers, and without `>` reply markers. It
+leaves out the placeholder character Mail.app inserts for each inline image,
+and it can differ in spacing where a stylesheet changes the layout.
+`--body-source mail` makes Mail.app render the body as before.
+
 `read` times each phase of a body read in `diagnostics`. When a read times out,
 `pending` names the operation Mail.app had not answered and `lastCompleted` the
 one before it:
@@ -128,13 +138,13 @@ one before it:
 ```json
 {"id": "100001", "account": "Example Account", "mailbox": "INBOX",
  "error": "jxa timed out after 10s during content (9.8s in phase); last completed lookup_by_id",
- "diagnostics": {"phases": [{"name": "resolve_account", "elapsedMs": 41}, {"name": "resolve_mailbox", "elapsedMs": 118}, {"name": "lookup_by_id", "elapsedMs": 12}],
+ "diagnostics": {"phases": [{"name": "disk_body", "elapsedMs": 6, "note": "unavailable: no message file on disk"}, {"name": "resolve_account", "elapsedMs": 41}, {"name": "resolve_mailbox", "elapsedMs": 38}, {"name": "lookup_by_id", "elapsedMs": 2}],
   "lastCompleted": "lookup_by_id", "pending": "content", "pendingMs": 9829}}
 ```
 
-The phases are `resolve_account`, `resolve_mailbox`, `lookup_by_id`,
-`enumerate_ids` (only when the direct lookup misses), `content`, `recipients`,
-and `metadata`. `message not found` now means Mail.app answered and the mailbox
+The phases are `disk_body`, `resolve_account`, `resolve_mailbox`,
+`lookup_by_id`, `enumerate_ids` (only when the direct lookup misses), `content`
+(only when Mail.app renders the body), `recipients`, and `metadata`. `message not found` now means Mail.app answered and the mailbox
 does not hold the ID. A Mail.app error is reported with its phase.
 
 `read` returns one result per selected ID. A missing body or timeout sets

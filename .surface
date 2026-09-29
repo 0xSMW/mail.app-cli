@@ -270,6 +270,7 @@ messages move --dry-run
 messages move --help (-h)
 messages move --verify
 messages read
+messages read --body-source
 messages read --budget
 messages read --help (-h)
 messages read --timeout
@@ -367,6 +368,7 @@ send --signature
 send --subject (-s)
 send --to (-t)
 show
+show --body-source
 show --help (-h)
 show --metadata-only
 signatures

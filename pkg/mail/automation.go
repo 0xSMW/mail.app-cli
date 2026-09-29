@@ -306,7 +306,13 @@ function findMailbox(acc, requestedName, names) {
 	if (isInboxName(requestedName)) {
 		try { return acc.inbox(); } catch (e) { if (isTransportError(e)) throw e; }
 	}
-	const found = findMailboxByNames(acc.mailboxes(), names);
+	let found;
+	try {
+		found = findMailboxByBulkNames(acc, names);
+	} catch (e) {
+		if (isTransportError(e)) throw e;
+		found = findMailboxByNames(acc.mailboxes(), names);
+	}
 	if (found !== null) {
 		return found;
 	}
@@ -315,6 +321,38 @@ function findMailbox(acc, requestedName, names) {
 		byName.name();
 		return byName;
 	} catch (e) { if (isTransportError(e)) throw e; }
+	return null;
+}
+
+// findMailboxByBulkNames visits mailboxes in the same order as
+// findMailboxByNames, but reads each level's names in one Apple Event and
+// only descends into mailboxes that have children. It throws when Mail.app
+// answers inconsistently, and the caller then walks one mailbox at a time.
+function findMailboxByBulkNames(container, names) {
+	const list = container.mailboxes;
+	const levelNames = list.name();
+	if (levelNames.length === 0) {
+		return null;
+	}
+	const childNames = list.mailboxes.name();
+	if (childNames.length !== levelNames.length) {
+		throw new Error('mailbox list changed during lookup');
+	}
+	for (let i = 0; i < levelNames.length; i++) {
+		if (names.includes(levelNames[i])) {
+			const mailbox = list[i];
+			if (mailbox.name() !== levelNames[i]) {
+				throw new Error('mailbox list changed during lookup');
+			}
+			return mailbox;
+		}
+		if (childNames[i] && childNames[i].length > 0) {
+			const child = findMailboxByBulkNames(list[i], names);
+			if (child !== null) {
+				return child;
+			}
+		}
+	}
 	return null;
 }
 

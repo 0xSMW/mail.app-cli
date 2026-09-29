@@ -261,7 +261,14 @@ func (c *Client) GetMessageDetailsJSON(accountName, mailboxName, messageID strin
 }
 
 func (c *Client) getMessageDetailsWithTimeout(accountName, mailboxName, messageID string, timeout time.Duration) (*Message, error) {
-	message, _, err := c.getMessageDetailsTraced(accountName, mailboxName, messageID, timeout)
+	message, _, err := c.getMessageDetailsTraced(accountName, mailboxName, messageID, timeout, !c.shared.bodyFromMail)
+	return message, err
+}
+
+// getMessageDetailsFromMail always takes the body from Mail.app. A draft
+// rewrite uses it so the body it preserves is the one Mail.app composes with.
+func (c *Client) getMessageDetailsFromMail(accountName, mailboxName, messageID string) (*Message, error) {
+	message, _, err := c.getMessageDetailsTraced(accountName, mailboxName, messageID, defaultAutomationTimeout, false)
 	return message, err
 }
 
@@ -269,12 +276,46 @@ func (c *Client) getMessageDetailsWithTimeout(accountName, mailboxName, messageI
 // a Mail.app error names the operation it happened in. A nil message with a
 // nil error means the mailbox answered and does not hold the ID; every other
 // failure is returned as an error.
-func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID string, timeout time.Duration) (*Message, *PhaseTrace, error) {
+//
+// With preferDisk the body comes from the message file Mail.app keeps on
+// disk, and Mail.app is asked only for metadata. Mail.app renders a body on
+// request, and that request can stall it for every later caller.
+func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID string, timeout time.Duration, preferDisk bool) (*Message, *PhaseTrace, error) {
+	var diskPhase *AutomationPhase
+	diskBody, haveDiskBody := "", false
+	if preferDisk {
+		started := time.Now()
+		body, err := c.readMessageBodyFromDisk(messageID)
+		diskPhase = &AutomationPhase{Name: "disk_body", ElapsedMs: time.Since(started).Milliseconds()}
+		if err != nil {
+			if ctxErr := c.Done(); ctxErr != nil {
+				return nil, nil, ctxErr
+			}
+			diskPhase.Note = "unavailable: " + err.Error()
+		} else {
+			diskBody, haveDiskBody = body, true
+		}
+	}
+	withDiskPhase := func(trace *PhaseTrace) *PhaseTrace {
+		if diskPhase == nil {
+			return trace
+		}
+		if trace == nil {
+			trace = &PhaseTrace{}
+		}
+		trace.Phases = append([]AutomationPhase{*diskPhase}, trace.Phases...)
+		if trace.LastCompleted == "" {
+			trace.LastCompleted = diskPhase.Name
+		}
+		return trace
+	}
+
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const requestedMailbox = '%s';
 const requestedAccount = '%s';
 const requestedId = '%s';
+const skipContent = %s;
 %s
 
 function recipientAddresses(recipients) {
@@ -322,7 +363,7 @@ try {
 	if (msg !== null) {
 		let content = '';
 		let contentError = '';
-		phase('content', (step) => {
+		if (!skipContent) phase('content', (step) => {
 			try {
 				content = msg.content() || '';
 			} catch (e) {
@@ -360,15 +401,15 @@ try {
 }
 
 JSON.stringify({message: message, failure: failure, phases: phaseLog});
-`, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName))
+`, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaBool(haveDiskBody), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXAWithTimeout(script, timeout)
 	if err != nil {
 		var timeoutErr *AutomationTimeoutError
 		if errors.As(err, &timeoutErr) {
-			return nil, timeoutErr.Trace, err
+			return nil, withDiskPhase(timeoutErr.Trace), err
 		}
-		return nil, nil, err
+		return nil, withDiskPhase(nil), err
 	}
 
 	var envelope struct {
@@ -392,6 +433,7 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 			trace.LastCompleted = step.Name
 		}
 	}
+	trace = withDiskPhase(trace)
 	if failure := envelope.Failure; failure != nil {
 		// -1728 is Mail.app reporting that the named object does not exist.
 		switch {
@@ -401,6 +443,12 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 			return nil, trace, notFound("mailbox", mailboxName)
 		}
 		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
+	}
+	if message := envelope.Message; message != nil {
+		message.ContentSource = "mail"
+		if haveDiskBody {
+			message.Content, message.ContentSource = diskBody, "disk"
+		}
 	}
 	return envelope.Message, trace, nil
 }

@@ -66,7 +66,7 @@ printf 'mail-app-cli-phase {"name":"lookup_by_id","state":"done","atMs":2,"elaps
 printf 'mail-app-cli-phase {"name":"enumerate_ids","state":"start","atMs":3}\n' >&2
 /bin/sleep 30
 `)
-	_, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", 2*time.Second)
+	_, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", 2*time.Second, false)
 	if !errors.Is(err, context.DeadlineExceeded) || trace == nil || trace.Pending != "enumerate_ids" || trace.LastCompleted != "lookup_by_id" || !strings.Contains(trace.Phases[0].Note, "-1728") {
 		t.Fatalf("trace = %+v, err = %v", trace, err)
 	}
@@ -123,7 +123,7 @@ func TestDetailReadSeparatesAbsentFromFailed(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			writeFakeOsaScript(t, "printf '%s\\n' '"+test.output+"'\n")
-			message, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", time.Second)
+			message, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", time.Second, false)
 			test.check(t, message, trace, err)
 		})
 	}

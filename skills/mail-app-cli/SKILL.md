@@ -65,7 +65,9 @@ whose read state or labels changed. A scan preserves observed mailbox membership
 and is not an atomic snapshot or change cursor.
 
 Selected `read` returns successful bodies alongside per-message errors; missing
-or timed-out content is unknown, not empty. Each item has `diagnostics` with
+or timed-out content is unknown, not empty. Bodies come from Mail.app's message
+files (`contentSource: "disk"`), so reads do not wait on Mail.app to render;
+pass `--body-source mail` only to compare. Each item has `diagnostics` with
 per-phase timings; after a timeout, `pending` names the operation Mail.app did
 not answer. Retry only the unresolved IDs after checking the failure. Keep Mail operations serial. Group compatible cleanup into
 previewed batches with `--mark-read --verify`, rather than separate mark and move

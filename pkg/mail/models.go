@@ -38,6 +38,9 @@ type Message struct {
 	MessageSize  int    `json:"messageSize"`
 	Content      string `json:"content"`
 	ContentError string `json:"contentError,omitempty"`
+	// ContentSource is "disk" when the body was read from Mail.app's message
+	// file and "mail" when Mail.app rendered it.
+	ContentSource string `json:"contentSource,omitempty"`
 	// Snippet is Mail's indexed summary, present on index-backed listings.
 	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`
