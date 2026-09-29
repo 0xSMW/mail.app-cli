@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"fmt"
 	"sync"
 )
 
@@ -15,6 +16,7 @@ type clientState struct {
 	contentWarningOnce       sync.Once
 	recentCleanupWarningOnce sync.Once
 	warn                     func(string)
+	bodyFromMail             bool
 }
 
 // Client talks to Mail.app through osascript and to Mail's Envelope Index
@@ -50,4 +52,26 @@ func (c *Client) Context() context.Context {
 // Done reports whether the client's context has been cancelled.
 func (c *Client) Done() error {
 	return c.Context().Err()
+}
+
+// BodySourceDisk reads a message body from Mail.app's message file and asks
+// Mail.app only when there is no readable file. BodySourceMail always asks
+// Mail.app to render the body.
+const (
+	BodySourceDisk = "disk"
+	BodySourceMail = "mail"
+)
+
+// SetBodySource chooses where message bodies come from. The default is
+// BodySourceDisk.
+func (c *Client) SetBodySource(source string) error {
+	switch source {
+	case "", BodySourceDisk:
+		c.shared.bodyFromMail = false
+	case BodySourceMail:
+		c.shared.bodyFromMail = true
+	default:
+		return fmt.Errorf("body source must be %q or %q", BodySourceDisk, BodySourceMail)
+	}
+	return nil
 }

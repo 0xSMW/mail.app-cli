@@ -57,17 +57,25 @@ Shortcuts on read-only lists: `--count`, `--jq '.data[] | select(.read == false)
 For repeated triage, scan metadata first and deduplicate account/local-ID pairs
 before reading selected bodies. Avoid broad `list --with-content` calls. `scan`
 is always live; inspect `complete` and each coverage entry before concluding a
-mailbox is clear. Truncation exits 5 just like failed coverage; increase `--limit`
-or narrow discovery. Keep required unfiltered completion checks. A scan preserves
-observed mailbox memberships and is not an atomic snapshot or change cursor.
+mailbox is clear. Truncation exits 5 just like failed coverage. Each coverage
+entry gives `exhausted` and `remaining`; while `nextCursor` is present, repeat the
+same arguments with `--cursor` until it is absent. Keep required unfiltered
+completion checks. `--since` filters receipt time, so it misses older messages
+whose read state or labels changed. A scan preserves observed mailbox memberships
+and is not an atomic snapshot or change cursor.
 
 Selected `read` returns successful bodies alongside per-message errors; missing
-or timed-out content is unknown, not empty. Retry only the unresolved IDs after
-checking the failure. Keep Mail operations serial. Group compatible cleanup into
+or timed-out content is unknown, not empty. Bodies come from Mail.app's message
+files (`contentSource: "disk"`), so reads do not wait on Mail.app to render;
+pass `--body-source mail` only to compare. Each item has `diagnostics` with
+per-phase timings; after a timeout, `pending` names the operation Mail.app did
+not answer. Retry only the unresolved IDs after checking the failure. Keep Mail operations serial. Group compatible cleanup into
 previewed batches with `--mark-read --verify`, rather than separate mark and move
 passes. Leave the default chunk size unless needed; compatible batches reuse a
-serial bridge with durable receipts. After mutations, use fresh scans to check
-source absence, destination read state, and duplicate copies as required. Gmail
+serial bridge with durable receipts. A verified archive or move reports
+`observed.sourcePresent`, `destinationPresent`, `destinationRead`, and the current
+local IDs in `sourceIds` and `destinationIds`. Act on those IDs, not the ID you
+passed in, when a copy reappears in the source. Gmail
 All Mail presence alone does not prove INBOX absence.
 
 1. If a command exits 3, run `doctor --json`. `healthy` covers the live Mail.app bridge only. `envelopeIndexAvailable: false` means Full Disk Access is missing for the terminal or agent host; reads still work but are slow, and cross-mailbox `search` is refused.

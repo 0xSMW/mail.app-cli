@@ -30,6 +30,21 @@ type BatchItem struct {
 	MarkedRead   bool           `json:"markedRead,omitempty"`
 	VerifyStatus string         `json:"verifyStatus,omitempty"`
 	VerifyError  string         `json:"verifyError,omitempty"`
+	// Observed is what an archive or move verification found by stable
+	// identity once the mailboxes settled.
+	Observed *RelocationState `json:"observed,omitempty"`
+}
+
+// RelocationState reports the source and the destination separately, because
+// a move Mail.app accepted does not prove the source copy is gone. The IDs
+// are the current local IDs, which differ from the ID the mutation was given
+// when Mail.app regenerated the message.
+type RelocationState struct {
+	SourcePresent      bool     `json:"sourcePresent"`
+	DestinationPresent bool     `json:"destinationPresent"`
+	DestinationRead    *bool    `json:"destinationRead,omitempty"`
+	SourceIDs          []string `json:"sourceIds,omitempty"`
+	DestinationIDs     []string `json:"destinationIds,omitempty"`
 }
 
 // BatchResult is the mutation receipt.
@@ -720,6 +735,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		identityGroups[groupKey{item.Account, item.TargetMailbox}] = append(identityGroups[groupKey{item.Account, item.TargetMailbox}], relocationRef{index: i})
 	}
 	presences := make([]verificationPresence, len(verified))
+	states := make([]RelocationState, len(verified))
 	lookupErrors := make([]error, len(verified))
 	for attempt, delay := range verificationBackoff {
 		if attempt > 0 {
@@ -733,19 +749,21 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 			}
 		}
 		presences = make([]verificationPresence, len(verified))
+		states = make([]RelocationState, len(verified))
 		lookupErrors = make([]error, len(verified))
 		for key, refs := range identityGroups {
 			identities := make([]StableIdentity, 0, len(refs))
 			for _, ref := range refs {
 				identities = append(identities, verified[ref.index].Identity)
 			}
-			counts, groupErr := client.getIdentityCountsForVerification(key.account, key.mailbox, identities)
+			matches, groupErr := client.getIdentityMatchesForVerification(key.account, key.mailbox, identities)
 			for _, ref := range refs {
 				item := verified[ref.index]
 				present := false
 				err := groupErr
+				found := matches[item.Identity.fallbackKey()]
 				if err == nil {
-					count := counts[item.Identity.fallbackKey()]
+					count := len(found)
 					switch count {
 					case 0:
 					case 1:
@@ -760,10 +778,26 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 					lookupErrors[ref.index] = err
 					continue
 				}
+				state := &states[ref.index]
 				if ref.source {
 					presences[ref.index].Source = present
+					state.SourcePresent = present
 				} else {
 					presences[ref.index].Destination = present
+					state.DestinationPresent = present
+				}
+				if !present {
+					continue
+				}
+				for _, message := range found {
+					if ref.source {
+						state.SourceIDs = append(state.SourceIDs, message.ID)
+					} else {
+						state.DestinationIDs = append(state.DestinationIDs, message.ID)
+					}
+				}
+				if !ref.source {
+					state.DestinationRead = agreedReadState(found)
 				}
 			}
 		}
@@ -786,6 +820,8 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 			continue
 		}
 		presence := presences[i]
+		observed := states[i]
+		item.Observed = &observed
 		switch {
 		case presence.Source:
 			item.VerifyStatus = "present_in_source"
@@ -798,6 +834,21 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		}
 	}
 	return verified
+}
+
+// agreedReadState is the read status shared by every matching row, or nil
+// when there is no row or the rows disagree.
+func agreedReadState(messages []Message) *bool {
+	if len(messages) == 0 {
+		return nil
+	}
+	read := messages[0].Read
+	for _, message := range messages[1:] {
+		if message.Read != read {
+			return nil
+		}
+	}
+	return &read
 }
 
 func verifyBoolState(present, actual, expected bool, field string) (string, string) {

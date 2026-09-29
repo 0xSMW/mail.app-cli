@@ -25,6 +25,7 @@ var (
 	verbUnread       bool
 	verbWithContent  bool
 	verbMetadataOnly bool
+	verbBodySource   string
 )
 
 var inboxCmd = &cobra.Command{
@@ -148,9 +149,12 @@ var showCmd = &cobra.Command{
 	Short: "Show a message with its body",
 	Args:  cobra.ExactArgs(1),
 	Annotations: map[string]string{
-		annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. --metadata-only skips the slow Mail.app body fetch.",
+		annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. The body is read from Mail.app's message file and contentSource says where it came from. --metadata-only skips the body.",
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := mailClient.SetBodySource(verbBodySource); err != nil {
+			return clierr.Usage(`--body-source must be "disk" or "mail"`)
+		}
 		return showMessage(args[0], verbMetadataOnly)
 	},
 }
@@ -241,6 +245,7 @@ func init() {
 		cmd.Flags().BoolVar(&verbWithContent, "with-content", false, "Include bodies (slow: one Mail.app call per ten messages)")
 	}
 	inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
+	showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
 	showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
 
 	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
@@ -257,3 +262,5 @@ func init() {
 	seenCmd.Annotations = map[string]string{annotationAgentNotes: "Idempotent. Multiple IDs are applied one Mail.app call at a time."}
 	unseenCmd.Annotations = seenCmd.Annotations
 }
+
+const bodySourceUsage = `Where the body comes from: "disk" reads Mail.app's message file and asks Mail.app only when there is none, "mail" always asks Mail.app to render it`

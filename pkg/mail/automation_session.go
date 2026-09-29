@@ -129,21 +129,31 @@ func (s *jxaSession) run(script string, timeout time.Duration) (string, error) {
 		timeout = defaultAutomationTimeout
 	}
 	type response struct {
-		Output *string `json:"output"`
-		Error  string  `json:"error"`
+		Output *string     `json:"output"`
+		Error  string      `json:"error"`
+		Phase  *phaseEvent `json:"phase"`
 	}
 	type exchange struct {
 		value response
 		err   error
 	}
+	var eventsMu sync.Mutex
+	var events []phaseEvent
 	done := make(chan exchange, 1)
 	go func() {
 		// ASCII framing keeps Foundation's availableData decoding safe even
 		// when a pipe read splits a non-ASCII script character.
 		_, err := io.WriteString(s.stdin, base64.StdEncoding.EncodeToString([]byte(script))+"\n")
 		var value response
-		if err == nil {
-			err = s.decoder.Decode(&value)
+		for err == nil {
+			value = response{}
+			if err = s.decoder.Decode(&value); err != nil || value.Phase == nil {
+				break
+			}
+			// Phase events precede the script's one real response.
+			eventsMu.Lock()
+			events = append(events, *value.Phase)
+			eventsMu.Unlock()
 		}
 		if err == nil && value.Output == nil && value.Error == "" {
 			err = fmt.Errorf("missing bridge response")
@@ -167,7 +177,10 @@ func (s *jxaSession) run(script string, timeout time.Duration) (string, error) {
 	case <-s.ctx.Done():
 		s.failure = s.ctx.Err()
 	case <-timer.C:
-		s.failure = &AutomationTimeoutError{Engine: "jxa", Timeout: timeout}
+		eventsMu.Lock()
+		trace := buildPhaseTrace(append([]phaseEvent(nil), events...), time.Now())
+		eventsMu.Unlock()
+		s.failure = &AutomationTimeoutError{Engine: "jxa", Timeout: timeout, Trace: trace}
 	}
 	s.closeLocked()
 	<-done // pipes are closed and the child reaped before releasing the caller

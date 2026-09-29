@@ -95,7 +95,7 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, err
 	}
-	details, err := c.GetMessageDetailsJSON(draft.Account, draft.Mailbox, draft.ID)
+	details, err := c.getMessageDetailsFromMail(draft.Account, draft.Mailbox, draft.ID)
 	if err != nil {
 		return nil, err
 	}

@@ -445,3 +445,51 @@ func withGmailCapabilityScript(t *testing.T, result string) {
 	t.Setenv("PATH", binDir)
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
 }
+
+func TestArchiveVerificationReportsRegeneratedSourceCopy(t *testing.T) {
+	binDir := t.TempDir()
+	osaScript := `#!/bin/sh
+case "$*" in
+  *"const accounts = mail.accounts();"*) printf '%s\n' '[{"id":"ABC","name":"Work","emailAddresses":[],"userName":"work","enabled":true}]' ;;
+  *) printf '%s\n' 'Success' ;;
+esac
+`
+	// The archived message left local ID 100. Mail regenerated it in INBOX
+	// as 205, and All Mail holds the read copy as 204.
+	sqliteScript := `#!/bin/sh
+case "$4" in
+  *"m.size = 42"*"l.mailbox_id = 1"*|*"l.mailbox_id = 1"*"m.size = 42"*) printf '%s\n' '[{"ID":205,"Subject":"subject","Sender":"sender@example.com","DateSent":"2026-08-29T00:00:00Z","MessageSize":42,"Read":0}]' ;;
+  *"m.size = 42"*) printf '%s\n' '[{"ID":204,"Subject":"subject","Sender":"sender@example.com","DateSent":"2026-08-29T00:00:00Z","MessageSize":42,"Read":1}]' ;;
+  *"All%20Mail"*) printf '%s\n' '[{"ID":2,"URL":"imap://ABC/%5BGmail%5D/All%20Mail","TotalCount":9,"UnreadCount":0}]' ;;
+  *"imap://ABC/INBOX"*) printf '%s\n' '[{"ID":1,"URL":"imap://ABC/INBOX","TotalCount":3,"UnreadCount":1}]' ;;
+  *) printf '%s\n' '[]' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(osaScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "sqlite3"), []byte(sqliteScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PATH", binDir)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
+	previousBackoff := verificationBackoff
+	verificationBackoff = []time.Duration{0, 0}
+	t.Cleanup(func() { verificationBackoff = previousBackoff })
+
+	item := verificationItem()
+	item.ID, item.Status, item.TargetMailbox, item.GmailInboxSource = "100", "succeeded", "All Mail", true
+	verified := VerifyMutations(NewClient(), BatchOptions{Action: "archive", Verify: true}, []BatchItem{item})
+	got := verified[0]
+	if got.VerifyStatus != "present_in_source" || got.Observed == nil {
+		t.Fatalf("item = %+v", got)
+	}
+	state := got.Observed
+	if !state.SourcePresent || !state.DestinationPresent || state.DestinationRead == nil || !*state.DestinationRead {
+		t.Fatalf("observed = %+v", state)
+	}
+	if len(state.SourceIDs) != 1 || state.SourceIDs[0] != "205" || len(state.DestinationIDs) != 1 || state.DestinationIDs[0] != "204" {
+		t.Fatalf("observed IDs = %+v, want the regenerated local IDs", state)
+	}
+}

@@ -12,6 +12,9 @@ type MessageReadResult struct {
 	Mailbox string   `json:"mailbox"`
 	Message *Message `json:"message,omitempty"`
 	Error   string   `json:"error,omitempty"`
+	// Diagnostics times each phase of the read. After a timeout, Pending names
+	// the operation Mail.app had not answered.
+	Diagnostics *PhaseTrace `json:"diagnostics,omitempty"`
 }
 
 type SelectedReadResult struct {
@@ -32,9 +35,9 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 			session.Close()
 		}
 	}()
-	return readSelectedMessages(refs, func(ref MessageRef, i int) (*Message, error) {
+	return readSelectedMessages(refs, func(ref MessageRef, i int) (*Message, *PhaseTrace, error) {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if i%10 == 0 || (session != nil && session.closed) {
 			if session != nil {
@@ -46,20 +49,21 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 			var err error
 			session, err = newJXASession(ctx)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			client.session = session
 		}
-		return client.getMessageDetailsWithTimeout(ref.AccountName, ref.MailboxName, ref.MessageID, timeout)
+		return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout, !c.shared.bodyFromMail)
 	})
 }
 
-func readSelectedMessages(refs []MessageRef, read func(MessageRef, int) (*Message, error)) SelectedReadResult {
+func readSelectedMessages(refs []MessageRef, read func(MessageRef, int) (*Message, *PhaseTrace, error)) SelectedReadResult {
 	result := SelectedReadResult{Items: []MessageReadResult{}, Complete: true}
 	for i, ref := range refs {
 		item := MessageReadResult{ID: ref.MessageID, Account: ref.AccountName, Mailbox: ref.MailboxName}
-		message, err := read(ref, i)
+		message, trace, err := read(ref, i)
 		item.Message = message
+		item.Diagnostics = trace
 		if err == nil && message == nil {
 			err = fmt.Errorf("message not found")
 		}

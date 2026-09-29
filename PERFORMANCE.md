@@ -29,6 +29,14 @@ or unsupported mailbox shapes require it.
 - Selected-body reads reuse bounded serial bridge sessions and preserve per-ID
   results across failures; compatible mutation batches reuse the same bridge
   while retaining Go-side durable journaling between each phase.
+- Selected-body reads and `show` take the body from Mail.app's message file on
+  disk. Mail.app answers only the metadata request, so a body that stalls
+  Mail.app's renderer no longer blocks the read or the commands after it.
+- Mailbox lookup reads each level's names in one Apple Event and descends only
+  into mailboxes that have children. It picks the same mailbox as the previous
+  one-mailbox-at-a-time walk, which remains the fallback.
+- Scan pages by receipt time and local ID instead of an offset, so each page
+  costs the same wherever it sits in the mailbox.
 - Mark/flag verification stops polling confirmed IDs. Delete and Gmail archive
   still use the full settling window to guard against regenerated message IDs.
 
@@ -53,10 +61,31 @@ Representative output checks confirmed that mailbox names, message IDs, search
 IDs, and message detail content matched between the old and optimized paths for
 the benchmarked cases.
 
+### Version 2.3.0
+
+Single runs against local Mail data, serial, 2.2.1 compared with 2.3.0.
+
+| Command class | 2.2.1 | 2.3.0 | Speedup |
+|---|---:|---:|---:|
+| Selected-body read, 30 messages, one account | 105.0s, 2 failed | 2.8s, none failed | 38x |
+| Selected-body read, 138 messages, three accounts | 279.1s, 7 failed | 13.9s, none failed | 20x |
+| Flag then unflag one message, verified | 3.21s | 0.76s | 4.2x |
+| Batch flag then unflag two messages, verified | 2.65s | 1.14s | 2.3x |
+| Mailbox lookup, last of about 400 mailboxes | 1.38s | 0.04s | 31x |
+| Scan page of 5,000 from a 110,000-message mailbox | not possible past the first page | 0.08s to 0.24s | |
+
+Of 152 bodies that both versions returned, 140 matched after whitespace was
+normalized. In 6 of the other 12, Mail.app had returned an empty body and the
+disk read returned the text. The remaining 6 differ where a stylesheet changes
+the layout. Metadata fields matched in every message.
+
 ## Remaining Constraints
 
-- `--with-content` still requires Mail.app/JXA because the Envelope Index does
-  not contain full message bodies or recipient expansion.
+- `list --with-content` still asks Mail.app to render each body. `read` and
+  `show` do not.
+- The disk body is a text conversion of the HTML part. It applies inline
+  styles only, so a layout set by a stylesheet class can differ from
+  Mail.app's rendering in spacing or in which hidden text appears.
 - Provider-specific mailbox storage can differ from visible folder membership;
   index-backed reads must preserve label membership rather than relying only on
   the message storage mailbox.
@@ -68,7 +97,8 @@ the benchmarked cases.
 ## Recommendations
 
 - Prefer metadata-only list/search commands for interactive workflows.
-- Use `--with-content` only when message bodies are needed.
+- Read bodies with `messages read` or `show`. Use `list --with-content` only
+  when neither fits.
 - Keep cache enabled for browsing; use live scans or `--no-cache` lists for
   post-mutation completion checks.
 - Prefer narrow account or mailbox filters when searching large mail stores.

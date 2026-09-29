@@ -32,14 +32,19 @@ var automationLockTimeout = defaultAutomationLockTimeout
 // AutomationTimeoutError reports a bounded Mail.app automation invocation that
 // did not complete. It unwraps to context.DeadlineExceeded so callers can
 // classify it with errors.Is, and exposes the engine and configured timeout for
-// human-readable diagnostics.
+// human-readable diagnostics. Trace is set when the script announced phases.
 type AutomationTimeoutError struct {
 	Engine  string
 	Timeout time.Duration
+	Trace   *PhaseTrace
 }
 
 func (e *AutomationTimeoutError) Error() string {
-	return fmt.Sprintf("%s timed out after %s", e.Engine, e.Timeout)
+	message := fmt.Sprintf("%s timed out after %s", e.Engine, e.Timeout)
+	if detail := e.Trace.describe(); detail != "" {
+		message += " " + detail
+	}
+	return message
 }
 
 func (e *AutomationTimeoutError) Unwrap() error {
@@ -181,11 +186,12 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	if parentErr := parent.Err(); parentErr != nil {
 		return "", parentErr
 	}
+	events, diagnostics := splitPhaseEvents(stderr.String())
 	if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout}
+		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout, Trace: buildPhaseTrace(events, time.Now())}
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
+		return "", fmt.Errorf("%s error: %v - %s", engine, err, diagnostics)
 	}
 	return strings.TrimSpace(out.String()), nil
 }
@@ -285,15 +291,28 @@ func jxaMailboxLookupExpressionFor(mailboxName, variableName string) string {
 
 func jxaMailboxLookupHelper() string {
 	return `
+// A timed-out or severed Apple Event says nothing about whether the object
+// exists, so lookups rethrow it instead of reporting the object missing.
+function isTransportError(e) {
+	const number = e ? e.errorNumber : undefined;
+	return number === -1712 || number === -609 || number === -600;
+}
+
 function isInboxName(name) {
 	return String(name || '').toLowerCase() === 'inbox';
 }
 
 function findMailbox(acc, requestedName, names) {
 	if (isInboxName(requestedName)) {
-		try { return acc.inbox(); } catch (e) {}
+		try { return acc.inbox(); } catch (e) { if (isTransportError(e)) throw e; }
 	}
-	const found = findMailboxByNames(acc.mailboxes(), names);
+	let found;
+	try {
+		found = findMailboxByBulkNames(acc, names);
+	} catch (e) {
+		if (isTransportError(e)) throw e;
+		found = findMailboxByNames(acc.mailboxes(), names);
+	}
 	if (found !== null) {
 		return found;
 	}
@@ -301,7 +320,39 @@ function findMailbox(acc, requestedName, names) {
 		const byName = acc.mailboxes.byName(requestedName);
 		byName.name();
 		return byName;
-	} catch (e) {}
+	} catch (e) { if (isTransportError(e)) throw e; }
+	return null;
+}
+
+// findMailboxByBulkNames visits mailboxes in the same order as
+// findMailboxByNames, but reads each level's names in one Apple Event and
+// only descends into mailboxes that have children. It throws when Mail.app
+// answers inconsistently, and the caller then walks one mailbox at a time.
+function findMailboxByBulkNames(container, names) {
+	const list = container.mailboxes;
+	const levelNames = list.name();
+	if (levelNames.length === 0) {
+		return null;
+	}
+	const childNames = list.mailboxes.name();
+	if (childNames.length !== levelNames.length) {
+		throw new Error('mailbox list changed during lookup');
+	}
+	for (let i = 0; i < levelNames.length; i++) {
+		if (names.includes(levelNames[i])) {
+			const mailbox = list[i];
+			if (mailbox.name() !== levelNames[i]) {
+				throw new Error('mailbox list changed during lookup');
+			}
+			return mailbox;
+		}
+		if (childNames[i] && childNames[i].length > 0) {
+			const child = findMailboxByBulkNames(list[i], names);
+			if (child !== null) {
+				return child;
+			}
+		}
+	}
 	return null;
 }
 
@@ -316,7 +367,7 @@ function findMailboxByNames(mailboxes, names) {
 			if (child !== null) {
 				return child;
 			}
-		} catch (e) {}
+		} catch (e) { if (isTransportError(e)) throw e; }
 	}
 	return null;
 }

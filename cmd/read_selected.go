@@ -12,14 +12,18 @@ import (
 
 func newMessagesReadCmd() *cobra.Command {
 	var timeout, budget time.Duration
+	var bodySource string
 	cmd := &cobra.Command{
 		Use:         "read <message-id> [message-id...]",
 		Short:       "Read selected bodies serially with per-message results",
 		Args:        cobra.MinimumNArgs(1),
-		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on any missing/incomplete body. No automatic retry of a failed ID. Existing show remains unchanged."},
+		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on any missing/incomplete body. No automatic retry of a failed ID. Bodies are read from Mail.app's message files, so a read does not wait on Mail.app to render; contentSource says where each body came from and --body-source mail restores rendering by Mail.app. Each item carries diagnostics with per-phase timings; after a timeout, diagnostics.pending names the operation Mail.app had not answered. Existing show remains unchanged."},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if timeout <= 0 || budget <= 0 {
 				return clierr.Usage("--timeout and --budget must be positive")
+			}
+			if err := mailClient.SetBodySource(bodySource); err != nil {
+				return clierr.Usage(`--body-source must be "disk" or "mail"`)
 			}
 			ids := uniqueStrings(trimAll(args))
 			for _, id := range ids {
@@ -67,6 +71,7 @@ func newMessagesReadCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Maximum bridge execution time per message")
+	cmd.Flags().StringVar(&bodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
 	cmd.Flags().DurationVar(&budget, "budget", 45*time.Second, "Total body-read budget including bridge queueing")
 	return cmd
 }

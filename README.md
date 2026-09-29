@@ -97,12 +97,55 @@ mail-app-cli messages batch archive 100001 100002 --mark-read --verify --json
 
 `scan` always reads live state, returning `messages` with their observed
 `mailboxes` and a `coverage` entry for every requested scope. A failed mailbox
-or a result exceeding the per-mailbox limit sets `complete:false` and exits 5;
-increase the limit or narrow the scope. `--limit 0` removes the limit. An empty
-query lists messages. These are sequential observations, not an atomic snapshot;
-rerun after mutations. `--since` filters receipt time, not last-modified time.
+or a mailbox with more matches than `--limit` sets `complete:false` and exits 5.
+`--limit 0` removes the limit. An empty query lists messages. These are
+sequential observations, not an atomic snapshot; rerun after mutations.
 Scan coverage requires the Envelope Index; an unavailable index or unresolved
 mailbox is reported as incomplete rather than silently using a limited fallback.
+
+Each coverage entry reports `exhausted` and `remaining`. While the result has a
+`nextCursor`, repeat the same arguments with `--cursor` to read the next page:
+
+```bash
+mail-app-cli messages scan 'All Mail' -a "Example Account" --limit 5000 --json
+mail-app-cli messages scan 'All Mail' -a "Example Account" --limit 5000 --cursor "$NEXT_CURSOR" --json
+```
+
+Pages run newest first. The traversal is finished when a result has no
+`nextCursor`. A cursor skips mailboxes that are already exhausted and retries a
+mailbox that failed. It works only with the mailboxes and filters it was issued
+for, though `--limit` may change between pages. Mail that arrives after the
+first page is not part of the traversal.
+
+`--since` filters receipt time, not last-modified time. It cannot find an older
+message whose read state or labels changed, so check those with `--unread` or a
+full traversal.
+
+`read` and `show` take the body from the message file Mail.app keeps on disk
+and ask Mail.app only for metadata. Asking Mail.app to render a body is slow,
+and some messages stall it for every later request. `contentSource` is `disk`
+or `mail`. A message with no readable file falls back to Mail.app. The disk
+text follows Mail.app's rendering: the HTML part when there is one, without
+`display:none` elements, with list markers, and without `>` reply markers. It
+leaves out the placeholder character Mail.app inserts for each inline image,
+and it can differ in spacing where a stylesheet changes the layout.
+`--body-source mail` makes Mail.app render the body as before.
+
+`read` times each phase of a body read in `diagnostics`. When a read times out,
+`pending` names the operation Mail.app had not answered and `lastCompleted` the
+one before it:
+
+```json
+{"id": "100001", "account": "Example Account", "mailbox": "INBOX",
+ "error": "jxa timed out after 10s during content (9.8s in phase); last completed lookup_by_id",
+ "diagnostics": {"phases": [{"name": "disk_body", "elapsedMs": 6, "note": "unavailable: no message file on disk"}, {"name": "resolve_account", "elapsedMs": 41}, {"name": "resolve_mailbox", "elapsedMs": 38}, {"name": "lookup_by_id", "elapsedMs": 2}],
+  "lastCompleted": "lookup_by_id", "pending": "content", "pendingMs": 9829}}
+```
+
+The phases are `disk_body`, `resolve_account`, `resolve_mailbox`,
+`lookup_by_id`, `enumerate_ids` (only when the direct lookup misses), `content`
+(only when Mail.app renders the body), `recipients`, and `metadata`. `message not found` now means Mail.app answered and the mailbox
+does not hold the ID. A Mail.app error is reported with its phase.
 
 `read` returns one result per selected ID. A missing body or timeout sets
 `complete:false` and exits 5 while retaining successful reads. Each message has
@@ -228,7 +271,7 @@ ID      STATUS   LOCATION      DETAIL
  "items": [{"id": "100001", "account": "Example Account", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
 ```
 
-`--verify` re-reads each message afterwards and records `verifyStatus`. Mutation counts remain separate from verification: a move accepted by Mail.app can be `succeeded` while its destination is `applied_destination_unverified`. The receipt records `unverified`, returns `ok: false` with `code: "mutation_failed"`, and exits 6 so callers know the requested proof is incomplete. `ok` means "this command did what you asked and any requested verification completed", so check it, or check the exit code, before trusting a receipt.
+`--verify` re-reads each message afterwards and records `verifyStatus`. Mutation counts remain separate from verification: a move accepted by Mail.app can be `succeeded` while its destination is `applied_destination_unverified`. The receipt records `unverified`, returns `ok: false` with `code: "mutation_failed"`, and exits 6 so callers know the requested proof is incomplete. For an archive or move, `observed` reports `sourcePresent`, `destinationPresent`, and `destinationRead` separately, found by sender, subject, sent date, and size instead of the old local ID. When Mail.app regenerates a Gmail message in INBOX after an archive, `verifyStatus` is `present_in_source` and `observed.sourceIds` holds the new local ID. `ok` means "this command did what you asked and any requested verification completed", so check it, or check the exit code, before trusting a receipt.
 
 Bulk selection by query, sender, or domain lives under `messages batch` and needs `--yes` for archive, delete, and move unless `--dry-run` is set:
 
