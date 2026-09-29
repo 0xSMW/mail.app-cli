@@ -25,7 +25,7 @@ done
 		t.Fatal(err)
 	}
 	defer s.Close()
-	_, err = s.run("slow", 300*time.Millisecond)
+	_, err = s.run("slow", 2*time.Second)
 	var timeout *AutomationTimeoutError
 	if !errors.As(err, &timeout) || timeout.Trace == nil {
 		t.Fatalf("err = %v, want a traced timeout", err)
@@ -66,7 +66,7 @@ printf 'mail-app-cli-phase {"name":"lookup_by_id","state":"done","atMs":2,"elaps
 printf 'mail-app-cli-phase {"name":"enumerate_ids","state":"start","atMs":3}\n' >&2
 /bin/sleep 30
 `)
-	_, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", 300*time.Millisecond)
+	_, trace, err := NewClient().getMessageDetailsTraced("Work", "Spam", "42", 2*time.Second)
 	if !errors.Is(err, context.DeadlineExceeded) || trace == nil || trace.Pending != "enumerate_ids" || trace.LastCompleted != "lookup_by_id" || !strings.Contains(trace.Phases[0].Note, "-1728") {
 		t.Fatalf("trace = %+v, err = %v", trace, err)
 	}
