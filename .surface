@@ -274,6 +274,7 @@ messages read --budget
 messages read --help (-h)
 messages read --timeout
 messages scan
+messages scan --cursor
 messages scan --help (-h)
 messages scan --limit
 messages scan --query

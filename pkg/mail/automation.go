@@ -32,14 +32,19 @@ var automationLockTimeout = defaultAutomationLockTimeout
 // AutomationTimeoutError reports a bounded Mail.app automation invocation that
 // did not complete. It unwraps to context.DeadlineExceeded so callers can
 // classify it with errors.Is, and exposes the engine and configured timeout for
-// human-readable diagnostics.
+// human-readable diagnostics. Trace is set when the script announced phases.
 type AutomationTimeoutError struct {
 	Engine  string
 	Timeout time.Duration
+	Trace   *PhaseTrace
 }
 
 func (e *AutomationTimeoutError) Error() string {
-	return fmt.Sprintf("%s timed out after %s", e.Engine, e.Timeout)
+	message := fmt.Sprintf("%s timed out after %s", e.Engine, e.Timeout)
+	if detail := e.Trace.describe(); detail != "" {
+		message += " " + detail
+	}
+	return message
 }
 
 func (e *AutomationTimeoutError) Unwrap() error {
@@ -181,11 +186,12 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	if parentErr := parent.Err(); parentErr != nil {
 		return "", parentErr
 	}
+	events, diagnostics := splitPhaseEvents(stderr.String())
 	if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout}
+		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout, Trace: buildPhaseTrace(events, time.Now())}
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
+		return "", fmt.Errorf("%s error: %v - %s", engine, err, diagnostics)
 	}
 	return strings.TrimSpace(out.String()), nil
 }
@@ -285,13 +291,20 @@ func jxaMailboxLookupExpressionFor(mailboxName, variableName string) string {
 
 func jxaMailboxLookupHelper() string {
 	return `
+// A timed-out or severed Apple Event says nothing about whether the object
+// exists, so lookups rethrow it instead of reporting the object missing.
+function isTransportError(e) {
+	const number = e ? e.errorNumber : undefined;
+	return number === -1712 || number === -609 || number === -600;
+}
+
 function isInboxName(name) {
 	return String(name || '').toLowerCase() === 'inbox';
 }
 
 function findMailbox(acc, requestedName, names) {
 	if (isInboxName(requestedName)) {
-		try { return acc.inbox(); } catch (e) {}
+		try { return acc.inbox(); } catch (e) { if (isTransportError(e)) throw e; }
 	}
 	const found = findMailboxByNames(acc.mailboxes(), names);
 	if (found !== null) {
@@ -301,7 +314,7 @@ function findMailbox(acc, requestedName, names) {
 		const byName = acc.mailboxes.byName(requestedName);
 		byName.name();
 		return byName;
-	} catch (e) {}
+	} catch (e) { if (isTransportError(e)) throw e; }
 	return null;
 }
 
@@ -316,7 +329,7 @@ function findMailboxByNames(mailboxes, names) {
 			if (child !== null) {
 				return child;
 			}
-		} catch (e) {}
+		} catch (e) { if (isTransportError(e)) throw e; }
 	}
 	return null;
 }

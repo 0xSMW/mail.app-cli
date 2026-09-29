@@ -16,7 +16,7 @@ func newMessagesReadCmd() *cobra.Command {
 		Use:         "read <message-id> [message-id...]",
 		Short:       "Read selected bodies serially with per-message results",
 		Args:        cobra.MinimumNArgs(1),
-		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on any missing/incomplete body. No automatic retry of a failed ID. Existing show remains unchanged."},
+		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on any missing/incomplete body. No automatic retry of a failed ID. Each item carries diagnostics with per-phase timings; after a timeout, diagnostics.pending names the operation Mail.app had not answered. Existing show remains unchanged."},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if timeout <= 0 || budget <= 0 {
 				return clierr.Usage("--timeout and --budget must be positive")

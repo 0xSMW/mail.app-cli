@@ -1,7 +1,11 @@
 package mail
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -14,8 +18,10 @@ type ScanRequest struct {
 	Scopes []SearchMailbox
 	Query  string
 	Since  string
-	Limit  int // per mailbox; zero means unlimited
+	Limit  int // per mailbox and page; zero means unlimited
 	Unread bool
+	// Cursor is a NextCursor from an earlier page of the same request.
+	Cursor string
 }
 
 type ScanMessage struct {
@@ -41,19 +47,116 @@ func (m ScanMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
+// ScanCoverage reports one requested mailbox. Remaining counts the matching
+// messages older than this page; Exhausted means the traversal reached the
+// end of the mailbox.
 type ScanCoverage struct {
 	SearchMailbox
 	Count     int    `json:"count"`
 	Truncated bool   `json:"truncated"`
+	Exhausted bool   `json:"exhausted"`
+	Remaining int    `json:"remaining"`
 	Error     string `json:"error,omitempty"`
 }
 
 type ScanResult struct {
-	Messages  []ScanMessage  `json:"messages"`
-	Coverage  []ScanCoverage `json:"coverage"`
-	Complete  bool           `json:"complete"`
-	StartedAt string         `json:"startedAt"`
-	EndedAt   string         `json:"endedAt"`
+	Messages []ScanMessage  `json:"messages"`
+	Coverage []ScanCoverage `json:"coverage"`
+	Complete bool           `json:"complete"`
+	// NextCursor continues every mailbox that is not yet exhausted. It is
+	// empty once the traversal has covered every requested mailbox.
+	NextCursor string `json:"nextCursor,omitempty"`
+	StartedAt  string `json:"startedAt"`
+	EndedAt    string `json:"endedAt"`
+}
+
+// ScanPosition is the last message a traversal returned from one mailbox.
+type ScanPosition struct {
+	ReceivedUnix int64 `json:"receivedUnix"`
+	ID           int64 `json:"id"`
+}
+
+type scanPage struct {
+	Messages  []Message
+	Remaining int
+	Last      *ScanPosition
+}
+
+type scanCursorScope struct {
+	Account string        `json:"account"`
+	Mailbox string        `json:"mailbox"`
+	Done    bool          `json:"done,omitempty"`
+	After   *ScanPosition `json:"after,omitempty"`
+}
+
+type scanCursor struct {
+	Version int               `json:"v"`
+	Request string            `json:"request"`
+	Scopes  []scanCursorScope `json:"scopes"`
+}
+
+// ErrInvalidScanCursor reports a cursor that is unreadable or that belongs
+// to a different scan request.
+var ErrInvalidScanCursor = errors.New("invalid scan cursor")
+
+const scanCursorVersion = 1
+
+func uniqueScanScopes(scopes []SearchMailbox) []SearchMailbox {
+	seen := map[SearchMailbox]bool{}
+	unique := make([]SearchMailbox, 0, len(scopes))
+	for _, scope := range scopes {
+		if !seen[scope] {
+			seen[scope] = true
+			unique = append(unique, scope)
+		}
+	}
+	return unique
+}
+
+// scanRequestFingerprint binds a cursor to the filters it was issued for.
+// The page size is left out so a caller may change --limit between pages.
+func scanRequestFingerprint(req ScanRequest, scopes []SearchMailbox) string {
+	data, _ := json.Marshal(struct {
+		Scopes []SearchMailbox
+		Query  []string
+		Since  string
+		Unread bool
+	}{scopes, searchTerms(req.Query), strings.TrimSpace(req.Since), req.Unread})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:8])
+}
+
+func encodeScanCursor(cursor scanCursor) string {
+	data, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+func decodeScanCursor(value string, req ScanRequest, scopes []SearchMailbox) (scanCursor, error) {
+	fresh := scanCursor{Version: scanCursorVersion, Request: scanRequestFingerprint(req, scopes), Scopes: make([]scanCursorScope, len(scopes))}
+	for i, scope := range scopes {
+		fresh.Scopes[i] = scanCursorScope{Account: scope.Account, Mailbox: scope.Mailbox}
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fresh, nil
+	}
+	data, err := base64.RawURLEncoding.DecodeString(value)
+	if err != nil {
+		return scanCursor{}, fmt.Errorf("%w: not a cursor returned by scan", ErrInvalidScanCursor)
+	}
+	var cursor scanCursor
+	if err := json.Unmarshal(data, &cursor); err != nil || cursor.Version != scanCursorVersion {
+		return scanCursor{}, fmt.Errorf("%w: not a cursor returned by this version of scan", ErrInvalidScanCursor)
+	}
+	if cursor.Request != fresh.Request || len(cursor.Scopes) != len(scopes) {
+		return scanCursor{}, fmt.Errorf("%w: it was issued for different mailboxes or filters; repeat the original scan arguments", ErrInvalidScanCursor)
+	}
+	for i, scope := range scopes {
+		if cursor.Scopes[i].Account != scope.Account || cursor.Scopes[i].Mailbox != scope.Mailbox {
+			return scanCursor{}, fmt.Errorf("%w: it was issued for different mailboxes or filters; repeat the original scan arguments", ErrInvalidScanCursor)
+		}
+	}
+	return cursor, nil
 }
 
 func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
@@ -71,67 +174,60 @@ func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
 			return ScanResult{}, fmt.Errorf("scan scopes need both account and mailbox")
 		}
 	}
-	return scanMessages(req, func(scope SearchMailbox, limit int) ([]Message, error) {
+	return scanMessages(req, func(scope SearchMailbox, limit int, after *ScanPosition) (scanPage, error) {
 		if err := c.Done(); err != nil {
-			return nil, err
+			return scanPage{}, err
 		}
 		// Legacy JXA list/search fallbacks can skip inaccessible messages or
 		// cap the mailbox enumeration. They cannot prove complete coverage.
 		mbox, ok, err := c.resolveIndexMailbox(scope.Account, scope.Mailbox)
 		if err != nil {
-			return nil, err
+			return scanPage{}, err
 		}
 		if !ok {
-			return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s/%s; check mailbox name and Full Disk Access", scope.Account, scope.Mailbox)
+			return scanPage{}, fmt.Errorf("mailbox unavailable in Envelope Index: %s/%s; check mailbox name and Full Disk Access", scope.Account, scope.Mailbox)
 		}
-		if strings.TrimSpace(req.Query) == "" {
-			return c.getMessagesFromIndex(scope.Account, mbox, limit, 0, req.Unread, false, req.Since)
-		}
-		// Filter before limiting so read matches cannot crowd unread matches out.
-		searchLimit := limit
-		if req.Unread {
-			searchLimit = 0
-		}
-		messages, err := c.searchMessagesFromIndex(req.Query, scope.Account, mbox, searchLimit, req.Since)
-		if req.Unread {
-			unread := make([]Message, 0, len(messages))
-			for _, message := range messages {
-				if !message.Read {
-					unread = append(unread, message)
-				}
-			}
-			messages = unread
-		}
-		return messages, err
-	}), nil
+		return c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
+	})
 }
 
-func scanMessages(req ScanRequest, read func(SearchMailbox, int) ([]Message, error)) ScanResult {
+func scanMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
+	scopes := uniqueScanScopes(req.Scopes)
+	cursor, err := decodeScanCursor(req.Cursor, req, scopes)
+	if err != nil {
+		return ScanResult{}, err
+	}
 	result := ScanResult{Messages: []ScanMessage{}, Coverage: []ScanCoverage{}, Complete: true, StartedAt: time.Now().Format(time.RFC3339Nano)}
-	seenScopes := map[SearchMailbox]bool{}
 	seenMessages := map[string]int{}
-	limit := req.Limit
-	if limit > 0 {
-		limit++
-	} // detect truncation, including exact-boundary results
-	for _, scope := range req.Scopes {
-		if seenScopes[scope] {
+	unfinished := false
+	for i, scope := range scopes {
+		state := &cursor.Scopes[i]
+		coverage := ScanCoverage{SearchMailbox: scope}
+		if state.Done {
+			// An earlier page already reached the end of this mailbox.
+			coverage.Exhausted = true
+			result.Coverage = append(result.Coverage, coverage)
 			continue
 		}
-		seenScopes[scope] = true
-		coverage := ScanCoverage{SearchMailbox: scope}
-		messages, err := read(scope, limit)
+		page, err := read(scope, req.Limit, state.After)
 		if err != nil {
+			// The position is kept, so the next page retries this mailbox.
 			coverage.Error = err.Error()
 			result.Complete = false
+			unfinished = true
 		} else {
-			if req.Limit > 0 && len(messages) > req.Limit {
-				coverage.Truncated = true
+			coverage.Count = len(page.Messages)
+			coverage.Remaining = page.Remaining
+			coverage.Exhausted = page.Remaining == 0
+			coverage.Truncated = !coverage.Exhausted
+			if coverage.Exhausted {
+				state.Done, state.After = true, nil
+			} else {
+				state.After = page.Last
 				result.Complete = false
-				messages = messages[:req.Limit]
+				unfinished = true
 			}
-			coverage.Count = len(messages)
-			for _, message := range messages {
+			for _, message := range page.Messages {
 				key := scope.Account + "\x00" + message.ID
 				if index, found := seenMessages[key]; found {
 					result.Messages[index].Mailboxes = append(result.Messages[index].Mailboxes, scope.Mailbox)
@@ -144,7 +240,10 @@ func scanMessages(req ScanRequest, read func(SearchMailbox, int) ([]Message, err
 		}
 		result.Coverage = append(result.Coverage, coverage)
 	}
+	if unfinished {
+		result.NextCursor = encodeScanCursor(cursor)
+	}
 	sort.SliceStable(result.Messages, func(i, j int) bool { return result.Messages[i].DateReceived > result.Messages[j].DateReceived })
 	result.EndedAt = time.Now().Format(time.RFC3339Nano)
-	return result
+	return result, nil
 }

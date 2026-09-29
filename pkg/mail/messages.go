@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -260,53 +261,82 @@ func (c *Client) GetMessageDetailsJSON(accountName, mailboxName, messageID strin
 }
 
 func (c *Client) getMessageDetailsWithTimeout(accountName, mailboxName, messageID string, timeout time.Duration) (*Message, error) {
+	message, _, err := c.getMessageDetailsTraced(accountName, mailboxName, messageID, timeout)
+	return message, err
+}
+
+// getMessageDetailsTraced reads one message as named phases, so a timeout or
+// a Mail.app error names the operation it happened in. A nil message with a
+// nil error means the mailbox answered and does not hold the ID; every other
+// failure is returned as an error.
+func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID string, timeout time.Duration) (*Message, *PhaseTrace, error) {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
-let result = null;
 const requestedMailbox = '%s';
+const requestedAccount = '%s';
+const requestedId = '%s';
 %s
 
-try {
-	const acc = mail.accounts.byName('%s');
-	const mbox = %s;
-	let msg = null;
-	try {
-		msg = mbox.messages.byId(Number('%s'));
-		msg.id();
-	} catch (e) {
-		msg = null;
+function recipientAddresses(recipients) {
+	const addresses = [];
+	for (let i = 0; i < recipients.length; i++) {
+		addresses.push(recipients[i].address());
 	}
-	if (msg === null) {
-		const allIds = mbox.messages.id();
-		const targetIdx = allIds.findIndex(id => String(id) === '%s');
-		if (targetIdx >= 0) {
-			msg = mbox.messages.at(targetIdx);
+	return addresses;
+}
+
+let message = null;
+let failure = null;
+try {
+	phase('bridge_start', () => null);
+	const acc = phase('resolve_account', () => {
+		const account = mail.accounts.byName(requestedAccount);
+		account.name();
+		return account;
+	});
+	const mbox = phase('resolve_mailbox', () => {
+		const found = %s;
+		if (found === null) throw new Error('mailbox not found: ' + requestedMailbox);
+		found.name();
+		return found;
+	});
+	let msg = phase('lookup_by_id', (step) => {
+		try {
+			const direct = mbox.messages.byId(Number(requestedId));
+			direct.id();
+			return direct;
+		} catch (e) {
+			if (isTransportError(e)) throw e;
+			step.note = 'miss: ' + describeError(e);
+			return null;
 		}
+	});
+	if (msg === null) {
+		msg = phase('enumerate_ids', (step) => {
+			const allIds = mbox.messages.id();
+			step.note = allIds.length + ' ids';
+			const targetIdx = allIds.findIndex(id => String(id) === requestedId);
+			return targetIdx >= 0 ? mbox.messages.at(targetIdx) : null;
+		});
 	}
 	if (msg !== null) {
 		let content = '';
 		let contentError = '';
-		try { content = msg.content() || ''; } catch(e) { contentError = String(e); }
-
-		const toRecipients = [];
-		const toRecs = msg.toRecipients();
-		for (let t = 0; t < toRecs.length; t++) {
-			toRecipients.push(toRecs[t].address());
-		}
-
-		const ccRecipients = [];
-		const ccRecs = msg.ccRecipients();
-		for (let c = 0; c < ccRecs.length; c++) {
-			ccRecipients.push(ccRecs[c].address());
-		}
-
-		const bccRecipients = [];
-		const bccRecs = msg.bccRecipients();
-		for (let b = 0; b < bccRecs.length; b++) {
-			bccRecipients.push(bccRecs[b].address());
-		}
-
-		result = {
+		phase('content', (step) => {
+			try {
+				content = msg.content() || '';
+			} catch (e) {
+				if (isTransportError(e)) throw e;
+				contentError = describeError(e);
+				step.note = 'unavailable';
+			}
+		});
+		const recipients = phase('recipients', () => ({
+			to: recipientAddresses(msg.toRecipients()),
+			cc: recipientAddresses(msg.ccRecipients()),
+			bcc: recipientAddresses(msg.bccRecipients())
+		}));
+		message = phase('metadata', () => ({
 			id: String(msg.id()),
 			rfcMessageId: rfcMessageId(msg),
 			subject: msg.subject() || '',
@@ -320,32 +350,59 @@ try {
 			contentError: contentError,
 			mailbox: mbox.name(),
 			account: acc.name(),
-			toRecipients: toRecipients,
-			ccRecipients: ccRecipients,
-			bccRecipients: bccRecipients
-		};
+			toRecipients: recipients.to,
+			ccRecipients: recipients.cc,
+			bccRecipients: recipients.bcc
+		}));
 	}
 } catch (e) {
-	// Handle errors gracefully
+	failure = {phase: currentPhase, message: describeError(e), number: e && e.errorNumber !== undefined ? e.errorNumber : 0};
 }
 
-JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
+JSON.stringify({message: message, failure: failure, phases: phaseLog});
+`, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName))
 
 	output, err := c.runJXAWithTimeout(script, timeout)
 	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(output) == "null" {
-		return nil, nil
-	}
-
-	var message Message
-	if err := json.Unmarshal([]byte(output), &message); err != nil {
-		return nil, fmt.Errorf("failed to parse message JSON: %w", err)
+		var timeoutErr *AutomationTimeoutError
+		if errors.As(err, &timeoutErr) {
+			return nil, timeoutErr.Trace, err
+		}
+		return nil, nil, err
 	}
 
-	return &message, nil
+	var envelope struct {
+		Message *Message `json:"message"`
+		Failure *struct {
+			Phase   string `json:"phase"`
+			Message string `json:"message"`
+			Number  int    `json:"number"`
+		} `json:"failure"`
+		Phases []AutomationPhase `json:"phases"`
+	}
+	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
+		return nil, nil, fmt.Errorf("failed to parse message JSON: %w", err)
+	}
+	trace := &PhaseTrace{Phases: envelope.Phases}
+	if trace.Phases == nil {
+		trace.Phases = []AutomationPhase{}
+	}
+	for _, step := range trace.Phases {
+		if step.Error == "" {
+			trace.LastCompleted = step.Name
+		}
+	}
+	if failure := envelope.Failure; failure != nil {
+		// -1728 is Mail.app reporting that the named object does not exist.
+		switch {
+		case failure.Phase == "resolve_account" && failure.Number == -1728:
+			return nil, trace, notFound("account", accountName)
+		case failure.Phase == "resolve_mailbox" && strings.HasPrefix(failure.Message, "mailbox not found"):
+			return nil, trace, notFound("mailbox", mailboxName)
+		}
+		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
+	}
+	return envelope.Message, trace, nil
 }
 
 // GetMessageDetailsForVerificationJSON reads a message for a post-mutation

@@ -22,6 +22,7 @@ type indexMailbox struct {
 
 type indexMessage struct {
 	ID            int64  `json:"ID"`
+	ReceivedUnix  int64  `json:"ReceivedUnix"`
 	Subject       string `json:"Subject"`
 	Sender        string `json:"Sender"`
 	DateSent      string `json:"DateSent"`
@@ -348,10 +349,19 @@ func parseSinceUnix(since string) (int64, bool, error) {
 	return 0, false, fmt.Errorf("invalid --since date %q", since)
 }
 
+const indexMessageFrom = `
+from messages m
+join subjects s on s.ROWID = m.subject
+join addresses a on a.ROWID = m.sender
+left join summaries su on su.ROWID = m.summary
+join mailboxes mb on mb.ROWID = m.mailbox
+`
+
 func buildIndexMessageSelect(accountName, mailboxName string) string {
 	return fmt.Sprintf(`
 select
 	m.ROWID as ID,
+	coalesce(m.date_received, 0) as ReceivedUnix,
 	coalesce(s.subject, '') as Subject,
 	case
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
@@ -369,13 +379,7 @@ select
 	%s as Account,
 	'' as ToRecipients,
 	'' as CcRecipients,
-	'' as BccRecipients
-from messages m
-join subjects s on s.ROWID = m.subject
-join addresses a on a.ROWID = m.sender
-left join summaries su on su.ROWID = m.summary
-join mailboxes mb on mb.ROWID = m.mailbox
-`, sqlQuote(mailboxName), sqlQuote(accountName))
+	'' as BccRecipients`, sqlQuote(mailboxName), sqlQuote(accountName)) + indexMessageFrom
 }
 
 func indexMailboxMembershipCondition(mbox *indexMailbox) string {
@@ -480,7 +484,10 @@ where %s
 	return byID, nil
 }
 
-func (c *Client) getIdentityCountsForVerification(accountName, mailboxName string, identities []StableIdentity) (map[string]int, error) {
+// getIdentityMatchesForVerification finds the live rows matching each stable
+// identity in one mailbox, keyed by the identity's fallback key. A message
+// regenerated under a new local ID is found by this lookup.
+func (c *Client) getIdentityMatchesForVerification(accountName, mailboxName string, identities []StableIdentity) (map[string][]Message, error) {
 	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
 	if err != nil {
 		return nil, err
@@ -505,7 +512,7 @@ func (c *Client) getIdentityCountsForVerification(accountName, mailboxName strin
 		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
 	}
 	if len(conditions) == 0 {
-		return map[string]int{}, nil
+		return map[string][]Message{}, nil
 	}
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
@@ -516,11 +523,78 @@ where %s
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(rows))
+	matches := make(map[string][]Message, len(rows))
 	for _, message := range indexMessagesToMessages(rows) {
-		counts[StableIdentityFromMessage(message).fallbackKey()]++
+		key := StableIdentityFromMessage(message).fallbackKey()
+		matches[key] = append(matches[key], message)
 	}
-	return counts, nil
+	return matches, nil
+}
+
+func indexSearchTermConditions(terms []string) []string {
+	conditions := make([]string, 0, len(terms))
+	for _, term := range terms {
+		needle := sqlQuote(escapeSQLLikePattern(term))
+		conditions = append(conditions, fmt.Sprintf(`(
+		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
+		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
+		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
+		or lower(coalesce(su.summary, '')) like '%%' || %s || '%%' escape '\'
+	)`, needle, needle, needle, needle))
+	}
+	return conditions
+}
+
+// scanMessagesFromIndex reads one page of a mailbox in a fixed order: newest
+// receipt first, then highest local ID. The position after the last row
+// resumes the traversal without an offset, so mail arriving between pages
+// cannot shift a row across a page boundary.
+func (c *Client) scanMessagesFromIndex(accountName string, mbox *indexMailbox, req ScanRequest, limit int, after *ScanPosition) (scanPage, error) {
+	sinceUnix, hasSince, err := parseSinceUnix(req.Since)
+	if err != nil {
+		return scanPage{}, err
+	}
+	where := []string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}
+	if req.Unread {
+		where = append(where, "m.read = 0")
+	}
+	if hasSince {
+		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
+	}
+	where = append(where, indexSearchTermConditions(searchTerms(req.Query))...)
+	if after != nil {
+		where = append(where, fmt.Sprintf("(coalesce(m.date_received, 0) < %d or (coalesce(m.date_received, 0) = %d and m.ROWID < %d))", after.ReceivedUnix, after.ReceivedUnix, after.ID))
+	}
+	query := buildIndexMessageSelect(accountName, mbox.Name) + "where " + strings.Join(where, "\n\tand ") + "\norder by coalesce(m.date_received, 0) desc, m.ROWID desc"
+	if limit > 0 {
+		query += "\nlimit " + strconv.Itoa(limit)
+	}
+	query += ";"
+	var rows []indexMessage
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return scanPage{}, err
+	}
+	page := scanPage{Messages: indexMessagesToMessages(rows)}
+	if len(rows) == 0 {
+		return page, nil
+	}
+	last := rows[len(rows)-1]
+	page.Last = &ScanPosition{ReceivedUnix: last.ReceivedUnix, ID: last.ID}
+	if limit <= 0 || len(rows) < limit {
+		return page, nil
+	}
+	where = append(where, fmt.Sprintf("(coalesce(m.date_received, 0) < %d or (coalesce(m.date_received, 0) = %d and m.ROWID < %d))", last.ReceivedUnix, last.ReceivedUnix, last.ID))
+	var counts []struct {
+		Remaining int `json:"Remaining"`
+	}
+	if err := c.runEnvelopeIndexQuery("select count(*) as Remaining"+indexMessageFrom+"where "+strings.Join(where, "\n\tand ")+";", &counts); err != nil {
+		return scanPage{}, err
+	}
+	if len(counts) != 1 {
+		return scanPage{}, fmt.Errorf("envelope index returned no remaining count for %s", mbox.Name)
+	}
+	page.Remaining = counts[0].Remaining
+	return page, nil
 }
 
 func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *indexMailbox, limit int, since string) ([]Message, error) {
@@ -541,15 +615,7 @@ func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *in
 	if hasSince {
 		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
 	}
-	for _, term := range terms {
-		needle := sqlQuote(escapeSQLLikePattern(term))
-		where = append(where, fmt.Sprintf(`(
-		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
-		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
-		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
-		or lower(coalesce(su.summary, '')) like '%%' || %s || '%%' escape '\'
-	)`, needle, needle, needle, needle))
-	}
+	where = append(where, indexSearchTermConditions(terms)...)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
 order by m.date_received desc
