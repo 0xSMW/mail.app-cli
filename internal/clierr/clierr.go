@@ -124,7 +124,20 @@ func Classify(err error) *Error {
 	var partial *mail.PartialSearchError
 	var notFound *mail.NotFoundError
 	var batchFailed *mail.BatchFailedError
+	var mutation *mail.MutationError
 	switch {
+	case errors.As(err, &mutation):
+		if mutation.Phase == "sender_selection" && !mutation.Attempted {
+			return Wrap(CodeUsage, err, err.Error()).WithHint("choose a sender address configured on the selected account")
+		}
+		classified := Wrap(CodeMutationFailed, err, err.Error())
+		if mutation.Uncertain || mutation.Submitted {
+			return classified.WithHint("check the sending account before retrying; this operation may already have submitted the message")
+		}
+		if mutation.Saved {
+			return classified.WithHint("inspect the saved draft before attempting another creation")
+		}
+		return classified
 	case errors.As(err, &batchFailed):
 		return Wrap(CodeMutationFailed, err, err.Error())
 	case errors.As(err, &lockTimeout):
