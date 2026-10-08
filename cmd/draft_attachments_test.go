@@ -8,6 +8,7 @@ import (
 )
 
 func TestDraftAttachmentDryRun(t *testing.T) {
+	writeOutgoingCLIResponse(t, `{"ok":true,"result":{"account":"Work","accountId":"work-id","sender":"work@example.test","status":"preview","submitted":false}}`)
 	dir := t.TempDir()
 	first := filepath.Join(dir, "review, one.pdf")
 	second := filepath.Join(dir, "review two.pdf")
