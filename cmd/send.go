@@ -1,11 +1,13 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -19,10 +21,13 @@ var (
 	sendSignature   string
 	sendAttachments []string
 	sendDryRun      bool
+	sendFrom        string
 )
 
 type sendReceipt struct {
 	Account     string   `json:"account"`
+	AccountID   string   `json:"accountId,omitempty"`
+	Sender      string   `json:"sender,omitempty"`
 	To          []string `json:"to"`
 	Cc          []string `json:"cc"`
 	Bcc         []string `json:"bcc"`
@@ -32,6 +37,9 @@ type sendReceipt struct {
 	Signature   string   `json:"signature,omitempty"`
 	DryRun      bool     `json:"dryRun"`
 	Sent        bool     `json:"sent"`
+	Submitted   bool     `json:"submitted"`
+	Status      string   `json:"status"`
+	Uncertain   bool     `json:"uncertain,omitempty"`
 }
 
 var sendCmd = &cobra.Command{
@@ -76,12 +84,32 @@ Examples:
 			Subject: sendSubject, Body: body, Attachments: nonNil(sendAttachments), Signature: sendSignature,
 			DryRun: sendDryRun,
 		}
-		if !sendDryRun {
-			if err := mailClient.SendMessage(account, sendSubject, body, sendTo, sendCc, sendBcc, sendAttachments); err != nil {
-				return fmt.Errorf("send message: %w", err)
-			}
-			receipt.Sent = true
+		input := mail.OutgoingInput{Account: account, Sender: sendFrom, Subject: sendSubject, Body: body,
+			To: sendTo, Cc: sendCc, Bcc: sendBcc, Attachments: sendAttachments}
+		var resolvedOutgoing *mail.OutgoingResult
+		if sendDryRun {
+			resolvedOutgoing, err = mailClient.PreviewOutgoing(input)
+		} else {
+			resolvedOutgoing, err = mailClient.SendOutgoing(input)
 		}
+		if resolvedOutgoing != nil {
+			receipt.Account, receipt.AccountID, receipt.Sender = resolvedOutgoing.Account, resolvedOutgoing.AccountID, resolvedOutgoing.Sender
+			receipt.Status, receipt.Sent = resolvedOutgoing.Status, resolvedOutgoing.Submitted
+		}
+		if err != nil {
+			var mutation *mail.MutationError
+			if errors.As(err, &mutation) {
+				receipt.Uncertain = mutation.Uncertain
+				receipt.Sent = mutation.Submitted
+				receipt.Submitted = mutation.Submitted
+				if receipt.Status == "" {
+					receipt.Status = "failed"
+				}
+				return writer.Write(output.Result{Data: receipt, Summary: mutation.Error(), Err: clierr.Classify(err)})
+			}
+			return fmt.Errorf("send message: %w", err)
+		}
+		receipt.Submitted = receipt.Sent
 		summary := fmt.Sprintf("Sent %q to %s", sendSubject, strings.Join(sendTo, ", "))
 		if sendDryRun {
 			summary = fmt.Sprintf("Dry run: would send %q to %s", sendSubject, strings.Join(sendTo, ", "))
@@ -92,12 +120,13 @@ Examples:
 		return writer.Write(output.Result{
 			Data:    receipt,
 			Summary: summary,
+			Notices: previewNotices(sendDryRun),
 			Meta:    map[string]any{"account": account, "dryRun": sendDryRun},
 			Plain: func(p *output.Printer) {
 				if sendDryRun {
 					p.Line("%s", p.Yellow(summary))
 					p.KeyValues([][2]string{
-						{"From", account}, {"To", strings.Join(sendTo, ", ")}, {"Cc", strings.Join(sendCc, ", ")},
+						{"Account", receipt.Account}, {"From", receipt.Sender}, {"To", strings.Join(sendTo, ", ")}, {"Cc", strings.Join(sendCc, ", ")},
 						{"Bcc", strings.Join(sendBcc, ", ")}, {"Subject", sendSubject}, {"Attachments", strings.Join(sendAttachments, ", ")},
 					})
 					p.Blank()
@@ -108,6 +137,13 @@ Examples:
 			},
 		})
 	},
+}
+
+func previewNotices(dryRun bool) []string {
+	if dryRun {
+		return []string{"Configured sending identity validated; compose sender and delivery route have not been tested."}
+	}
+	return nil
 }
 
 func nonNil(values []string) []string {
@@ -127,4 +163,5 @@ func init() {
 	sendCmd.Flags().StringVar(&sendSignature, "signature", "", "Append a Mail.app signature by name")
 	sendCmd.Flags().StringSliceVar(&sendAttachments, "attach", []string{}, "File to attach (repeatable)")
 	sendCmd.Flags().BoolVar(&sendDryRun, "dry-run", false, "Show the composed message without sending")
+	sendCmd.Flags().StringVar(&sendFrom, "from", "", "Sender address configured on the selected account (default: first address)")
 }
