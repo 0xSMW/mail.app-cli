@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +9,7 @@ import (
 
 type DraftInput struct {
 	Account     string   `json:"account"`
+	Sender      string   `json:"sender,omitempty"`
 	Subject     string   `json:"subject"`
 	Body        string   `json:"body"`
 	To          []string `json:"to"`
@@ -21,69 +21,18 @@ type DraftInput struct {
 }
 
 func (c *Client) CreateDraft(input DraftInput) (*Message, error) {
-	startedAt := time.Now().Add(-1 * time.Second)
-	if input.Account == "" {
-		return nil, fmt.Errorf("account is required")
-	}
-	if len(input.To) == 0 {
-		return nil, fmt.Errorf("at least one to recipient is required")
-	}
-	attachments, err := ValidateDraftAttachments(input.Attachments)
+	result, err := c.composeOutgoing(OutgoingInput{Account: input.Account, Sender: input.Sender, Subject: input.Subject, Body: input.Body, To: input.To, Cc: input.Cc, Bcc: input.Bcc, Attachments: input.Attachments}, "save")
 	if err != nil {
+		if result != nil && result.Draft != nil {
+			return result.Draft, err
+		}
 		return nil, err
 	}
-	script := fmt.Sprintf(`
-tell application "Mail"
-	set targetAccount to account "%s"
-	set newMessage to make new outgoing message with properties {subject:"%s", content:"%s", visible:false}
-	tell newMessage
-		set sender to (item 1 of (email addresses of targetAccount as list))
-		repeat with addr in {%s}
-			make new to recipient at end of to recipients with properties {address:addr}
-		end repeat
-		%s
-		%s
-		%s
-	end tell
-	close newMessage saving yes
-	return "ok"
-end tell
-`, escapeAppleScriptString(input.Account), escapeAppleScriptString(input.Subject), escapeAppleScriptString(input.Body), appleScriptStringList(input.To), appleScriptRecipientBlock("cc", input.Cc), appleScriptRecipientBlock("bcc", input.Bcc), draftAttachmentScript(attachments))
-	if _, err := c.runAppleScript(script); err != nil {
-		return nil, err
+	if result == nil || result.Draft == nil {
+		return nil, fmt.Errorf("draft save returned no verified draft")
 	}
-	// Mail can save intermediate versions and assign another local ID as the
-	// attachments finish loading. Re-resolve on each attempt, and never remove
-	// an original draft until the complete replacement is visible.
-	verificationCtx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
-	defer cancel()
-	verifier := c.WithContext(verificationCtx)
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		delay := time.Second
-		if attempt == 0 {
-			delay = 5 * time.Second
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-verificationCtx.Done():
-			timer.Stop()
-			return nil, fmt.Errorf("created draft but save verification incomplete (%v): %w", lastErr, verificationCtx.Err())
-		case <-timer.C:
-		}
-		draft, err := verifier.findDraftBySubjectContentSince(input.Account, input.Subject, input.Body, startedAt)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if len(attachments) > 0 {
-			if err := verifier.verifyDraftAttachments(draft, attachments); err != nil {
-				lastErr = fmt.Errorf("draft %s attachment verification: %w", draft.ID, err)
-				continue
-			}
-		}
-		return draft, nil
-	}
+
+	return result.Draft, nil
 }
 
 func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Message, error) {
@@ -105,8 +54,13 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if details.ContentError != "" {
 		return nil, fmt.Errorf("cannot preserve draft body: %s", details.ContentError)
 	}
+	sender, err := draftSenderAddress(details.Sender)
+	if err != nil {
+		return nil, err
+	}
 	replacement := DraftInput{
 		Account: draft.Account,
+		Sender:  sender,
 		Subject: details.Subject,
 		Body:    details.Content,
 		To:      details.ToRecipients,
@@ -167,11 +121,8 @@ func (c *Client) GetDraft(accountName, draftID string) (*Message, error) {
 }
 
 func (c *Client) SendDraft(accountName, draftID string) error {
-	draft, err := c.GetDraft(accountName, draftID)
-	if err != nil {
-		return err
-	}
-	return c.runMessageAction(draft.Account, draft.Mailbox, draft.ID, "msg.send();")
+	_, err := c.SendDraftResult(accountName, draftID)
+	return err
 }
 
 func (c *Client) DeleteDraft(accountName, draftID string) error {
