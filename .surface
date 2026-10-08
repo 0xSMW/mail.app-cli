@@ -72,6 +72,7 @@ drafts create --body
 drafts create --body-file
 drafts create --cc
 drafts create --dry-run
+drafts create --from
 drafts create --help (-h)
 drafts create --subject
 drafts create --to
@@ -363,6 +364,7 @@ send --body
 send --body-file
 send --cc (-c)
 send --dry-run
+send --from
 send --help (-h)
 send --signature
 send --subject (-s)
