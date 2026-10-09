@@ -38,6 +38,11 @@ func TestOutgoingProductionScript(t *testing.T) {
 		ccOnly                bool
 	}{
 		{name: "default sender", ok: true, sent: 1},
+		{name: "recipient insertion mismatch", config: map[string]interface{}{"dropRecipients": true}, deleted: 1},
+		{name: "null content attachments without files send", config: map[string]interface{}{"nullContentAttachments": true}, ok: true, sent: 1},
+		{name: "null content attachments without files save", action: "save", config: map[string]interface{}{"nullContentAttachments": true}, ok: true, closed: 1},
+		{name: "localized nested Drafts", action: "save", config: map[string]interface{}{"draftName": "Bozze", "nestedDrafts": true}, ok: true, closed: 1},
+		{name: "ambiguous special Drafts", action: "save", config: map[string]interface{}{"ambiguousDrafts": true}},
 		{name: "later transport switch is outside identity contract", config: map[string]interface{}{"transportSender": "other@example.com"}, ok: true, sent: 1},
 		{name: "Cc only recipients", ccOnly: true, ok: true, sent: 1},
 		{name: "provider independence IMAP", config: map[string]interface{}{"accounts": []interface{}{map[string]interface{}{"name": "Account", "id": "imap-id", "enabled": true, "addresses": []string{"sender@example.com"}, "type": "IMAP"}}}, ok: true, sent: 1},
@@ -67,6 +72,8 @@ func TestOutgoingProductionScript(t *testing.T) {
 		{name: "attachment wait exhausted", attachments: []string{"/tmp/report.pdf"}, config: map[string]interface{}{"attachNeverReady": true}, deleted: 1},
 		{name: "cleanup failure", config: map[string]interface{}{"readback": "other@example.com", "cleanupThrows": true}, deleted: 1},
 		{name: "preview no composition", action: "preview", ok: true},
+		{name: "save transient missing object", action: "save", config: map[string]interface{}{"transientLookup": true}, ok: true, closed: 1},
+		{name: "save transport failure", action: "save", config: map[string]interface{}{"transportLookup": true}, closed: 1, uncertain: true},
 		{name: "save delayed direct evidence", action: "save", config: map[string]interface{}{"saveDelay": 4, "preexisting": true}, ok: true, closed: 1},
 		{name: "save ambiguous", action: "save", config: map[string]interface{}{"ambiguousSave": true}, closed: 1, uncertain: true},
 		{name: "save not visible", action: "save", config: map[string]interface{}{"neverSave": true}, closed: 1, uncertain: true},
@@ -95,6 +102,7 @@ func TestOutgoingProductionScript(t *testing.T) {
 				t.Fatalf("execute production JavaScript: %v %s", err, output)
 			}
 			var got struct {
+				ComposedBody                           string `json:"composedBody"`
 				TransportSender                        string
 				Response                               outgoingEnvelope `json:"response"`
 				Composed, Sent, Closed, Deleted, Polls int
@@ -104,6 +112,9 @@ func TestOutgoingProductionScript(t *testing.T) {
 			}
 			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != tc.deleted || got.Response.Uncertain != tc.uncertain {
 				t.Fatalf("unexpected execution: %s", output)
+			}
+			if got.Sent == 1 && got.ComposedBody != input.Body {
+				t.Fatalf("submission changed body: %s", output)
 			}
 			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "stored-900" {
 				t.Fatalf("assumed outgoing/stored IDs equal: %s", output)
