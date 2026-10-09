@@ -110,9 +110,24 @@ func renderMessage(m *mail.Message, metadataOnly bool) func(*output.Printer) {
 		body := strings.TrimRight(m.Content, "\n")
 		if body == "" {
 			p.Line("%s", p.Dim("(no text content)"))
-			return
+		} else {
+			p.Line("%s", body)
 		}
-		p.Line("%s", body)
+		if d := m.BodyDiagnostics; d != nil {
+			for _, warning := range d.Warnings {
+				p.Line("%s", p.Yellow("Extraction: "+warning))
+			}
+			if d.ExtractionError != "" {
+				p.Line("%s", p.Yellow("Disk extraction: "+d.ExtractionError))
+			}
+			for _, alternative := range d.Alternatives {
+				if alternative.Text != "" && !alternative.Selected {
+					p.Blank()
+					p.Line("MIME alternative %s (%s):", alternative.Part, alternative.MediaType)
+					p.Line("%s", alternative.Text)
+				}
+			}
+		}
 	}
 }
 
