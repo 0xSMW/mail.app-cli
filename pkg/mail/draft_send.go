@@ -151,27 +151,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 }
 
 // This read bypasses Envelope Index latency and requires one unambiguous exact
-// local ID in a conventional Drafts mailbox. Every property read is strict.
+// local ID in the account-owned special Drafts mailbox. Every property read is strict.
 func (c *Client) readDraftSnapshot(accountName, draftID string) (*draftSnapshot, error) {
-	script := fmt.Sprintf(`
-const mail = Application('Mail');
-const draftSnapshotRead = true;
-%s
-const requestedAccount = '%s';
-const requestedId = '%s';
-const matches = [];
-for (const acc of mail.accounts()) {
- if (requestedAccount && acc.name() !== requestedAccount) continue;
- for (const box of acc.mailboxes()) {
-  if (!['draft','drafts'].includes(box.name().toLowerCase().trim())) continue;
-  const msg = messageById(box,requestedId);
-  if (msg === null) continue;
-  matches.push({message:{id:String(msg.id()),account:acc.name(),mailbox:box.name(),subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())},source:msg.source()});
- }
-}
-if (matches.length > 1) throw new Error('Draft ID is ambiguous; specify an account');
-JSON.stringify(matches.length === 1 ? matches[0] : null);
-`, jxaDraftMessageByIDHelper(), escapeJSString(accountName), escapeJSString(draftID))
+	script := jxaDraftSnapshotScript(accountName, draftID)
 	output, err := c.runJXA(script)
 	if err != nil {
 		return nil, err
@@ -204,6 +186,29 @@ JSON.stringify(matches.length === 1 ? matches[0] : null);
 		return nil, fmt.Errorf("draft identity readback mismatch")
 	}
 	return snapshot, nil
+}
+
+func jxaDraftSnapshotScript(accountName, draftID string) string {
+	return fmt.Sprintf(`
+const mail = Application('Mail');
+const draftSnapshotRead = true;
+%s
+const requestedAccount = '%s';
+const requestedId = '%s';
+const matches = [];
+for (const acc of mail.accounts()) {
+ if (requestedAccount && acc.name() !== requestedAccount) continue;
+ const box = draftMailboxForAccount(mail,acc,true);
+ if(box === null) continue;
+ {
+  const msg = messageById(box,requestedId);
+  if (msg === null) continue;
+  matches.push({message:{id:String(msg.id()),account:acc.name(),mailbox:msg.mailbox().name(),subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())},source:msg.source()});
+ }
+}
+if (matches.length > 1) throw new Error('Draft ID is ambiguous; specify an account');
+JSON.stringify(matches.length === 1 ? matches[0] : null);
+`, jxaDraftMailboxHelper()+jxaDraftMessageByIDHelper(), escapeJSString(accountName), escapeJSString(draftID))
 }
 
 func sameDraftSnapshot(a, b *draftSnapshot) bool {
@@ -283,7 +288,7 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	}
 	allowed := map[string]bool{"From": true, "To": true, "Cc": true, "Bcc": true, "Subject": true, "Date": true, "Message-Id": true, "Mime-Version": true, "Content-Type": true, "Content-Transfer-Encoding": true, "X-Uniform-Type-Identifier": true, "X-Universally-Unique-Identifier": true}
 	for key, values := range parsed.Header {
-		if !allowed[key] || len(values) != 1 {
+		if len(values) != 1 || (!allowed[key] && !reconstructibleAppleDraftHeader(key, values[0])) {
 			return "", nil, fmt.Errorf("draft header %s cannot be preserved safely; send this draft in Mail", key)
 		}
 	}
@@ -383,8 +388,8 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 			haveBody = true
 			continue
 		}
-		if disposition != "attachment" || strings.HasPrefix(partKind, "multipart/") || partKind == "message/rfc822" || partKind == "application/pkcs7-mime" || partKind == "application/pgp-encrypted" || len(dispositionParams) != 1 {
-			return "", nil, fmt.Errorf("inline, nested, signed, encrypted, or additional body content cannot be reconstructed safely")
+		if disposition != "attachment" || strings.HasPrefix(partKind, "multipart/") || partKind == "message/rfc822" || partKind == "message/external-body" || partKind == "application/pkcs7-mime" || partKind == "application/pgp-encrypted" || len(dispositionParams) != 1 {
+			return "", nil, fmt.Errorf("inline, nested, external, signed, encrypted, or additional body content cannot be reconstructed safely")
 		}
 		name := dispositionParams["filename"]
 		if name == "" || filepath.Base(name) != name || name == "." || name == ".." {
@@ -403,6 +408,47 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 		return "", nil, err
 	}
 	return body, attachments, nil
+}
+
+// These specific Mail compose-state values do not authorize any additional
+// content: the MIME, body and attachment checks must still prove preservation.
+// In particular, a Mail signature selection is not an S/MIME signature, and
+// the remote-attachments setting does not prove that attachment bytes exist.
+// Unknown Apple headers and unfamiliar values remain fail-closed.
+func reconstructibleAppleDraftHeader(key, value string) bool {
+	switch key {
+	case "X-Apple-Mail-Signature":
+		if value == "" {
+			return true
+		}
+		// Mail stores the selected signature's UUID, while the actual signature
+		// content must already be represented by the verified message body.
+		if len(value) != 36 {
+			return false
+		}
+		for i, ch := range value {
+			if i == 8 || i == 13 || i == 18 || i == 23 {
+				if ch != '-' {
+					return false
+				}
+			} else if !strings.ContainsRune("0123456789abcdefABCDEF", ch) {
+				return false
+			}
+		}
+		return true
+	case "X-Apple-Base-Url":
+		if !strings.HasPrefix(value, "x-msg://") || !strings.HasSuffix(value, "/") {
+			return false
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(value, "x-msg://"), "/")
+		return id != "" && strings.Trim(id, "0123456789") == ""
+	case "X-Apple-Windows-Friendly":
+		return value == "0" || value == "1"
+	case "X-Apple-Mail-Remote-Attachments":
+		return value == "YES" || value == "NO"
+	default:
+		return false
+	}
 }
 
 func plainDraftBody(header textproto.MIMEHeader, reader io.Reader, params map[string]string) (string, error) {
