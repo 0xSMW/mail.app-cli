@@ -173,7 +173,7 @@ func TestVerifyRelocationPollsDestinationLag(t *testing.T) {
 		}
 		return verificationPresence{Destination: true}, nil
 	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" || calls != 3 {
+	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
 		t.Fatalf("verification = (%q, %v), calls=%d", status, err, calls)
 	}
 }
@@ -263,7 +263,7 @@ func TestVerifyRelocationRetriesMailboxResolutionUntilRegeneratedDestinationAppe
 		// absent after Mail assigned a new ID in the destination.
 		return verificationPresence{Destination: true}, nil
 	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" || calls != 4 {
+	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
 		t.Fatalf("verification = (%q, %v), calls=%d; want retry then regenerated destination", status, err, calls)
 	}
 }
