@@ -5,7 +5,7 @@ description: Read, search, triage, and send mail through macOS Mail.app with mai
 
 # mail-app-cli
 
-A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writes and message bodies go through Mail.app automation, one call at a time, 0.4s to 2s each.
+A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writes go through serial Mail.app automation. Selected bodies come from local message files; identity verification reads metadata without rendering bodies.
 
 ## Invariants
 
@@ -29,6 +29,9 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | One mailbox with filters | `mail-app-cli messages list -a "Example Account" -m INBOX --unread --since 2026-01-01 --json` |
 | Explicit live mailbox scan | `mail-app-cli messages scan INBOX 'All Mail' Spam -a "Example Account" --since 2026-01-01 --limit 200 --json` |
 | Search selected mailboxes | `mail-app-cli messages scan INBOX 'All Mail' Trash -a "Example Account" --query 'sample invoice' --json` |
+| Resume historical scan | `mail-app-cli messages scan INBOX Archive -a "Example Account" --checkpoint /absolute/private/scan.json --limit 200 --json` |
+| Recheck a relocation receipt | `mail-app-cli messages reconcile /absolute/private/receipt.json --settle 10s --verify-budget 30s --json` |
+| Inspect body alternatives | `mail-app-cli messages read 12345 --body-alternatives --json` |
 | Search | `mail-app-cli search "sample invoice" --json --limit 20` |
 | Read a message | `mail-app-cli show 12345 --json` |
 | Read selected bodies | `mail-app-cli messages read 12345 67890 --timeout 10s --budget 45s --json` |
@@ -82,9 +85,37 @@ All Mail presence alone does not prove INBOX absence.
 2. When the user has several accounts and none is configured, account-scoped commands exit 1 listing the names. Ask which, or use `-a`.
 3. To act on search results: `search ... --ids-only | xargs mail-app-cli archive --json`.
 4. After a mutation from outside the CLI, add `--no-cache` to `messages list`; its results are cached for five minutes.
-5. Gmail: archive means "move to All Mail". A message already in All Mail is reported as `status: skipped` with `error: "already in All Mail"`, counted in `skipped`, and the command exits 0; nothing was changed and nothing needs retrying.
+5. Gmail: archive means "move to All Mail". A message already in All Mail is reported as `status: skipped` with `error: "already in All Mail"`, counted in `skipped`, and the command exits 0; nothing was relocated. `--mark-read` alone does not change skipped items. Add `--mark-read-on-skip` with `--mark-read` to explicitly mark and verify already-archived records.
 6. Moving a message (archive, delete, move) makes Mail.app assign it a new ID in the destination. The receipt reports the old ID; to touch the message again, find it with `search` or `recent search`. Don't chain a second mutation on the same ID after a move.
 
 ## Migration from 1.x
 
 `.[]` is now `.data[]`; PascalCase keys are camelCase; `--quiet` gives the old bare shape. `messages archive|delete|move|mark|flag` still work and now return receipts.
+
+## Durable traversal and final verification
+
+`scan --checkpoint PATH` persists private cumulative messages, memberships and
+coverage before output. Repeat the same scopes and filters to continue; the page
+limit may change. Completed checkpoints require `--restart-checkpoint` for a
+fresh traversal. Checkpoint output includes traversal and current-page observation
+times. Earlier rows are earlier observations, not current state or a changed-mail
+feed. Keep an advancing receipt-time review window separate from held identities
+and historical traversal. Reconcile older held identities explicitly.
+
+For verified archive/move, use `--settle 10s --verify-budget 30s` when provider
+synchronization needs a longer final observation. Receipts include stable
+identities, identity capture timings and final observed scopes/read state.
+`messages reconcile RECEIPT` rechecks a JSON receipt, envelope or JSONL journal
+without replaying mutations or synchronizing accounts. It includes previously
+confirmed identities. A later observation cannot guarantee no future recurrence;
+never automatically change archive intent to delete. Requested destination read
+state must agree before relocation is confirmed. Gmail All Mail retention is
+allowed only for a verified Gmail restore to INBOX; Spam removal and archive
+INBOX removal remain required.
+
+Successful body extraction (`complete:true`) is not a guarantee of full visual
+or semantic content. Inspect `bodyDiagnostics`; `--body-alternatives` exposes
+other extracted renderings without remote fetching. Counts and alternate-text
+differences establish extraction facts, not the meaning of omitted content.
+Mail Today's aggregate counts cannot prove handled-identity cleanup and are not
+a completion gate; use fresh direct source/destination checks.
