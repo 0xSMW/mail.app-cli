@@ -404,3 +404,30 @@ UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot   # after adding or remo
 ---
 
 This project is a hard fork of [intelligrit/mail-app-cli](https://github.com/intelligrit/mail-app-cli).
+
+### Reliable repeated cleanup in 2.4
+
+Verified archive and move capture message identity without asking Mail to render
+a body. `--settle` extends final observation and `--verify-budget` bounds the
+stage. `messages reconcile receipt.json --settle 10s --verify-budget 30s --json`
+rechecks saved archive/move identities without repeating the operation. Receipts
+report when and where the final source/destination state was observed.
+
+`messages batch archive 12345 --mark-read --mark-read-on-skip --verify --dry-run`
+previews the explicit choice to mark an already-archived record read. Without
+`--mark-read-on-skip`, archived records retain their existing state. Requested
+destination read state is part of verification.
+
+`messages read 12345 --body-alternatives --json` exposes independently extracted
+MIME renderings. Bodies carry extraction diagnostics for images, nontext parts,
+partial files and alternative selection; extraction success does not certify
+that every visual or substantive detail is represented. Normal output omits
+alternative texts unless requested. No referenced resources are downloaded.
+
+`messages scan INBOX Archive -a "Example Account" --limit 200 --checkpoint
+/absolute/private/history.json --json` saves cumulative traversal state. Repeat
+the command to resume; use `--restart-checkpoint` after completion for a fresh
+traversal. Filters stay fixed while page size may change. Accumulated observations
+are not a live snapshot or changed-state feed, so keep new-mail discovery and
+held-identity reconciliation separate. Today aggregate counts do not establish
+identity cleanup; use direct source and destination observations.
