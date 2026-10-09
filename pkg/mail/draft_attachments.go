@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // ValidateDraftAttachments resolves local paths and rejects missing, unreadable,
@@ -156,7 +158,7 @@ func compareDraftAttachments(actual, paths []string) error {
 		if _, err := io.Copy(hash, file); err != nil {
 			return identity{}, err
 		}
-		return identity{filepath.Base(path), string(hash.Sum(nil))}, nil
+		return identity{norm.NFC.String(filepath.Base(path)), string(hash.Sum(nil))}, nil
 	}
 	expected := make(map[identity]int)
 	for _, path := range paths {
