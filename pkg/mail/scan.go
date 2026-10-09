@@ -21,7 +21,9 @@ type ScanRequest struct {
 	Limit  int // per mailbox and page; zero means unlimited
 	Unread bool
 	// Cursor is a NextCursor from an earlier page of the same request.
-	Cursor string
+	Cursor            string
+	Checkpoint        string // durable private traversal state; incompatible with Cursor
+	RestartCheckpoint bool
 }
 
 type ScanMessage struct {
@@ -52,11 +54,12 @@ func (m ScanMessage) MarshalJSON() ([]byte, error) {
 // end of the mailbox.
 type ScanCoverage struct {
 	SearchMailbox
-	Count     int    `json:"count"`
-	Truncated bool   `json:"truncated"`
-	Exhausted bool   `json:"exhausted"`
-	Remaining int    `json:"remaining"`
-	Error     string `json:"error,omitempty"`
+	Count     int      `json:"count"`
+	Truncated bool     `json:"truncated"`
+	Exhausted bool     `json:"exhausted"`
+	Remaining int      `json:"remaining"`
+	Error     string   `json:"error,omitempty"`
+	Errors    []string `json:"errors,omitempty"` // checkpoint-only cumulative failed-page observations
 }
 
 type ScanResult struct {
@@ -65,9 +68,10 @@ type ScanResult struct {
 	Complete bool           `json:"complete"`
 	// NextCursor continues every mailbox that is not yet exhausted. It is
 	// empty once the traversal has covered every requested mailbox.
-	NextCursor string `json:"nextCursor,omitempty"`
-	StartedAt  string `json:"startedAt"`
-	EndedAt    string `json:"endedAt"`
+	NextCursor string                    `json:"nextCursor,omitempty"`
+	StartedAt  string                    `json:"startedAt"`
+	EndedAt    string                    `json:"endedAt"`
+	Checkpoint *ScanCheckpointProvenance `json:"checkpoint,omitempty"`
 }
 
 // ScanPosition is the last message a traversal returned from one mailbox.
@@ -159,20 +163,27 @@ func decodeScanCursor(value string, req ScanRequest, scopes []SearchMailbox) (sc
 	return cursor, nil
 }
 
-func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
+func ValidateScanRequest(req ScanRequest) error {
 	if len(req.Scopes) == 0 || req.Limit < 0 || req.Limit == int(^uint(0)>>1) {
-		return ScanResult{}, fmt.Errorf("scan needs explicit mailboxes and a non-negative limit")
+		return fmt.Errorf("scan needs explicit mailboxes and a non-negative limit")
 	}
 	if _, _, err := parseSinceUnix(req.Since); err != nil {
-		return ScanResult{}, err
+		return err
 	}
 	if strings.TrimSpace(req.Query) != "" && len(searchTerms(req.Query)) == 0 {
-		return ScanResult{}, fmt.Errorf("query must contain a searchable term")
+		return fmt.Errorf("query must contain a searchable term")
 	}
 	for _, scope := range req.Scopes {
 		if strings.TrimSpace(scope.Account) == "" || strings.TrimSpace(scope.Mailbox) == "" {
-			return ScanResult{}, fmt.Errorf("scan scopes need both account and mailbox")
+			return fmt.Errorf("scan scopes need both account and mailbox")
 		}
+	}
+	return validateCheckpointOptions(req)
+}
+
+func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
+	if err := ValidateScanRequest(req); err != nil {
+		return ScanResult{}, err
 	}
 	return scanMessages(req, func(scope SearchMailbox, limit int, after *ScanPosition) (scanPage, error) {
 		if err := c.Done(); err != nil {
@@ -192,6 +203,16 @@ func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
 }
 
 func scanMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
+	if err := ValidateScanRequest(req); err != nil {
+		return ScanResult{}, err
+	}
+	if req.Checkpoint != "" {
+		return scanCheckpointMessages(req, read)
+	}
+	return scanPageMessages(req, read)
+}
+
+func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
 	scopes := uniqueScanScopes(req.Scopes)
 	cursor, err := decodeScanCursor(req.Cursor, req, scopes)
 	if err != nil {
