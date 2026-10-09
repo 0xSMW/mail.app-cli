@@ -119,12 +119,13 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 // The same helper is executed by osascript and the Node mock tests. No account
 // settings are changed. Sender readback is an identity guard, not proof of SMTP routing.
 func jxaOutgoingHelper() string {
-	return `
+	return jxaDraftMailboxHelper() + `
 function composeOutgoing(input, action) {
  input.to = input.to || []; input.cc = input.cc || []; input.bcc = input.bcc || [];
  const mail = Application('Mail');
  let outgoing = null, attempted = false, accepted = false, saved = false;
  let step = 'account_resolution';
+ const composeBody=action === 'save' && !input.body.endsWith('\n') ? input.body+'\n' : input.body;
  let result = {account: input.account, accountId: '', sender: '', status: '', submitted: false};
  function fail(message) { throw new Error(message); }
  function address(value) {
@@ -165,16 +166,37 @@ function composeOutgoing(input, action) {
   if (address(outgoing.sender()).toLowerCase() !== result.sender.toLowerCase()) fail('Mail sender readback differs from selected sender');
  }
  function attachList(message) {
-  return message.mailAttachments().map(a => String(a.name())).sort();
+  return message.mailAttachments().map(a => String(a.name()).normalize('NFC')).sort();
  }
- function outgoingAttachments() {
-  return outgoing.content.attachments().map(a => String(a.fileName()).split('/').pop()).sort();
+ function prepareAttachments() {
+  const paths=input.attachments || [];
+  // JXA cannot address the rich-text attachment element on current Mail.
+  // With no files, avoid that unsupported access entirely.
+  if(paths.length === 0) return;
+  ObjC.import('Foundation');
+  const id=String(outgoing.id());
+  if(!/^[0-9]+$/.test(id)) fail('Outgoing message ID unavailable for attachment insertion');
+  function quote(s) { return '"'+String(s).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"'; }
+  const lines=['tell application "Mail"','tell outgoing message id '+id,'tell content'];
+  paths.forEach(path=>lines.push('make new attachment with properties {file name:(POSIX file '+quote(path)+')} at after last paragraph'));
+  lines.push('repeat 50 times','if (count attachments) = '+paths.length+' then exit repeat','delay 0.1','end repeat','count attachments','end tell','end tell','end tell');
+  const error=Ref();
+  const value=$.NSAppleScript.alloc.initWithSource(lines.join('\n')).executeAndReturnError(error);
+  if(!value) fail('Attachment insertion failed: '+JSON.stringify(ObjC.deepUnwrap(error[0])));
+  if(Number(value.int32Value) !== paths.length) fail('Attachments did not finish loading');
  }
- const expectedNames = (input.attachments || []).map(p => p.split('/').pop()).sort();
+ const expectedNames = (input.attachments || []).map(p => p.split('/').pop().normalize('NFC')).sort();
  function equal(a,b) { return JSON.stringify(a) === JSON.stringify(b); }
  function recipients(message, kind) { return message[kind]().map(r => String(r.address())); }
+ function matchesBody(value) {
+  const body=String(value).replace(/\r\n/g,'\n');
+  const expected=composeBody.replace(/\r\n/g,'\n');
+  // Mail's persisted rich-text view adds one leading paragraph separator.
+  // Do not trim user whitespace or accept arbitrary body differences.
+  return body===input.body.replace(/\r\n/g,'\n') || body===expected || body==='\n'+expected;
+ }
  function matches(message) {
-  return String(message.subject()) === input.subject && String(message.content()).replace(/\r\n/g,'\n') === input.body.replace(/\r\n/g,'\n') &&
+  return String(message.subject()) === input.subject && matchesBody(message.content()) &&
    address(message.sender()).toLowerCase() === result.sender.toLowerCase() && equal(recipients(message,'toRecipients'),input.to) &&
    equal(recipients(message,'ccRecipients'),input.cc || []) && equal(recipients(message,'bccRecipients'),input.bcc || []) && equal(attachList(message),expectedNames);
  }
@@ -184,28 +206,22 @@ function composeOutgoing(input, action) {
   if (action === 'preview') { result.status='preview'; return {ok:true,result:result}; }
   let drafts = null, before = {};
   if (action === 'save') {
-   const boxes = target.account.mailboxes().filter(b => ['drafts','draft'].indexOf(String(b.name()).toLowerCase()) >= 0);
-   if (boxes.length !== 1) fail('Target account Drafts mailbox cannot be identified uniquely');
-   drafts = boxes[0];
+   drafts = draftMailboxForAccount(mail,target.account);
    drafts.messages().forEach(m => { before[String(m.id())] = true; });
   }
   phase('outgoing_compose',function() {
   step='compose';
-  outgoing = mail.OutgoingMessage({subject:input.subject,content:input.body,sender:result.sender,visible:false});
+  outgoing = mail.OutgoingMessage({subject:input.subject,content:composeBody,sender:result.sender,visible:false});
   mail.outgoingMessages.push(outgoing);
   outgoing.sender = result.sender;
   guardSender();
   [['to',input.to],['cc',input.cc || []],['bcc',input.bcc || []]].forEach(pair => {
    pair[1].forEach(value => outgoing[pair[0]+'Recipients'].push(mail[pair[0][0].toUpperCase()+pair[0].slice(1)+'Recipient']({address:value})));
   });
+  step='recipient_verification';
+  if(!equal(recipients(outgoing,'toRecipients'),input.to) || !equal(recipients(outgoing,'ccRecipients'),input.cc) || !equal(recipients(outgoing,'bccRecipients'),input.bcc)) fail('Outgoing recipients differ from requested recipients');
   step='attachments';
-  (input.attachments || []).forEach(path => outgoing.content.attachments.push(mail.Attachment({fileName:Path(path)})));
-  let ready=false;
-  for (let i=0;i<50;i++) {
-   if (equal(outgoingAttachments(),expectedNames)) { ready=true; break; }
-   delay(0.1);
-  }
-  if (!ready) fail('Attachments did not finish loading');
+  prepareAttachments();
   step='sender_verification';
   guardSender();
   });
@@ -216,16 +232,21 @@ function composeOutgoing(input, action) {
    accepted=true; result.submitted=true; result.status='submitted';
    return {ok:true,result:result,attempted:true};
   }
-  phase('outgoing_save',function() { attempted=true; mail.close(outgoing,{saving:'yes'}); saved=true; });
+  phase('outgoing_save',function() { attempted=true; mail.save(outgoing); mail.close(outgoing,{saving:'yes'}); saved=true; });
   step='save_verification';
   for (let i=0;i<80;i++) {
-   const candidates=drafts.messages().filter(m => !before[String(m.id())] && matches(m));
+   drafts=draftMailboxForAccount(mail,target.account);
+   let candidates=[];
+   try { candidates=drafts.messages().filter(m => !before[String(m.id())] && matches(m)); }
+   catch(e) { if(e.errorNumber !== -1728) throw e; delay(0.1); continue; }
    if (candidates.length > 1) fail('Saved draft identity is ambiguous');
    if (candidates.length === 1) {
     const m=candidates[0];
+    try {
     result.status='saved';
-    result.draft={id:String(m.id()),account:input.account,mailbox:String(drafts.name()),subject:input.subject,sender:result.sender,content:input.body,toRecipients:input.to,ccRecipients:input.cc || [],bccRecipients:input.bcc || []};
+    result.draft={id:String(m.id()),account:input.account,mailbox:String(m.mailbox().name()),subject:input.subject,sender:result.sender,content:String(m.content()),toRecipients:input.to,ccRecipients:input.cc || [],bccRecipients:input.bcc || []};
     return {ok:true,result:result,attempted:true,saved:true};
+    } catch(e) { if(e.errorNumber !== -1728) throw e; }
    }
    delay(0.1);
   }
