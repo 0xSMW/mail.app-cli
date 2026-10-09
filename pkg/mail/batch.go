@@ -24,12 +24,15 @@ type BatchItem struct {
 	GmailInboxSource bool   `json:"gmailInboxSource,omitempty"`
 	// Identity is captured before a move so verification survives Mail.app
 	// assigning the logical message a new local ID.
-	Identity     StableIdentity `json:"identity,omitempty"`
-	Status       string         `json:"status"`
-	Error        string         `json:"error,omitempty"`
-	MarkedRead   bool           `json:"markedRead,omitempty"`
-	VerifyStatus string         `json:"verifyStatus,omitempty"`
-	VerifyError  string         `json:"verifyError,omitempty"`
+	IdentityCaptureMillis   int64          `json:"identityCaptureMillis,omitempty"`
+	IdentityEnrichmentError string         `json:"identityEnrichmentError,omitempty"`
+	MarkReadOnSkip          bool           `json:"markReadOnSkip,omitempty"`
+	Identity                StableIdentity `json:"identity,omitempty"`
+	Status                  string         `json:"status"`
+	Error                   string         `json:"error,omitempty"`
+	MarkedRead              bool           `json:"markedRead,omitempty"`
+	VerifyStatus            string         `json:"verifyStatus,omitempty"`
+	VerifyError             string         `json:"verifyError,omitempty"`
 	// Observed is what an archive or move verification found by stable
 	// identity once the mailboxes settled.
 	Observed *RelocationState `json:"observed,omitempty"`
@@ -40,39 +43,51 @@ type BatchItem struct {
 // are the current local IDs, which differ from the ID the mutation was given
 // when Mail.app regenerated the message.
 type RelocationState struct {
-	SourcePresent      bool     `json:"sourcePresent"`
-	DestinationPresent bool     `json:"destinationPresent"`
-	DestinationRead    *bool    `json:"destinationRead,omitempty"`
-	SourceIDs          []string `json:"sourceIds,omitempty"`
-	DestinationIDs     []string `json:"destinationIds,omitempty"`
+	ObservedAt            string   `json:"observedAt"`
+	Account               string   `json:"account"`
+	SourceMailbox         string   `json:"sourceMailbox"`
+	DestinationMailbox    string   `json:"destinationMailbox"`
+	SourceRemovalRequired bool     `json:"sourceRemovalRequired"`
+	SourcePresent         bool     `json:"sourcePresent"`
+	DestinationPresent    bool     `json:"destinationPresent"`
+	DestinationRead       *bool    `json:"destinationRead,omitempty"`
+	SourceIDs             []string `json:"sourceIds,omitempty"`
+	DestinationIDs        []string `json:"destinationIds,omitempty"`
 }
 
 // BatchResult is the mutation receipt.
 type BatchResult struct {
-	Action       string      `json:"action"`
-	DryRun       bool        `json:"dryRun"`
-	StartedAt    string      `json:"startedAt,omitempty"`
-	EndedAt      string      `json:"endedAt,omitempty"`
-	ReceiptPath  string      `json:"receiptPath,omitempty"`
-	JournalError string      `json:"journalError,omitempty"`
-	Matched      int         `json:"matched"`
-	Attempted    int         `json:"attempted"`
-	Succeeded    int         `json:"succeeded"`
-	Failed       int         `json:"failed"`
-	Unverified   int         `json:"unverified,omitempty"`
-	Skipped      int         `json:"skipped"`
-	Chunks       int         `json:"chunks,omitempty"`
-	Items        []BatchItem `json:"items"`
+	Action            string      `json:"action"`
+	MarkReadRequested bool        `json:"markReadRequested,omitempty"`
+	DryRun            bool        `json:"dryRun"`
+	StartedAt         string      `json:"startedAt,omitempty"`
+	EndedAt           string      `json:"endedAt,omitempty"`
+	ReceiptPath       string      `json:"receiptPath,omitempty"`
+	JournalError      string      `json:"journalError,omitempty"`
+	Matched           int         `json:"matched"`
+	Attempted         int         `json:"attempted"`
+	Succeeded         int         `json:"succeeded"`
+	Failed            int         `json:"failed"`
+	Unverified        int         `json:"unverified,omitempty"`
+	Skipped           int         `json:"skipped"`
+	Chunks            int         `json:"chunks,omitempty"`
+	Items             []BatchItem `json:"items"`
 }
 
 // BatchOptions controls one mutation run.
 type BatchOptions struct {
-	Action         string
-	TargetMailbox  string
-	DryRun         bool
-	Verify         bool
-	MarkReadBefore bool
-	ChunkSize      int
+	Action               string
+	TargetMailbox        string
+	DryRun               bool
+	Verify               bool
+	MarkReadBefore       bool
+	MarkReadOnSkip       bool
+	readOnlyVerification bool
+	// Settle extends the final-observation window; zero preserves the default.
+	Settle time.Duration
+	// VerifyBudget bounds all post-mutation checks; zero uses the default.
+	VerifyBudget time.Duration
+	ChunkSize    int
 	// ReuseBridge is for built-in JXA mutators, never custom mutators.
 	ReuseBridge bool
 	Read        bool
@@ -179,11 +194,15 @@ func FlagMutator(flagged bool) Mutator {
 // items.
 func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (result BatchResult, retErr error) {
 	result = BatchResult{
-		Action:    opts.Action,
-		DryRun:    opts.DryRun,
-		StartedAt: time.Now().Format(time.RFC3339),
-		Matched:   len(items),
-		Items:     make([]BatchItem, 0, len(items)),
+		Action:            opts.Action,
+		MarkReadRequested: opts.MarkReadBefore,
+		DryRun:            opts.DryRun,
+		StartedAt:         time.Now().Format(time.RFC3339),
+		Matched:           len(items),
+		Items:             make([]BatchItem, 0, len(items)),
+	}
+	if err := ValidateBatchOptions(opts); err != nil {
+		return result, err
 	}
 	autoReceipt := false
 	if opts.Receipt == nil {
@@ -196,15 +215,15 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	}
 	result.ReceiptPath = opts.Receipt.Path()
 	if err := opts.Receipt.Record("started", map[string]any{
-		"action": opts.Action, "dryRun": opts.DryRun, "matched": len(items),
+		"action": opts.Action, "dryRun": opts.DryRun, "matched": len(items), "markReadBefore": opts.MarkReadBefore, "markReadOnSkip": opts.MarkReadOnSkip, "settle": opts.Settle.String(), "verifyBudget": opts.VerifyBudget.String(),
 	}); err != nil {
 		return result, err
 	}
 	defer func() {
-		if opts.Verify && retErr != nil {
+		if (opts.Verify || opts.MarkReadOnSkip) && retErr != nil {
 			for i := range result.Items {
 				item := &result.Items[i]
-				if item.Status != "succeeded" || item.VerifyStatus != "" {
+				if (item.Status != "succeeded" && !(item.MarkReadOnSkip && item.MarkedRead)) || item.VerifyStatus != "" {
 					continue
 				}
 				item.VerifyStatus = "applied_destination_unverified"
@@ -260,6 +279,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			if skip := skipReason(client, opts, item); skip != "" {
 				item.Status = "skipped"
 				item.Error = skip
+				item.MarkReadOnSkip = opts.MarkReadOnSkip && opts.MarkReadBefore && opts.Action == "archive"
 			}
 			result.Skipped++
 			result.Items = append(result.Items, item)
@@ -270,17 +290,8 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		return result, nil
 	}
 	if opts.Verify && (opts.Action == "archive" || opts.Action == "move") {
-		for i := range items {
-			if items[i].Status == "failed" {
-				continue
-			}
-			identity, err := client.captureStableIdentity(items[i])
-			if err != nil {
-				items[i].Status = "failed"
-				items[i].Error = "capture stable identity: " + err.Error()
-				continue
-			}
-			items[i].Identity = identity
+		if err := captureBatchIdentities(client, opts, items); err != nil {
+			return result, err
 		}
 	}
 
@@ -320,6 +331,35 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				item.Status = "skipped"
 				item.Error = skip
 				result.Skipped++
+				if opts.Action == "archive" && opts.MarkReadOnSkip {
+					item.MarkReadOnSkip = true
+					if err := opts.Receipt.Record("mark_read_started", journalItem(item)); err != nil {
+						return result, err
+					}
+					if err := chunkClient.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
+						item.Status, item.Error = "failed", "mark-read on skipped archive failed: "+err.Error()
+						if isUnknownMutationError(client, err) {
+							item.Status = "unknown"
+						}
+						result.Failed++
+						result.Items = append(result.Items, item)
+						if journalErr := opts.Receipt.Record("mark_read_failed", journalItem(item)); journalErr != nil {
+							return result, journalErr
+						}
+						if item.Status == "unknown" {
+							return result, err
+						}
+						continue
+					}
+					item.MarkedRead = true
+					if err := opts.Receipt.Record("mark_read_succeeded", journalItem(item)); err != nil {
+						item.Status, item.Error = "unknown", "receipt durability after mark-read on skipped archive: "+err.Error()
+						result.Failed++
+						result.Items = append(result.Items, item)
+						return result, err
+					}
+
+				}
 				result.Items = append(result.Items, item)
 				if err := opts.Receipt.Record("skipped", journalItem(item)); err != nil {
 					return result, err
@@ -328,6 +368,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			}
 			result.Attempted++
 			if opts.MarkReadBefore && opts.Action != "mark" {
+				if err := opts.Receipt.Record("mark_read_started", journalItem(item)); err != nil {
+					return result, err
+				}
 				if err := chunkClient.MarkMessageAsRead(item.Account, item.SourceMailbox, item.ID, true); err != nil {
 					item.Status = "failed"
 					if isUnknownMutationError(client, err) {
@@ -397,11 +440,15 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			session.Close()
 		}
 	}
+	verifyCtx, verifyCancel := context.WithTimeout(client.Context(), effectiveVerifyBudget(opts))
+	defer verifyCancel()
+	verificationClient := client.WithContext(verifyCtx)
+
 	if opts.Verify {
 		if opts.Progress != nil {
 			fmt.Fprintf(opts.Progress, "%s: verifying %d applied message(s)\n", opts.Action, result.Succeeded)
 		}
-		verified := VerifyMutations(client, opts, result.Items)
+		verified := VerifyMutations(verificationClient, opts, result.Items)
 		for i := range verified {
 			if verified[i].Status != "succeeded" {
 				continue
@@ -415,6 +462,30 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			}
 			if opts.Progress != nil {
 				fmt.Fprintf(opts.Progress, "%s: verified %d/%d %s %s\n", opts.Action, i+1, len(verified), verified[i].ID, verified[i].VerifyStatus)
+			}
+		}
+	}
+	// Verify opted-in skipped marks together, sharing the overall verification
+	// deadline and indexed snapshots. No archive is replayed for these items.
+	var skippedMarks []BatchItem
+	var skippedIndices []int
+	for i, item := range result.Items {
+		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
+			item.Status = "succeeded"
+			skippedMarks = append(skippedMarks, item)
+			skippedIndices = append(skippedIndices, i)
+		}
+	}
+	if len(skippedMarks) > 0 {
+		checks := VerifyMutations(verificationClient, BatchOptions{Action: "mark", Read: true, VerifyBudget: opts.VerifyBudget}, skippedMarks)
+		for i, check := range checks {
+			item := &result.Items[skippedIndices[i]]
+			item.VerifyStatus, item.VerifyError = check.VerifyStatus, check.VerifyError
+			if item.VerifyError != "" {
+				result.Unverified++
+			}
+			if err := opts.Receipt.Record("verification_result", journalItem(*item)); err != nil {
+				return result, err
 			}
 		}
 	}
@@ -574,6 +645,9 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		summary := fmt.Sprintf("Dry run: would have %s %s%s", strings.ToLower(verb), countNoun(previewed, "message"), target)
 		if noops > 0 {
 			summary += fmt.Sprintf("; %d already there", noops)
+			if opts.MarkReadOnSkip {
+				summary += " (would mark read)"
+			}
 		}
 		if r.Failed > 0 {
 			summary += fmt.Sprintf("; %d cannot be %s", r.Failed, strings.ToLower(verb))
@@ -597,6 +671,15 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 	}
 	if r.Skipped > 0 {
 		summary += fmt.Sprintf("; %d already there", r.Skipped)
+		marked := 0
+		for _, item := range r.Items {
+			if item.MarkReadOnSkip && item.MarkedRead {
+				marked++
+			}
+		}
+		if marked > 0 {
+			summary += fmt.Sprintf(" (%d marked read)", marked)
+		}
 	}
 	return summary
 }
@@ -613,6 +696,23 @@ func countNoun(n int, noun string) string {
 // entire Mail.app mailbox once per item.
 func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []BatchItem {
 	verified := append([]BatchItem(nil), items...)
+	if err := ValidateBatchOptions(opts); err != nil {
+		for i := range verified {
+			if verified[i].Status == "succeeded" {
+				verified[i].VerifyStatus, verified[i].VerifyError = "verification-failed", err.Error()
+			}
+		}
+		return verified
+	}
+	ctx, cancel := context.WithTimeout(client.Context(), effectiveVerifyBudget(opts))
+	defer cancel()
+	client = client.WithContext(ctx)
+	schedule := verificationSchedule(opts.Settle)
+	for i := range verified {
+		if verified[i].Status == "succeeded" {
+			verified[i].VerifyStatus, verified[i].VerifyError, verified[i].Observed = "", "", nil
+		}
+	}
 	type groupKey struct{ account, mailbox string }
 	groups := make(map[groupKey][]int)
 	if opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" {
@@ -627,7 +727,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		}
 		snapshots := make(map[groupKey]map[string]Message)
 		snapshotErrors := make(map[groupKey]error)
-		for attempt, delay := range verificationBackoff {
+		for attempt, delay := range schedule {
 			if attempt > 0 {
 				if err := waitForVerificationBackoff(client.Context(), delay); err != nil {
 					for key := range groups {
@@ -713,7 +813,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		if item.Status == "succeeded" {
 			successful++
 		}
-		if item.Status == "succeeded" && isValidGmailInboxTransition(item) {
+		if !opts.readOnlyVerification && item.Status == "succeeded" && isValidGmailInboxTransition(item) {
 			if _, seen := syncErrors[item.Account]; !seen {
 				syncErrors[item.Account] = client.SyncAccount(item.Account)
 			}
@@ -726,18 +826,27 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		index  int
 		source bool
 	}
+	sourceRemoval := make([]bool, len(verified))
+	retainedSources := make(map[groupKey]bool)
 	identityGroups := make(map[groupKey][]relocationRef)
 	for i, item := range verified {
 		if item.Status != "succeeded" || syncErrors[item.Account] != nil {
 			continue
 		}
+		policyKey := groupKey{item.Account, item.SourceMailbox + "\x00" + item.TargetMailbox}
+		retained, known := retainedSources[policyKey]
+		if !known {
+			retained = client.canRetainRelocationSource(opts.Action, item)
+			retainedSources[policyKey] = retained
+		}
+		sourceRemoval[i] = !retained
 		identityGroups[groupKey{item.Account, item.SourceMailbox}] = append(identityGroups[groupKey{item.Account, item.SourceMailbox}], relocationRef{index: i, source: true})
 		identityGroups[groupKey{item.Account, item.TargetMailbox}] = append(identityGroups[groupKey{item.Account, item.TargetMailbox}], relocationRef{index: i})
 	}
 	presences := make([]verificationPresence, len(verified))
 	states := make([]RelocationState, len(verified))
 	lookupErrors := make([]error, len(verified))
-	for attempt, delay := range verificationBackoff {
+	for attempt, delay := range schedule {
 		if attempt > 0 {
 			if err := waitForVerificationBackoff(client.Context(), delay); err != nil {
 				for i := range verified {
@@ -751,6 +860,9 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		presences = make([]verificationPresence, len(verified))
 		states = make([]RelocationState, len(verified))
 		lookupErrors = make([]error, len(verified))
+		for i, item := range verified {
+			states[i] = RelocationState{ObservedAt: time.Now().Format(time.RFC3339Nano), Account: item.Account, SourceMailbox: item.SourceMailbox, DestinationMailbox: item.TargetMailbox, SourceRemovalRequired: sourceRemoval[i]}
+		}
 		for key, refs := range identityGroups {
 			identities := make([]StableIdentity, 0, len(refs))
 			for _, ref := range refs {
@@ -779,6 +891,8 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 					continue
 				}
 				state := &states[ref.index]
+				state.ObservedAt, state.Account, state.SourceMailbox, state.DestinationMailbox = time.Now().Format(time.RFC3339Nano), item.Account, item.SourceMailbox, item.TargetMailbox
+				state.SourceRemovalRequired = sourceRemoval[ref.index]
 				if ref.source {
 					presences[ref.index].Source = present
 					state.SourcePresent = present
@@ -807,6 +921,8 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		if item.Status != "succeeded" {
 			continue
 		}
+		observed := states[i]
+		item.Observed = &observed
 		if syncErr, ok := syncErrors[item.Account]; ok && syncErr != nil {
 			item.VerifyStatus, item.VerifyError = classifyGmailSyncError(syncErr)
 			continue
@@ -820,12 +936,13 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 			continue
 		}
 		presence := presences[i]
-		observed := states[i]
-		item.Observed = &observed
 		switch {
-		case presence.Source:
+		case presence.Source && sourceRemoval[i]:
 			item.VerifyStatus = "present_in_source"
 			item.VerifyError = fmt.Sprintf("message still present in %s", item.SourceMailbox)
+		case presence.Destination && (opts.MarkReadBefore || item.MarkedRead) && (observed.DestinationRead == nil || !*observed.DestinationRead):
+			item.VerifyStatus = "destination_read_unverified"
+			item.VerifyError = "destination read status is false, mixed, or unknown"
 		case presence.Destination:
 			item.VerifyStatus = "confirmed_destination"
 		default:
@@ -874,40 +991,6 @@ func classifyGmailSyncError(err error) (string, string) {
 func VerifyMutation(client *Client, opts BatchOptions, item BatchItem) (string, error) {
 	if item.Status == "" {
 		item.Status = "succeeded"
-	}
-	return verifyMutation(client, opts, item, true)
-}
-
-func verifyMutation(client *Client, opts BatchOptions, item BatchItem, syncGmail bool) (string, error) {
-	switch opts.Action {
-	case "archive", "move":
-		if item.TargetMailbox == "" || strings.EqualFold(item.TargetMailbox, item.SourceMailbox) {
-			return "already-in-destination", nil
-		}
-		if !item.Identity.valid() {
-			return "applied_destination_unverified", fmt.Errorf("stable identity was not captured before mutation")
-		}
-		if syncGmail && isValidGmailInboxTransition(item) {
-			// Force Mail.app to reconcile the Gmail labels before the bounded
-			// settling loop decides whether INBOX stayed removed.
-			if err := client.SyncAccount(item.Account); err != nil {
-				if isVerificationTimeout(err) {
-					return "unknown_after_timeout", fmt.Errorf("sync before Gmail archive verification: %w", err)
-				}
-				return "applied_destination_unverified", fmt.Errorf("sync before Gmail archive verification: %w", err)
-			}
-		}
-		return verifyRelocationWithLookup(client.Context(), item, func() (verificationPresence, error) {
-			inSource, err := client.hasMessageIdentityForVerification(item.Account, item.SourceMailbox, item.Identity)
-			if err != nil {
-				return verificationPresence{}, err
-			}
-			inDestination, err := client.hasMessageIdentityForVerification(item.Account, item.TargetMailbox, item.Identity)
-			if err != nil {
-				return verificationPresence{}, err
-			}
-			return verificationPresence{Source: inSource, Destination: inDestination}, nil
-		}, waitForVerificationBackoff)
 	}
 	verified := VerifyMutations(client, opts, []BatchItem{item})
 	if len(verified) != 1 {
