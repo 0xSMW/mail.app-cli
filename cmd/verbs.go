@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/config"
@@ -17,15 +18,18 @@ import (
 // otherwise.
 
 var (
-	verbDryRun       bool
-	verbVerify       bool
-	verbMoveTo       string
-	verbLimit        int
-	verbOffset       int
-	verbUnread       bool
-	verbWithContent  bool
-	verbMetadataOnly bool
-	verbBodySource   string
+	verbDryRun           bool
+	verbVerify           bool
+	verbMoveTo           string
+	verbLimit            int
+	verbOffset           int
+	verbUnread           bool
+	verbWithContent      bool
+	verbMetadataOnly     bool
+	verbBodySource       string
+	verbBodyAlternatives bool
+	verbSettle           time.Duration
+	verbVerifyBudget     time.Duration
 )
 
 var inboxCmd = &cobra.Command{
@@ -155,6 +159,7 @@ var showCmd = &cobra.Command{
 		if err := mailClient.SetBodySource(verbBodySource); err != nil {
 			return clierr.Usage(`--body-source must be "disk" or "mail"`)
 		}
+		mailClient.SetBodyAlternatives(verbBodyAlternatives)
 		return showMessage(args[0], verbMetadataOnly)
 	},
 }
@@ -201,12 +206,18 @@ func newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutat
 			opts.Action = action
 			opts.DryRun = verbDryRun
 			opts.Verify = verbVerify
+			opts.Settle, opts.VerifyBudget = verbSettle, verbVerifyBudget
 			opts.Journal = true
+			if err := mail.ValidateBatchOptions(opts); err != nil {
+				return clierr.Usage(err.Error())
+			}
 			return mutateByIDs(args, opts, mutate)
 		},
 	}
 	cmd.Flags().BoolVar(&verbDryRun, "dry-run", false, "Report what would change without touching Mail.app")
 	cmd.Flags().BoolVar(&verbVerify, "verify", false, "Re-read each message after mutation and record the outcome")
+	cmd.Flags().DurationVar(&verbSettle, "settle", 0, "Verification settling window (0 uses the default)")
+	cmd.Flags().DurationVar(&verbVerifyBudget, "verify-budget", mail.DefaultVerifyBudget, "Overall verification and identity capture budget per stage")
 	return cmd
 }
 
@@ -246,6 +257,7 @@ func init() {
 	}
 	inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
 	showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
+	showCmd.Flags().BoolVar(&verbBodyAlternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
 	showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
 
 	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
