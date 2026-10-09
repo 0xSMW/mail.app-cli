@@ -13,12 +13,14 @@ import (
 func newMessagesReadCmd() *cobra.Command {
 	var timeout, budget time.Duration
 	var bodySource string
+	var alternatives bool
 	cmd := &cobra.Command{
 		Use:         "read <message-id> [message-id...]",
 		Short:       "Read selected bodies serially with per-message results",
 		Args:        cobra.MinimumNArgs(1),
-		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on any missing/incomplete body. No automatic retry of a failed ID. Bodies are read from Mail.app's message files, so a read does not wait on Mail.app to render; contentSource says where each body came from and --body-source mail restores rendering by Mail.app. Each item carries diagnostics with per-phase timings; after a timeout, diagnostics.pending names the operation Mail.app had not answered. Existing show remains unchanged."},
+		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on extraction/transport errors. complete:true does not certify full semantic or visual content coverage. bodyDiagnostics inventories MIME alternatives, images, nontext and partial files; --body-alternatives includes alternate texts. No automatic retry of a failed ID. Bodies are read from Mail.app's message files, so a read does not wait on Mail.app to render; contentSource says where each body came from and --body-source mail restores rendering by Mail.app. Each item carries diagnostics with per-phase timings; after a timeout, diagnostics.pending names the operation Mail.app had not answered. Existing show remains unchanged."},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mailClient.SetBodyAlternatives(alternatives)
 			if timeout <= 0 || budget <= 0 {
 				return clierr.Usage("--timeout and --budget must be positive")
 			}
@@ -72,6 +74,7 @@ func newMessagesReadCmd() *cobra.Command {
 	}
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Maximum bridge execution time per message")
 	cmd.Flags().StringVar(&bodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
+	cmd.Flags().BoolVar(&alternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
 	cmd.Flags().DurationVar(&budget, "budget", 45*time.Second, "Total body-read budget including bridge queueing")
 	return cmd
 }
