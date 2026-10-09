@@ -23,7 +23,9 @@ agents --help (-h)
 archive
 archive --dry-run
 archive --help (-h)
+archive --settle
 archive --verify
+archive --verify-budget
 attachments
 attachments --help (-h)
 attachments list
@@ -60,7 +62,9 @@ config unset --help (-h)
 delete
 delete --dry-run
 delete --help (-h)
+delete --settle
 delete --verify
+delete --verify-budget
 doctor
 doctor --help (-h)
 drafts
@@ -120,7 +124,9 @@ export messages --unread
 flag
 flag --dry-run
 flag --help (-h)
+flag --settle
 flag --verify
+flag --verify-budget
 help
 help --help (-h)
 import
@@ -156,13 +162,16 @@ messages batch archive --dry-run
 messages batch archive --help (-h)
 messages batch archive --limit (-l)
 messages batch archive --mark-read
+messages batch archive --mark-read-on-skip
 messages batch archive --progress
 messages batch archive --query
 messages batch archive --report-file
 messages batch archive --sender
 messages batch archive --sender-domain
+messages batch archive --settle
 messages batch archive --stdin
 messages batch archive --verify
+messages batch archive --verify-budget
 messages batch archive --yes
 messages batch delete
 messages batch delete --chunk-size
@@ -175,8 +184,10 @@ messages batch delete --query
 messages batch delete --report-file
 messages batch delete --sender
 messages batch delete --sender-domain
+messages batch delete --settle
 messages batch delete --stdin
 messages batch delete --verify
+messages batch delete --verify-budget
 messages batch delete --yes
 messages batch flag
 messages batch flag --chunk-size
@@ -190,8 +201,10 @@ messages batch flag --query
 messages batch flag --report-file
 messages batch flag --sender
 messages batch flag --sender-domain
+messages batch flag --settle
 messages batch flag --stdin
 messages batch flag --verify
+messages batch flag --verify-budget
 messages batch flag --yes
 messages batch mark
 messages batch mark --chunk-size
@@ -205,8 +218,10 @@ messages batch mark --read
 messages batch mark --report-file
 messages batch mark --sender
 messages batch mark --sender-domain
+messages batch mark --settle
 messages batch mark --stdin
 messages batch mark --verify
+messages batch mark --verify-budget
 messages batch mark --yes
 messages batch move
 messages batch move --chunk-size
@@ -219,8 +234,10 @@ messages batch move --query
 messages batch move --report-file
 messages batch move --sender
 messages batch move --sender-domain
+messages batch move --settle
 messages batch move --stdin
 messages batch move --verify
+messages batch move --verify-budget
 messages batch move --yes
 messages delete
 messages delete --dry-run
@@ -271,15 +288,22 @@ messages move --dry-run
 messages move --help (-h)
 messages move --verify
 messages read
+messages read --body-alternatives
 messages read --body-source
 messages read --budget
 messages read --help (-h)
 messages read --timeout
+messages reconcile
+messages reconcile --help (-h)
+messages reconcile --settle
+messages reconcile --verify-budget
 messages scan
+messages scan --checkpoint
 messages scan --cursor
 messages scan --help (-h)
 messages scan --limit
 messages scan --query
+messages scan --restart-checkpoint
 messages scan --since
 messages scan --unread
 messages sent
@@ -305,8 +329,10 @@ messages vip --limit (-l)
 move
 move --dry-run
 move --help (-h)
+move --settle
 move --to
 move --verify
+move --verify-budget
 output
 output --help (-h)
 recent
@@ -356,7 +382,9 @@ search --since (-s)
 seen
 seen --dry-run
 seen --help (-h)
+seen --settle
 seen --verify
+seen --verify-budget
 send
 send --attach
 send --bcc (-b)
@@ -370,6 +398,7 @@ send --signature
 send --subject (-s)
 send --to (-t)
 show
+show --body-alternatives
 show --body-source
 show --help (-h)
 show --metadata-only
@@ -417,7 +446,9 @@ tui --message
 unflag
 unflag --dry-run
 unflag --help (-h)
+unflag --settle
 unflag --verify
+unflag --verify-budget
 unread
 unread --help (-h)
 unread --limit (-l)
@@ -426,6 +457,8 @@ unread --with-content
 unseen
 unseen --dry-run
 unseen --help (-h)
+unseen --settle
 unseen --verify
+unseen --verify-budget
 version
 version --help (-h)
