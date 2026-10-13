@@ -3,11 +3,10 @@ package cmd
 import (
 	"os"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/internal/tui"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/internal/tui"
 	"github.com/spf13/cobra"
 )
 
@@ -48,7 +47,7 @@ ctrl+r refresh, ? help, q quit.`,
 			opts.Account = account
 			opts.Mailbox = mailboxInScope()
 		}
-		return tui.Run(mail.NewClient().WithContext(cmd.Context()), opts)
+		return tui.Run(mailClient, opts)
 	},
 }
 
