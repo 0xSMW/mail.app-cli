@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -22,24 +22,26 @@ var (
 	sendAttachments []string
 	sendDryRun      bool
 	sendFrom        string
+	sendThreading   threadedOutgoingFlags
 )
 
 type sendReceipt struct {
-	Account     string   `json:"account"`
-	AccountID   string   `json:"accountId,omitempty"`
-	Sender      string   `json:"sender,omitempty"`
-	To          []string `json:"to"`
-	Cc          []string `json:"cc"`
-	Bcc         []string `json:"bcc"`
-	Subject     string   `json:"subject"`
-	Body        string   `json:"body"`
-	Attachments []string `json:"attachments"`
-	Signature   string   `json:"signature,omitempty"`
-	DryRun      bool     `json:"dryRun"`
-	Sent        bool     `json:"sent"`
-	Submitted   bool     `json:"submitted"`
-	Status      string   `json:"status"`
-	Uncertain   bool     `json:"uncertain,omitempty"`
+	Account     string          `json:"account"`
+	AccountID   string          `json:"accountId,omitempty"`
+	Sender      string          `json:"sender,omitempty"`
+	To          []string        `json:"to"`
+	Cc          []string        `json:"cc"`
+	Bcc         []string        `json:"bcc"`
+	Subject     string          `json:"subject"`
+	Body        string          `json:"body"`
+	Attachments []string        `json:"attachments"`
+	Signature   string          `json:"signature,omitempty"`
+	DryRun      bool            `json:"dryRun"`
+	Sent        bool            `json:"sent"`
+	Submitted   bool            `json:"submitted"`
+	Status      string          `json:"status"`
+	Uncertain   bool            `json:"uncertain,omitempty"`
+	Threading   *threadedSource `json:"threading,omitempty"`
 }
 
 var sendCmd = &cobra.Command{
@@ -50,11 +52,16 @@ var sendCmd = &cobra.Command{
 Examples:
   mail-app-cli send -t user@example.com -s "Hello" --body "Message content"
   mail-app-cli send -a "Gmail" -t a@example.com -t b@example.com -s "Multi" --body-file body.md
-  mail-app-cli send -t user@example.com -s "Files" --body "See attached" --attach ~/file.pdf --dry-run`,
+  mail-app-cli send -t user@example.com -s "Files" --body "See attached" --attach ~/file.pdf --dry-run
+  mail-app-cli send -a "Personal" -m INBOX --reply-to 123 --reply-all -t user@example.com -s "Re: Hello" --body "Complete reply body"`,
 	Annotations: map[string]string{
 		annotationAgentNotes: "Sending is not idempotent and cannot be undone. Run with --dry-run to see the exact message first. Use 'drafts create' when a person should review before sending.",
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		threading, err := sendThreading.selection(cmd)
+		if err != nil {
+			return err
+		}
 		account, err := requireAccount()
 		if err != nil {
 			return err
@@ -79,16 +86,21 @@ Examples:
 			}
 			body = strings.TrimRight(body, "\r\n") + "\n\n" + signature.Content
 		}
+		if threading != nil {
+			threading.Account = account
+		}
 		receipt := sendReceipt{
 			Account: account, To: sendTo, Cc: nonNil(sendCc), Bcc: nonNil(sendBcc),
 			Subject: sendSubject, Body: body, Attachments: nonNil(sendAttachments), Signature: sendSignature,
-			DryRun: sendDryRun,
+			DryRun: sendDryRun, Threading: threading,
 		}
 		input := mail.OutgoingInput{Account: account, Sender: sendFrom, Subject: sendSubject, Body: body,
 			To: sendTo, Cc: sendCc, Bcc: sendBcc, Attachments: sendAttachments}
 		var resolvedOutgoing *mail.OutgoingResult
 		if sendDryRun {
 			resolvedOutgoing, err = mailClient.PreviewOutgoing(input)
+		} else if threading != nil {
+			resolvedOutgoing, err = mailClient.SendThreadedOutgoing(threading.input(input))
 		} else {
 			resolvedOutgoing, err = mailClient.SendOutgoing(input)
 		}
@@ -120,7 +132,7 @@ Examples:
 		return writer.Write(output.Result{
 			Data:    receipt,
 			Summary: summary,
-			Notices: previewNotices(sendDryRun),
+			Notices: threadedPreviewNotices(threading, sendDryRun),
 			Meta:    map[string]any{"account": account, "dryRun": sendDryRun},
 			Plain: func(p *output.Printer) {
 				if sendDryRun {
@@ -154,6 +166,7 @@ func nonNil(values []string) []string {
 }
 
 func init() {
+	sendThreading.register(sendCmd)
 	sendCmd.Flags().StringSliceVarP(&sendTo, "to", "t", []string{}, "To recipient (repeatable)")
 	sendCmd.Flags().StringSliceVarP(&sendCc, "cc", "c", []string{}, "Cc recipient (repeatable)")
 	sendCmd.Flags().StringSliceVarP(&sendBcc, "bcc", "b", []string{}, "Bcc recipient (repeatable)")
