@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
 	"github.com/spf13/cobra"
 )
 
@@ -77,6 +77,7 @@ const environmentTopic = `Environment
   MAIL_APP_CLI_ACCOUNT                  default --account
   MAIL_APP_CLI_MAILBOX                  default --mailbox (INBOX when unset)
   MAIL_APP_CLI_OUTPUT                   auto | json | plain
+  MAIL_APP_CLI_BACKEND                  native | legacy | auto (--backend takes precedence)
   MAIL_APP_CLI_CONFIG                   config file path
   MAIL_APP_CLI_SKILL_DIR                where 'skill install' writes
   MAIL_APP_CLI_SEARCH_TIMEOUT           seconds for slow automation search (8)
@@ -90,7 +91,7 @@ Files
 
   ~/.config/mail-app-cli/config.json    settings ('config show' prints sources)
   ~/.cache/mail-app-cli/                account and message-list cache, recent journal
-  ~/Library/Mail/V10/MailData/Envelope Index
+  ~/Library/Mail/V*/MailData/Envelope Index
                                         read-only SQLite for fast lists and search;
                                         needs Full Disk Access for the app running mail-app-cli
 
