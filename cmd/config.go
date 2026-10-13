@@ -3,9 +3,9 @@ package cmd
 import (
 	"os"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/spf13/cobra"
 )
 
