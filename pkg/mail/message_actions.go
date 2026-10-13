@@ -4,9 +4,14 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
 )
 
 func (c *Client) MarkMessageAsRead(accountName, mailboxName, messageID string, read bool) error {
+	if c.nativeEnabled() {
+		return c.nativeMessageAction(accountName, mailboxName, messageID, "isrd", appleevents.Bool(read))
+	}
 	return c.runMessageAction(
 		accountName,
 		mailboxName,
@@ -52,6 +57,9 @@ try {
 }
 
 func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged bool) error {
+	if c.nativeEnabled() {
+		return c.nativeMessageAction(accountName, mailboxName, messageID, "isfl", appleevents.Bool(flagged))
+	}
 	return c.runMessageAction(
 		accountName,
 		mailboxName,
@@ -61,7 +69,13 @@ func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged
 }
 
 func (c *Client) DeleteMessage(accountName, mailboxName, messageID string) error {
-	if err := c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();"); err != nil {
+	var actionErr error
+	if c.nativeEnabled() {
+		actionErr = c.nativeMessageAction(accountName, mailboxName, messageID, "delete", appleevents.Null())
+	} else {
+		actionErr = c.runMessageAction(accountName, mailboxName, messageID, "msg.delete();")
+	}
+	if err := actionErr; err != nil {
 		return err
 	}
 	if err := RemoveRecentMessage(accountName, messageID); err != nil {
@@ -90,6 +104,8 @@ func deleteMessageResolved(mailboxName string, deleteFromMailbox func(string) er
 	for _, fallbackMailbox := range deleteFallbackMailboxes(mailboxName) {
 		if fallbackErr := deleteFromMailbox(fallbackMailbox); fallbackErr == nil {
 			return nil
+		} else if !isMessageNotFoundError(fallbackErr) {
+			return fallbackErr
 		}
 	}
 
@@ -123,6 +139,9 @@ func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) erro
 // ResolveArchiveMailbox is read-only so callers can durably record the
 // intended destination before Mail is asked to move anything.
 func (c *Client) ResolveArchiveMailbox(accountName string) (string, error) {
+	if c.nativeEnabled() {
+		return c.nativeResolveArchive(accountName)
+	}
 	script := archiveMailboxLookupScript + fmt.Sprintf(`
 tell application "Mail"
  set targetAccount to account "%s"
@@ -171,6 +190,9 @@ func (c *Client) ArchiveMessageToDestination(accountName, mailboxName, messageID
 	if useNative {
 		return c.archiveInboxThroughMail(accountName, messageID)
 	}
+	if c.nativeEnabled() {
+		return c.nativeMove(accountName, mailboxName, messageID, destination, true)
+	}
 	output, err := c.runAppleScript(archiveMessageScript(accountName, mailboxName, messageID, destination))
 	if err != nil {
 		return archiveBridgeError(err)
@@ -215,6 +237,9 @@ end tell
 }
 
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
+	if c.nativeEnabled() {
+		return c.nativeMove(accountName, sourceMailbox, messageID, targetMailbox, false)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const requestedMailbox = '%s';
