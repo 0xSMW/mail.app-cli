@@ -5,10 +5,10 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // accountsCached returns accounts from the on-disk cache when fresh,
@@ -47,7 +47,11 @@ func requireAccount() (string, error) {
 	// a command silently scoped to an account after another account is added or
 	// enabled. A new client also bypasses any in-process cache primed from that
 	// disk entry.
-	accounts, err := mail.NewClient().WithContext(mailClient.Context()).GetAccountsJSON()
+	client := mail.NewClient().WithContext(mailClient.Context())
+	if err := client.SetBackend(flagBackend); err != nil {
+		return "", clierr.Usage(err.Error())
+	}
+	accounts, err := client.GetAccountsJSON()
 	if err != nil {
 		return "", err
 	}
