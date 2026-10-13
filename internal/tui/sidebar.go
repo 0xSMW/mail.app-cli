@@ -7,7 +7,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // listSource is what the list shows: the unified inbox, one mailbox, or a
