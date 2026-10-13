@@ -7,6 +7,9 @@ import (
 )
 
 func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) ([]Attachment, error) {
+	if c.nativeEnabled() {
+		return c.nativeAttachments(accountName, mailboxName, messageID)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -61,12 +64,18 @@ func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentN
 }
 
 func (c *Client) SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	return c.saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName, index, savePath, jxaMailboxLookupHelper()+jxaMessageByIdHelper(), jxaMailboxLookupExpression(mailboxName))
 }
 
 // Callers preserving a draft supply its account-owned special mailbox lookup;
 // ordinary attachment commands retain their explicit mailbox-name lookup.
 func (c *Client) saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath, lookupHelper, lookupExpression string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const app = Application.currentApplication();
