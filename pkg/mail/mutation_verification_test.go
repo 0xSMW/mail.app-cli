@@ -430,7 +430,7 @@ func TestVerifyRelocationClassifiesAppleEventTimeoutAsUnknown(t *testing.T) {
 
 func TestRunBatchRetainsMarkReadWhenArchiveTimesOut(t *testing.T) {
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\nprintf Success\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\ncase \"$*\" in *mail-app-cli-native-archive-account*) printf true ;; *AXIsProcessTrusted*) printf ready ;; *) printf Success ;; esac\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
