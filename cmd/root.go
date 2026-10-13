@@ -10,15 +10,15 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
 
-const version = "2.4.0"
+const version = "3.0.0"
 
 const (
 	groupMail   = "mail"
@@ -47,6 +47,7 @@ const (
 var (
 	flagAccount string
 	flagMailbox string
+	flagBackend string
 	outFlags    output.Flags
 
 	// Per-invocation state built in prepare.
@@ -81,6 +82,7 @@ func Execute() {
 
 // Run executes args against the root command and returns the exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
+	defer writeBackendMetrics(stderr)
 	// Cobra commands and their flags are package globals. Clear the previous
 	// invocation before parsing, and again on every return, so callers that use
 	// Run more than once get the same behavior as separate CLI processes.
@@ -284,6 +286,9 @@ func prepare(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	mailClient = mail.NewClient().WithContext(cmd.Context())
+	if err := mailClient.SetBackend(flagBackend); err != nil {
+		return clierr.Usage(err.Error())
+	}
 	mailClient.SetWarn(writer.AddNotice)
 	return nil
 }
@@ -408,6 +413,7 @@ func init() {
 	rootCmd.SetHelpFunc(agentAwareHelp(rootCmd.HelpFunc()))
 
 	pf := rootCmd.PersistentFlags()
+	pf.StringVar(&flagBackend, "backend", "", "Mail transport: native, legacy, or auto (default: native when available)")
 	pf.StringVarP(&flagAccount, "account", "a", "", "Mail.app account name (default: config, or the only account)")
 	pf.StringVarP(&flagMailbox, "mailbox", "m", "", "Mailbox name (default: config, or INBOX)")
 	pf.BoolVar(&outFlags.JSON, "json", false, "Emit the JSON envelope even on a terminal")
