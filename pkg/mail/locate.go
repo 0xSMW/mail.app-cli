@@ -182,6 +182,9 @@ func (c *Client) countMessageIdentityInMailbox(accountName, mailboxName string, 
 		return 0, err
 	}
 	if !ok {
+		if c.nativeEnabled() {
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
 		return 0, fmt.Errorf("mailbox not found: %s", mailboxName)
 	}
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
@@ -195,6 +198,10 @@ limit 2;
 `, indexMailboxMembershipCondition(mbox), sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize)
 	var rows []indexMessage
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		if c.nativeEnabled() && isEnvelopeIndexUnavailable(err) {
+			c.warnEnvelopeIndexFallback(err)
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
 		return 0, err
 	}
 	return len(rows), nil
@@ -228,6 +235,16 @@ func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName stri
 }
 
 func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	if c.nativeEnabled() {
+		matches, err := c.nativeIdentityCount(accountName, mailboxName, identity)
+		if err != nil {
+			return false, err
+		}
+		if matches > 1 {
+			return false, fmt.Errorf("stable identity is ambiguous in %s", mailboxName)
+		}
+		return matches == 1, nil
+	}
 	identityJSON, err := json.Marshal(identity)
 	if err != nil {
 		return false, err
@@ -276,6 +293,9 @@ JSON.stringify(matches);
 // Gmail-like and therefore fail-closed: only the index can prove whether a
 // selected Important message also has INBOX.
 func (c *Client) isGmailAccount(accountName string) (bool, error) {
+	if c.nativeEnabled() {
+		return c.nativeGmailCapability(accountName)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const acc = mail.accounts.byName('%s');
