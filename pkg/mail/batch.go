@@ -282,6 +282,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	}
 	if opts.DryRun {
 		// A preview shows the same sources and skips the real run would use.
+		archiveDestinations := make(map[string]string)
 		for _, item := range items {
 			if item.Status == "failed" {
 				result.Failed++
@@ -293,6 +294,23 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				item.Status = "skipped"
 				item.Error = skip
 				item.MarkReadOnSkip = opts.MarkReadOnSkip && opts.MarkReadBefore && opts.Action == "archive"
+			} else if opts.Action == "archive" && item.TargetMailbox == "" {
+				destination, cached := archiveDestinations[item.Account]
+				if !cached {
+					var err error
+					destination, err = client.ResolveArchiveMailbox(item.Account)
+					if err != nil {
+						item.Status, item.Error = "failed", "resolve archive destination: "+err.Error()
+						result.Failed++
+						result.Items = append(result.Items, item)
+						if isVerificationTimeout(err) {
+							return result, err
+						}
+						continue
+					}
+					archiveDestinations[item.Account] = destination
+				}
+				item.TargetMailbox = destination
 			}
 			result.Skipped++
 			result.Items = append(result.Items, item)
