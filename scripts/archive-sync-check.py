@@ -192,8 +192,8 @@ class Check:
         if dry_run:
             require(item.get("status") == "dry-run" and data.get("attempted") == 0,
                     "preview reported an attempted mutation")
-            if item.get("targetMailbox"):
-                require(item["targetMailbox"] == self.args.destination, "preview archive destination differs")
+            require(item.get("targetMailbox") == self.args.destination,
+                    "preview archive destination is missing or differs")
             return
         require(item.get("targetMailbox") == self.args.destination and
                 item.get("status") == "succeeded" and data.get("attempted") == 1 and
