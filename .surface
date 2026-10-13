@@ -1,6 +1,7 @@
 (root)
 (root) --account (-a)
 (root) --agent [hidden]
+(root) --backend
 (root) --count
 (root) --help (-h)
 (root) --ids-only
@@ -76,8 +77,11 @@ drafts create --body
 drafts create --body-file
 drafts create --cc
 drafts create --dry-run
+drafts create --forward-of
 drafts create --from
 drafts create --help (-h)
+drafts create --reply-all
+drafts create --reply-to
 drafts create --subject
 drafts create --to
 drafts delete
@@ -392,8 +396,11 @@ send --body
 send --body-file
 send --cc (-c)
 send --dry-run
+send --forward-of
 send --from
 send --help (-h)
+send --reply-all
+send --reply-to
 send --signature
 send --subject (-s)
 send --to (-t)
