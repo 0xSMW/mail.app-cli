@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +43,13 @@ insert into addresses values ('sender@example.com', ''), ('other@example.com', '
 	t.Setenv("SNAPSHOT_SQLITE_LOG", log)
 	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "")
 	script := `#!/bin/sh
-[ "$#" -eq 4 ] || exit 91
 [ "$1" = '-readonly' ] && [ "$2" = '-json' ] || exit 92
+if [ "$#" -eq 3 ]; then
+  /bin/cat > "$SNAPSHOT_SQLITE_LOG.stdin"
+  /bin/cat "$SNAPSHOT_SQLITE_LOG.stdin" >> "$SNAPSHOT_SQLITE_LOG"
+  exec "$SNAPSHOT_SQLITE_BINARY" -readonly -json "$SNAPSHOT_SQLITE_DATABASE" < "$SNAPSHOT_SQLITE_LOG.stdin"
+fi
+[ "$#" -eq 4 ] || exit 91
 printf '%s\n' "$4" >> "$SNAPSHOT_SQLITE_LOG"
 exec "$SNAPSHOT_SQLITE_BINARY" -readonly -json "$SNAPSHOT_SQLITE_DATABASE" "$4"
 `
@@ -54,6 +60,82 @@ exec "$SNAPSHOT_SQLITE_BINARY" -readonly -json "$SNAPSHOT_SQLITE_DATABASE" "$4"
 	client := NewClient()
 	client.PrimeAccounts([]Account{{ID: "ABC", Name: "Work"}, {ID: "DEF", Name: "Personal"}})
 	return client, log
+}
+
+func TestVerificationSnapshotCustomAllMailLikeLabelRemainsPresent(t *testing.T) {
+	client, _ := snapshotSQLiteFixture(t, `
+insert into mailboxes(rowid,url) values (1,'imap://ABC/All%20Work%20Mail'), (2,'imap://ABC/%5BGmail%5D/All%20Mail');
+insert into messages(rowid,mailbox,subject,sender,date_sent,size,read,deleted) values (101,2,1,1,1787961600,42,1,0);
+insert into labels values (101,1);
+`)
+	source, destination := snapshotScope("Work", "All Work Mail"), snapshotScope("Work", "All Mail")
+	results := client.getIdentitySnapshotForVerification([]identityVerificationScope{source, destination})
+	for _, scope := range []identityVerificationScope{source, destination} {
+		got := snapshotMessages(t, results, scope)
+		if len(got) != 1 || got[0].ID != "101" {
+			t.Fatalf("%s must retain membership while its label remains: %+v", scope.key.mailbox, got)
+		}
+	}
+}
+
+func TestVerificationSnapshotManyScopesShareOneStatement(t *testing.T) {
+	var data strings.Builder
+	var scopes []identityVerificationScope
+	for i := 0; i < 501; i++ {
+		mailbox := fmt.Sprintf("Folder%d", i)
+		fmt.Fprintf(&data, "insert into mailboxes values ('imap://ABC/%s');\n", mailbox)
+		scopes = append(scopes, snapshotScope("Work", mailbox))
+	}
+	client, log := snapshotSQLiteFixture(t, data.String())
+	results := client.getIdentitySnapshotForVerification(scopes)
+	for _, scope := range scopes {
+		if got := snapshotMessages(t, results, scope); len(got) != 0 {
+			t.Fatalf("empty mailbox %s has matches: %+v", scope.key.mailbox, got)
+		}
+	}
+	query, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(query), "with verification_mailbox_0 as (") != 1 || strings.Count(string(query), ";") != 1 {
+		t.Fatal("large scope sets must still share one statement and invocation")
+	}
+}
+
+func TestVerificationSnapshotLargeIdentitiesAvoidArgumentLimit(t *testing.T) {
+	source, destination := snapshotScope("Work", "INBOX"), snapshotScope("Work", "All Mail")
+	source.identities, destination.identities = nil, nil
+	var data strings.Builder
+	data.WriteString(`insert into mailboxes(rowid,url) values (1,'imap://ABC/INBOX'), (2,'imap://ABC/%5BGmail%5D/All%20Mail');`)
+	for i := 0; i < 500; i++ {
+		identity := snapshotTestIdentity()
+		identity.Subject = fmt.Sprintf("%d %s", i, strings.Repeat("x", 1024))
+		source.identities = append(source.identities, identity)
+		destination.identities = append(destination.identities, identity)
+		if i == 499 {
+			fmt.Fprintf(&data, "insert into subjects(rowid,subject) values (3,%s);\n", sqlQuote(identity.Subject))
+			data.WriteString("insert into messages(rowid,mailbox,subject,sender,date_sent,size,read,deleted) values (101,2,3,1,1787961600,42,1,0); insert into labels values (101,1);")
+		}
+	}
+	client, log := snapshotSQLiteFixture(t, data.String())
+	results := client.getIdentitySnapshotForVerification([]identityVerificationScope{source, destination})
+	for _, scope := range []identityVerificationScope{source, destination} {
+		result := results[scope.key]
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		got := result.matches[scope.identities[len(scope.identities)-1].fallbackKey()]
+		if len(got) != 1 || got[0].ID != "101" {
+			t.Fatalf("large query lost exact identity in %s: %+v", scope.key.mailbox, got)
+		}
+	}
+	query, err := os.ReadFile(log + ".stdin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(query) < 1<<20 {
+		t.Fatalf("fixture should exceed the host argv budget, got %d bytes", len(query))
+	}
 }
 
 func snapshotTestIdentity() StableIdentity {
