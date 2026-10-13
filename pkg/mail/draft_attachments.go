@@ -67,6 +67,9 @@ if (count attachments of content) < %d then error "Attachment did not finish loa
 // Unlike the best-effort public listing, preservation must distinguish an
 // empty attachment list from an inaccessible draft or failed property read.
 func (c *Client) draftAttachments(draft *Message) ([]Attachment, error) {
+	if c.nativeEnabled() {
+		return c.nativeDraftAttachments(draft)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 %s
