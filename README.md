@@ -429,6 +429,16 @@ report when and where the final source/destination state was observed, and
 whether observation followed a synchronization request. These observations
 cover Mail's local state; they do not certify server-side labels or future state.
 
+Archiving from a Gmail Inbox to All Mail uses Mail's native Archive control.
+Grant Accessibility access to the application running `mail-app-cli` in macOS
+System Settings. The command briefly opens a separate Mail window with its
+preview hidden, selects and checks the individual message, then closes that
+window. If it cannot establish the exact selection or Mail's focus changes,
+the command stops before archiving. Conversation rows that cannot be selected
+as an individual message require archiving in Mail directly. An uncertain
+Archive response stops the batch; reconcile its receipt before taking further
+action. All mailbox changes continue to go through Mail.
+
 `messages batch archive 12345 --mark-read --mark-read-on-skip --verify --dry-run`
 previews the explicit choice to mark an already-archived record read. Without
 `--mark-read-on-skip`, archived records retain their existing state. Requested
