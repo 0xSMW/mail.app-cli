@@ -40,6 +40,9 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, err
 	}
+	if c.nativeEnabled() {
+		return c.updateNativeDraft(accountName, draftID, input, attachments)
+	}
 	draft, err := c.GetDraft(accountName, draftID)
 	if err != nil {
 		return nil, err
@@ -102,6 +105,13 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 }
 
 func (c *Client) GetDraft(accountName, draftID string) (*Message, error) {
+	if c.nativeEnabled() {
+		snapshot, err := c.readNativeDraftSnapshot(accountName, draftID)
+		if err != nil {
+			return nil, err
+		}
+		return snapshot.Message, nil
+	}
 	const pageSize = 500
 	for offset := 0; ; offset += pageSize {
 		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
@@ -196,6 +206,9 @@ func normalizeDraftContent(value string) string {
 }
 
 func (c *Client) deleteDraftByID(accountName, mailboxName, draftID string) error {
+	if c.nativeEnabled() {
+		return c.deleteNativeDraft(accountName, mailboxName, draftID)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const requestedMailbox = '%s';
