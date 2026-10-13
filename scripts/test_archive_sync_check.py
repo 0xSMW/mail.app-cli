@@ -48,6 +48,7 @@ class ArchiveSyncCheckTests(unittest.TestCase):
             command_timeout=60, settle_seconds=60, interval_seconds=15)
         self.check = check_module.Check(self.args, Path(self.temporary.name))
         self.calls = []
+        self.mailboxes = ["INBOX", "All Mail"]
         self.fixture = dict(id="101", account=self.args.account, mailbox="INBOX",
                             subject=self.args.marker, sender="Fixture <fixture@example.test>",
                             dateSent="2026-10-13T00:00:00Z", messageSize=300,
@@ -66,10 +67,10 @@ class ArchiveSyncCheckTests(unittest.TestCase):
         messages = [dict(self.fixture)]
         if archived:
             messages = [dict(self.fixture, id="202", read=True,
-                             mailbox="All Mail", mailboxes=["All Mail"])]
+                             mailbox=self.args.destination, mailboxes=[self.args.destination])]
         return dict(complete=True, messages=messages,
                     coverage=[dict(account=self.args.account, mailbox=box, exhausted=True,
-                                   truncated=False, remaining=0) for box in ("INBOX", "All Mail")])
+                                   truncated=False, remaining=0) for box in ("INBOX", self.args.destination)])
 
     def fake_run(self, label, arguments):
         self.calls.append((label, arguments))
@@ -80,10 +81,11 @@ class ArchiveSyncCheckTests(unittest.TestCase):
         if label == "sender-account":
             return dict(name=self.args.sender_account, enabled=True, emailAddress="sender@example.test")
         if label == "mailboxes":
-            return [dict(account=self.args.account, name=box) for box in ("INBOX", "All Mail")]
+            return [dict(account=self.args.account, name=box) for box in self.mailboxes]
         if label == "preview":
+            item = dict(self.receipt["items"][0], status="dry-run")
             return dict(action="archive", dryRun=True, matched=1, attempted=0,
-                        items=[dict(self.receipt["items"][0], status="dry-run")])
+                        items=[item])
         if label in ("archive", "post-sync-reconcile"):
             return copy.deepcopy(self.receipt)
         if label == "sync":
@@ -108,6 +110,66 @@ class ArchiveSyncCheckTests(unittest.TestCase):
         self.assertEqual(self.check.state["status"], "dry-run-passed")
         self.assertFalse(self.check.state["archiveAttempted"])
         self.assertFalse({label for label, _ in self.calls} & {"archive", "sync", "post-sync-reconcile"})
+
+    def test_preview_without_target_mailbox_blocks_archive(self):
+        original = self.fake_run
+        def legacy_preview(label, arguments):
+            data = original(label, arguments)
+            if label == "preview":
+                data["items"][0].pop("targetMailbox", None)
+            return data
+        self.check.run = legacy_preview
+        with self.assertRaisesRegex(check_module.CheckFailed, "preview archive destination is missing or differs"):
+            self.check.execute()
+        self.assertFalse(self.check.state["archiveAttempted"])
+        self.assertFalse({label for label, _ in self.calls} & {"archive", "sync"})
+
+    def test_archive_selection_rejects_mismatch_before_mutation(self):
+        self.args.destination = "Archive"
+        self.mailboxes = ["INBOX", "Archive", "All Mail"]
+        with self.assertRaisesRegex(check_module.CheckFailed, "preview archive destination is missing or differs"):
+            self.check.execute()
+        self.assertFalse(self.check.state["archiveAttempted"])
+        self.assertIn("preview", {label for label, _ in self.calls})
+        self.assertFalse({label for label, _ in self.calls} & {"archive", "sync"})
+
+    def test_resolver_all_mail_blocks_archive_when_listing_only_shows_archive(self):
+        self.args.destination = "Archive"
+        self.mailboxes = ["INBOX", "Archive"]
+        # The real recursive resolver can find nested All Mail omitted by the
+        # mailbox-list fallback; the returned preview target must decide.
+        with self.assertRaisesRegex(check_module.CheckFailed, "preview archive destination is missing or differs"):
+            self.check.execute()
+        self.assertFalse(self.check.state["archiveAttempted"])
+        self.assertIn("preview", {label for label, _ in self.calls})
+        self.assertFalse({label for label, _ in self.calls} & {"archive", "sync"})
+
+    def test_all_mail_is_preferred_when_archive_also_exists(self):
+        self.args.apply = False
+        self.mailboxes = ["INBOX", "Archive", "All Mail"]
+        self.check.execute()
+        self.assertEqual(self.check.state["status"], "dry-run-passed")
+
+    def test_archive_only_account_passes_with_resolved_preview(self):
+        self.args.destination = "Archive"
+        self.mailboxes = ["INBOX", "Archive"]
+        item = self.receipt["items"][0]
+        item["targetMailbox"] = "Archive"
+        item["observed"]["destinationMailbox"] = "Archive"
+        with patch("builtins.print"):
+            self.check.execute()
+        self.assertEqual(self.check.state["status"], "passed")
+        self.assertEqual(sum(label == "archive" for label, _ in self.calls), 1)
+
+    def test_absent_or_ambiguous_archive_mailbox_is_rejected_before_mutation(self):
+        for boxes in (["INBOX"], ["INBOX", "All Mail", "All Mail"]):
+            with self.subTest(boxes=boxes):
+                self.mailboxes = boxes
+                self.calls.clear()
+                with self.assertRaisesRegex(check_module.CheckFailed, "absent or ambiguous"):
+                    self.check.execute()
+                self.assertFalse(self.check.state["archiveAttempted"])
+                self.assertFalse({label for label, _ in self.calls} & {"preview", "archive", "sync"})
 
     def test_fixture_from_another_own_configured_account_is_allowed(self):
         self.args.apply = False
