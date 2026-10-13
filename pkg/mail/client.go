@@ -12,6 +12,7 @@ type clientState struct {
 	accountsMu               sync.Mutex
 	accounts                 []Account
 	accountsLoaded           bool
+	nativeArchiveAccounts    map[string]bool
 	indexFallbackWarningOnce sync.Once
 	contentWarningOnce       sync.Once
 	recentCleanupWarningOnce sync.Once
