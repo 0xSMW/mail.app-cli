@@ -13,6 +13,9 @@ type Signature struct {
 }
 
 func (c *Client) ListSignatures(includeContent bool) ([]Signature, error) {
+	if c.nativeEnabled() {
+		return c.listNativeSignatures(includeContent)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
