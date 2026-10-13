@@ -23,9 +23,11 @@ func TestReliabilityIdentityPerformance(t *testing.T) {
 	t.Setenv("RELIABILITY_BRIDGE_LOG", log)
 	osa := `#!/usr/bin/python3
 import sys,os,json,time,re,base64
-with open(os.environ['RELIABILITY_BRIDGE_LOG'],'a') as f:f.write('process\n')
+with open(os.environ['RELIABILITY_BRIDGE_LOG'],'a') as f:f.write('account-probe\n' if 'mail-app-cli-native-archive-account' in sys.argv[-1] else 'permission\n' if 'AXIsProcessTrusted' in sys.argv[-1] else 'process\n')
 time.sleep(.005)
 def response(script):
+    if 'mail-app-cli-native-archive-account' in script:return 'true'
+    if 'AXIsProcessTrusted' in script:return 'ready'
     if 'msg.content()' in script:
         with open(os.environ['RELIABILITY_BRIDGE_LOG'],'a') as f:f.write('render\n')
         time.sleep(.025)
@@ -100,7 +102,10 @@ else:
 	if os.Getenv("RELIABILITY_BASELINE") != "1" && (renders != 0 || processes > 3) {
 		t.Fatalf("processes=%d renders=%d, want <=3 identity sessions and no renderer calls", processes, renders)
 	}
-	measurement := map[string]any{"messages": n, "elapsedMs": float64(elapsed.Microseconds()) / 1000, "bridgeProcesses": processes, "bodyRenderCalls": renders, "succeeded": result.Succeeded, "unverified": result.Unverified, "fixtureStartupMs": 5, "fixtureRenderMs": 25}
+	accountProbeProcesses := strings.Count(string(logged), "account-probe\n")
+	permissionProcesses := strings.Count(string(logged), "permission\n")
+	// Permission setup is separate from the identity/verification performance contract.
+	measurement := map[string]any{"accountProbeProcesses": accountProbeProcesses, "permissionProcesses": permissionProcesses, "identityBridgeProcesses": processes, "messages": n, "elapsedMs": float64(elapsed.Microseconds()) / 1000, "bridgeProcesses": processes + permissionProcesses + accountProbeProcesses, "bodyRenderCalls": renders, "succeeded": result.Succeeded, "unverified": result.Unverified, "fixtureStartupMs": 5, "fixtureRenderMs": 25}
 	encoded, _ := json.Marshal(measurement)
 	t.Log(string(encoded))
 	if path := os.Getenv("RELIABILITY_RESULT_FILE"); path != "" {
