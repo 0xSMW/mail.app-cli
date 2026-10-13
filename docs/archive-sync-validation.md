@@ -46,7 +46,11 @@ mail-app-cli messages scan INBOX 'All Mail' -a 'Fixture Account' \
 The account and destination must match live `mailboxes list -a ACCOUNT
 --no-cache --json` names exactly. Gmail's usual archive destination is `All Mail`;
 pass `--destination Archive` only for an account whose archive destination is
-actually named `Archive`.
+actually named `Archive`. The archive preview populates `targetMailbox` through
+the same read-only recursive lookup as an applied archive, preferring `All Mail`,
+then `Archive`. Before applying the archive, the harness requires the preview's
+destination to match `--destination` exactly. Older binaries whose previews omit
+the destination fail this gate before mutation.
 
 ## Run the preview and the applied check
 
