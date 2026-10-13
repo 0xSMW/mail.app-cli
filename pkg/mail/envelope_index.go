@@ -3,13 +3,18 @@ package mail
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0xSMW/mail.app-cli/v3/internal/mailindex"
 )
 
 type indexMailbox struct {
@@ -41,12 +46,66 @@ type indexMessage struct {
 }
 
 func mailEnvelopeIndexPath() (string, error) {
+	if override := os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"); override != "" {
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("MAIL_APP_CLI_ENVELOPE_INDEX_PATH must be absolute")
+		}
+		return override, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "Library", "Mail", "V10", "MailData", "Envelope Index"), nil
+	return discoverEnvelopeIndexPath(filepath.Join(home, "Library", "Mail"))
 }
+
+func discoverEnvelopeIndexPath(root string) (string, error) {
+	fallback := filepath.Join(root, "V10", "MailData", "Envelope Index")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fallback, nil
+		}
+		return "", fmt.Errorf("discover Mail index: %w", err)
+	}
+	type version struct {
+		number int
+		name   string
+	}
+	var versions []version
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "V") {
+			continue
+		}
+		digits := strings.TrimPrefix(entry.Name(), "V")
+		n, err := strconv.Atoi(digits)
+		if err == nil && n > 0 && strconv.Itoa(n) == digits {
+			versions = append(versions, version{n, entry.Name()})
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].number > versions[j].number })
+	for _, v := range versions {
+		path := filepath.Join(root, v.name, "MailData", "Envelope Index")
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("inspect Mail index: %w", err)
+		}
+		if info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return fallback, nil
+}
+
+// Native errors must retain their cause without triggering the historical
+// automation fallback for permissions or a damaged/unsupported schema.
+type nativeIndexError struct{ err error }
+
+func (e *nativeIndexError) Error() string { return e.err.Error() }
+func (e *nativeIndexError) Unwrap() error { return e.err }
 
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
@@ -67,9 +126,9 @@ func mailboxLeafFromURL(rawURL string) string {
 	if idx := strings.LastIndex(leaf, "/"); idx >= 0 {
 		leaf = leaf[idx+1:]
 	}
-	leaf = strings.ReplaceAll(leaf, "%20", " ")
-	leaf = strings.ReplaceAll(leaf, "%5B", "[")
-	leaf = strings.ReplaceAll(leaf, "%5D", "]")
+	if decoded, err := url.PathUnescape(leaf); err == nil {
+		leaf = decoded
+	}
 	return leaf
 }
 
@@ -100,6 +159,10 @@ func isEnvelopeIndexUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
+	var nativeErr *nativeIndexError
+	if errors.As(err, &nativeErr) {
+		return errors.Is(nativeErr.err, os.ErrNotExist)
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "executable file not found") ||
 		strings.Contains(msg, "no such file") ||
@@ -126,7 +189,20 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 
 	indexPath, err := mailEnvelopeIndexPath()
 	if err != nil {
+		if c.nativeEnabled() {
+			return &nativeIndexError{err}
+		}
 		return err
+	}
+	if c.nativeEnabled() {
+		out, err := mailindex.Query(c.Context(), indexPath, query)
+		if err != nil {
+			return &nativeIndexError{err}
+		}
+		if err := json.Unmarshal(out, v); err != nil {
+			return &nativeIndexError{fmt.Errorf("failed to parse envelope index JSON: %w", err)}
+		}
+		return nil
 	}
 	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
 	// Combined verification scopes can exceed the OS argument-size limit.
@@ -139,6 +215,8 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
+	started := time.Now()
+	defer func() { recordLegacySQLiteProcess(time.Since(started)) }()
 	if err := cmd.Run(); err != nil {
 		if ctxErr := c.Context().Err(); ctxErr != nil {
 			// The caller's context ended the query; keep that classifiable.
@@ -163,13 +241,19 @@ func (c *Client) CheckEnvelopeIndex() error {
 }
 
 func indexMailboxURLPattern(accountID, mailboxName string) string {
-	escapedName := strings.ReplaceAll(mailboxName, " ", "%20")
-	escapedName = strings.ReplaceAll(escapedName, "[", "%5B")
-	escapedName = strings.ReplaceAll(escapedName, "]", "%5D")
+	escapedName := escapeMailboxURLPath(mailboxName)
 	if isArchiveAlias(mailboxName) {
 		escapedName = "%5BGmail%5D/All%20Mail"
 	}
 	return fmt.Sprintf("imap://%s/%s", accountID, escapedName)
+}
+
+func escapeMailboxURLPath(name string) string {
+	components := strings.Split(name, "/")
+	for i := range components {
+		components[i] = url.PathEscape(components[i])
+	}
+	return strings.Join(components, "/")
 }
 
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
@@ -266,9 +350,7 @@ limit 1;
 }
 
 func escapedMailboxLeaf(mailboxName string) string {
-	escapedName := strings.ReplaceAll(mailboxName, " ", "%20")
-	escapedName = strings.ReplaceAll(escapedName, "[", "%5B")
-	escapedName = strings.ReplaceAll(escapedName, "]", "%5D")
+	escapedName := escapeMailboxURLPath(mailboxName)
 	if isArchiveAlias(mailboxName) {
 		return "All%20Mail"
 	}
