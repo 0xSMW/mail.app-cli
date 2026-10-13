@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 )
 
 // These tests check the CLI/bridge response contract. The mail package's Node
