@@ -334,7 +334,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		end := min(start+chunkSize, len(items))
 		chunkClient := client
 		var session *jxaSession
-		if opts.ReuseBridge && end-start > 1 && (opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" || opts.Action == "move") {
+		if !client.nativeEnabled() && opts.ReuseBridge && end-start > 1 && (opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" || opts.Action == "move") {
 			var err error
 			session, err = newJXASession(client.Context())
 			if err != nil {
