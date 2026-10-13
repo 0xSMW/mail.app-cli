@@ -13,13 +13,19 @@ import (
 func TestArchiveTimeoutRetainsPreflightDestinationInRecoverableJournal(t *testing.T) {
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "bridge.log")
-	script := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> '%s'
+	t.Setenv("ARCHIVE_TEST_LOG", log)
+	script := `#!/bin/sh
 case "$*" in
- *"move targetMessage"*) printf 'applescript timed out after 30s' >&2; exit 1 ;;
- *) printf 'All Mail\n' ;;
+ *"mail-app-cli-native-archive-account"*) printf 'account-probe\n' >> "$ARCHIVE_TEST_LOG"; printf true ;;
+ *"const owner ="*) printf 'cleanup\n' >> "$ARCHIVE_TEST_LOG"; printf closed ;;
+ *"const request ="*)
+  printf 'press\n' >> "$ARCHIVE_TEST_LOG"
+  ` + nativeArchiveOwnedEvent + nativeArchivePressEvent + `
+  printf 'native Archive Apple Event timed out (-1712)' >&2; exit 1 ;;
+ *"AXIsProcessTrusted"*) printf 'permission\n' >> "$ARCHIVE_TEST_LOG"; printf ready ;;
+ *) printf 'destination\n' >> "$ARCHIVE_TEST_LOG"; printf 'All Mail\n' ;;
 esac
-`, log)
+`
 	if err := os.WriteFile(filepath.Join(bin, "osascript"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +69,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Count(string(logged), "move targetMessage") != 1 || strings.Count(string(logged), `set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "Archive")`) != 1 {
+	if string(logged) != "destination\naccount-probe\npermission\npress\ncleanup\n" {
 		t.Fatalf("archive was retried or destination reselected: %s", logged)
 	}
 	// Read-only reconciliation preserves unknown application status.
@@ -107,12 +113,25 @@ func TestArchivePreflightFailureDoesNotMarkOrMove(t *testing.T) {
 func TestArchivePreflightIsSharedPerAccountAcrossChunks(t *testing.T) {
 	bin := t.TempDir()
 	log := filepath.Join(t.TempDir(), "bridge.log")
-	script := fmt.Sprintf(`#!/bin/sh
-case "$*" in *'account "Beta"'*) destination=Archive ;; *) destination='All Mail' ;; esac
-case "$*" in *"move targetMessage"*) phase=move ;; *) phase=preflight ;; esac
-printf '%%s:%%s\n' "$phase" "$destination" >> '%s'
-printf '%%s\n' "$destination"
-`, log)
+	t.Setenv("ARCHIVE_TEST_LOG", log)
+	script := `#!/bin/sh
+case "$*" in
+ *"mail-app-cli-native-archive-account"*) printf 'account-probe\n' >> "$ARCHIVE_TEST_LOG"; printf true ;;
+ *"const owner ="*) printf 'cleanup\n' >> "$ARCHIVE_TEST_LOG"; printf closed ;;
+ *"const request ="*)
+  case "$*" in *'"account":"Alpha"'*) ;; *) printf 'wrong native account' >&2; exit 1 ;; esac
+  case "$*" in *'"id":1'*) id=1 ;; *'"id":2'*) id=2 ;; *) exit 1 ;; esac
+  printf 'native:Alpha:%s\n' "$id" >> "$ARCHIVE_TEST_LOG"
+  ` + nativeArchiveOwnedEvent + nativeArchivePressEvent + `
+  printf '%s' '{"prepared":true,"applied":true}' ;;
+ *"AXIsProcessTrusted"*) printf 'permission\n' >> "$ARCHIVE_TEST_LOG"; printf ready ;;
+ *)
+  case "$*" in *'account "Beta"'*) destination=Archive ;; *) destination='All Mail' ;; esac
+  case "$*" in *"move targetMessage"*) phase=move ;; *) phase=preflight ;; esac
+  printf '%s:%s\n' "$phase" "$destination" >> "$ARCHIVE_TEST_LOG"
+  printf '%s\n' "$destination" ;;
+esac
+`
 	if err := os.WriteFile(filepath.Join(bin, "osascript"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +155,7 @@ printf '%%s\n' "$destination"
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "preflight:All Mail\nmove:All Mail\nmove:All Mail\npreflight:Archive\nmove:Archive\n"
+	want := "preflight:All Mail\naccount-probe\npermission\nnative:Alpha:1\ncleanup\nnative:Alpha:2\ncleanup\npreflight:Archive\nmove:Archive\n"
 	if string(data) != want {
 		t.Fatalf("calls=%s want=%s", data, want)
 	}
