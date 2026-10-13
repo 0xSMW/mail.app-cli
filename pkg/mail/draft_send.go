@@ -18,6 +18,8 @@ import (
 	"reflect"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // DraftSendResult records Mail's submission acknowledgement separately from
@@ -241,11 +243,10 @@ func jxaDraftCleanupScript(snapshot *draftSnapshot) string {
 const mail = Application('Mail');
 const draftCleanup = true;
 const expected = %s;
-const requestedMailbox = expected.message.mailbox;
 %s
 %s
 const acc = mail.accounts.byName(expected.message.account);
-const mbox = %s;
+const mbox = draftMailboxForAccount(mail, acc, false);
 const msg = messageById(mbox,expected.message.id);
 if (msg === null) throw new Error('Original draft unavailable after submission');
 const current = {subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())};
@@ -258,7 +259,7 @@ for (let i=0;i<30;i++) {
 }
 if (!removed) throw new Error('Original draft removal could not be verified after submission');
 JSON.stringify({deleted:true});
-`, string(expected), jxaMailboxLookupHelper(), jxaDraftMessageByIDHelper(), jxaMailboxLookupExpression(snapshot.Message.Mailbox))
+`, string(expected), jxaDraftMailboxHelper(), jxaDraftMessageByIDHelper())
 }
 
 // Enumerate exact IDs without swallowing bridge failures. An inaccessible
@@ -498,13 +499,14 @@ func compareDraftMIMEAttachments(paths []string, expected []draftMIMEAttachment)
 	}
 	matched := make([]bool, len(expected))
 	for _, path := range paths {
+		name := norm.NFC.String(filepath.Base(path))
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
 		found := false
 		for i, attachment := range expected {
-			if !matched[i] && attachment.name == filepath.Base(path) && bytes.Equal(data, attachment.data) {
+			if !matched[i] && norm.NFC.String(attachment.name) == name && bytes.Equal(data, attachment.data) {
 				matched[i] = true
 				found = true
 				break
