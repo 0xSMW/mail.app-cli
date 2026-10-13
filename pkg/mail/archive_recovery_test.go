@@ -104,6 +104,57 @@ func TestArchivePreflightFailureDoesNotMarkOrMove(t *testing.T) {
 	}
 }
 
+func TestArchivePreflightIsSharedPerAccountAcrossChunks(t *testing.T) {
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "bridge.log")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$*" in *'account "Beta"'*) destination=Archive ;; *) destination='All Mail' ;; esac
+case "$*" in *"move targetMessage"*) phase=move ;; *) phase=preflight ;; esac
+printf '%%s:%%s\n' "$phase" "$destination" >> '%s'
+printf '%%s\n' "$destination"
+`, log)
+	if err := os.WriteFile(filepath.Join(bin, "osascript"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
+	journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	items := make([]BatchItem, 3)
+	for i, account := range []string{"Alpha", "Alpha", "Beta"} {
+		items[i] = verificationItem()
+		items[i].ID, items[i].Account, items[i].TargetMailbox = fmt.Sprint(i+1), account, ""
+	}
+	result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", TrustSource: true, ChunkSize: 1, Receipt: journal}, items, ArchiveMutator(false))
+	if err != nil || result.Succeeded != 3 {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "preflight:All Mail\nmove:All Mail\nmove:All Mail\npreflight:Archive\nmove:Archive\n"
+	if string(data) != want {
+		t.Fatalf("calls=%s want=%s", data, want)
+	}
+	for _, event := range readJournalEvents(t, journal.Path()) {
+		if event["event"] != "mutation_started" {
+			continue
+		}
+		item := event["item"].(map[string]any)
+		want := "All Mail"
+		if item["account"] == "Beta" {
+			want = "Archive"
+		}
+		if item["targetMailbox"] != want {
+			t.Fatalf("wrong persisted account destination: %+v", item)
+		}
+	}
+}
+
 func TestGmailArchiveDefaultWindowAndExplicitBudget(t *testing.T) {
 	item := verificationItem()
 	item.GmailInboxSource = true

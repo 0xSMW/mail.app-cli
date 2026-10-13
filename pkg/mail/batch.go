@@ -308,6 +308,9 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		}
 	}
 
+	// Resolve once per account, then pin that destination on every item before
+	// mutation. Repeated preflight bridge launches add no new scope evidence.
+	archiveDestinations := make(map[string]string)
 	for start := 0; start < len(items); start += chunkSize {
 		end := min(start+chunkSize, len(items))
 		chunkClient := client
@@ -381,19 +384,24 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 			}
 			result.Attempted++
 			if opts.Action == "archive" && item.TargetMailbox == "" {
-				destination, err := chunkClient.ResolveArchiveMailbox(item.Account)
-				if err != nil {
-					item.Status, item.Error = "failed", "resolve archive destination: "+err.Error()
-					result.Failed++
-					result.Items = append(result.Items, item)
-					if journalErr := opts.Receipt.Record("preflight_failed", journalItem(item)); journalErr != nil {
-						return result, journalErr
+				destination, cached := archiveDestinations[item.Account]
+				if !cached {
+					var err error
+					destination, err = chunkClient.ResolveArchiveMailbox(item.Account)
+					if err != nil {
+						item.Status, item.Error = "failed", "resolve archive destination: "+err.Error()
+						result.Failed++
+						result.Items = append(result.Items, item)
+						if journalErr := opts.Receipt.Record("preflight_failed", journalItem(item)); journalErr != nil {
+							return result, journalErr
+						}
+						// No mutation was issued; a failed read is never an unknown archive.
+						if isVerificationTimeout(err) {
+							return result, err
+						}
+						continue
 					}
-					// No mutation was issued; a failed read is never an unknown archive.
-					if isVerificationTimeout(err) {
-						return result, err
-					}
-					continue
+					archiveDestinations[item.Account] = destination
 				}
 				item.TargetMailbox = destination
 			}
