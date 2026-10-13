@@ -25,6 +25,9 @@ type RuleInput struct {
 }
 
 func (c *Client) ListRules() ([]Rule, error) {
+	if c.nativeEnabled() {
+		return c.listNativeRules()
+	}
 	script := `
 const mail = Application('Mail');
 const result = [];
@@ -70,6 +73,9 @@ JSON.stringify(result);
 func (c *Client) CreateRule(input RuleInput) (*Rule, error) {
 	if err := ValidateRuleInput(input); err != nil {
 		return nil, err
+	}
+	if c.nativeEnabled() {
+		return c.createNativeRule(input)
 	}
 	script := createRuleScript(input)
 	if _, err := c.runAppleScript(script); err != nil {
@@ -190,10 +196,16 @@ func ruleFromInput(input RuleInput) *Rule {
 }
 
 func (c *Client) SetRuleEnabled(name string, enabled bool) error {
+	if c.nativeEnabled() {
+		return c.changeNativeRule(name, &enabled)
+	}
 	return c.runNamedCollectionBooleanAction("rules", name, "enabled", enabled)
 }
 
 func (c *Client) DeleteRule(name string) error {
+	if c.nativeEnabled() {
+		return c.changeNativeRule(name, nil)
+	}
 	return c.runNamedCollectionDeleteAction("rules", name)
 }
 
