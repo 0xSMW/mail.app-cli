@@ -237,6 +237,10 @@ func (c *Client) RecordRecentEnvelope(accountName, mailboxName, messageID, actio
 }
 
 func (c *Client) getMessageEnvelopeJXA(accountName, mailboxName, messageID string) (*Message, error) {
+	if c.nativeEnabled() {
+		message, _, err := c.nativeMessageDetails(accountName, mailboxName, messageID, mailSearchTimeout(), false, true)
+		return message, err
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 let result = null;
