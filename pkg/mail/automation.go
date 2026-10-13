@@ -37,6 +37,7 @@ type AutomationTimeoutError struct {
 	Engine  string
 	Timeout time.Duration
 	Trace   *PhaseTrace
+	Cause   error
 }
 
 func (e *AutomationTimeoutError) Error() string {
@@ -48,6 +49,9 @@ func (e *AutomationTimeoutError) Error() string {
 }
 
 func (e *AutomationTimeoutError) Unwrap() error {
+	if e.Cause != nil {
+		return e.Cause
+	}
 	return context.DeadlineExceeded
 }
 
@@ -200,7 +204,9 @@ func runAutomationUnlocked(parent context.Context, engine string, timeout time.D
 		return automationExecution{}, fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
 	}
 
+	started := time.Now()
 	err := cmd.Wait()
+	recordLegacyProcess(time.Since(started))
 	events, diagnostics := splitPhaseEvents(stderr.String())
 	execution := automationExecution{Output: strings.TrimSpace(out.String()), Events: events}
 	if parentErr := parent.Err(); parentErr != nil {
