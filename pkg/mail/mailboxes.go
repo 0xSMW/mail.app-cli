@@ -6,6 +6,9 @@ import (
 )
 
 func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON(accountName)
+	}
 	script := fmt.Sprintf(`
 	tell application "Mail"
 		set mailboxList to {}
@@ -30,6 +33,9 @@ func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
 }
 
 func (c *Client) GetAllMailboxes() ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON("")
+	}
 	script := `
 	tell application "Mail"
 		set mailboxList to {}
@@ -163,6 +169,9 @@ func (c *Client) enrichArchiveMailboxes(accountName string, mailboxes []Mailbox)
 }
 
 func (c *Client) getMailboxesForSingleAccount(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.nativeMailboxes(accountName)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
