@@ -28,6 +28,7 @@ import (
 const maxMessageFileSize = 64 << 20
 
 var errNoBodyOnDisk = errors.New("no message file on disk")
+var errPartialBodyOnDisk = errors.New("local message file is partial")
 
 // messageFilePath finds the file Mail.app stores a message in. Mail names
 // the file after the message's local ID and keeps it under the mailbox that
@@ -48,11 +49,15 @@ func (c *Client) messageFilePath(messageID string) (string, error) {
 	if len(rows) == 0 {
 		return "", errNoBodyOnDisk
 	}
+	return messageFilePathForMailbox(id, rows[0].URL)
+}
+
+func messageFilePathForMailbox(id int64, mailboxURL string) (string, error) {
 	indexPath, err := mailEnvelopeIndexPath()
 	if err != nil {
 		return "", err
 	}
-	mailboxDir, err := mailboxDirectory(filepath.Dir(filepath.Dir(indexPath)), rows[0].URL)
+	mailboxDir, err := mailboxDirectory(filepath.Dir(filepath.Dir(indexPath)), mailboxURL)
 	if err != nil {
 		return "", err
 	}
@@ -60,6 +65,9 @@ func (c *Client) messageFilePath(messageID string) (string, error) {
 	// data. The mailbox path can hold glob characters, so list it instead.
 	entries, err := os.ReadDir(mailboxDir)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("read mailbox files: %w", err)
+		}
 		return "", errNoBodyOnDisk
 	}
 	relative := filepath.Join(messageDataDirectory(id), "Messages")
@@ -71,6 +79,8 @@ func (c *Client) messageFilePath(messageID string) (string, error) {
 			path := filepath.Join(mailboxDir, entry.Name(), relative, strconv.FormatInt(id, 10)+suffix)
 			if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
 				return path, nil
+			} else if err != nil && os.IsPermission(err) {
+				return "", err
 			}
 		}
 	}
@@ -79,7 +89,7 @@ func (c *Client) messageFilePath(messageID string) (string, error) {
 
 func mailboxDirectory(root, mailboxURL string) (string, error) {
 	parsed, err := url.Parse(mailboxURL)
-	if err != nil || parsed.Host == "" {
+	if err != nil || parsed.Host == "" || parsed.Host == "." || parsed.Host == ".." || strings.ContainsAny(parsed.Host, "/\\") {
 		return "", fmt.Errorf("mailbox URL has no account: %q", mailboxURL)
 	}
 	dir := filepath.Join(root, parsed.Host)
@@ -116,7 +126,11 @@ func (c *Client) readMessageBodyFromDiskWithDiagnostics(messageID string) (strin
 	if err != nil {
 		return "", nil, err
 	}
-	return readEMLXBodyWithDiagnostics(path)
+	body, diagnostics, err := readEMLXBodyWithDiagnostics(path)
+	if err == nil && diagnostics.PartialFile {
+		return body, diagnostics, errPartialBodyOnDisk
+	}
+	return body, diagnostics, err
 }
 
 func readEMLXBody(path string) (string, error) {
@@ -125,49 +139,56 @@ func readEMLXBody(path string) (string, error) {
 }
 
 func readEMLXBodyWithDiagnostics(path string) (content string, diagnostics *BodyDiagnostics, extractionErr error) {
-	diagnostics = &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx")}
-	defer func() {
-		if extractionErr != nil {
-			diagnostics.ExtractionError = extractionErr.Error()
-		}
-		diagnostics.finish()
-	}()
-	info, err := os.Stat(path)
+	message, err := readEMLXMessage(path)
 	if err != nil {
+		diagnostics = &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx"), ExtractionError: err.Error()}
+		diagnostics.finish()
 		return "", diagnostics, err
+	}
+	return extractEMLXBody(message, path)
+}
+
+// readEMLXMessage bounds both allocation and the RFC message reader. The plist
+// following the declared byte count never enters the MIME parser.
+func readEMLXMessage(path string) (*mail.Message, error) {
+	localFilesRead.Add(1)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("message file is not regular")
 	}
 	if info.Size() > maxMessageFileSize {
-		return "", diagnostics, fmt.Errorf("message file is larger than %d bytes", maxMessageFileSize)
+		return nil, fmt.Errorf("message file is larger than %d bytes", maxMessageFileSize)
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(file, maxMessageFileSize+1))
 	if err != nil {
-		return "", diagnostics, err
+		return nil, err
+	}
+	if len(data) > maxMessageFileSize {
+		return nil, fmt.Errorf("message file is larger than %d bytes", maxMessageFileSize)
 	}
 	// The first line is the byte length of the message that follows it. A
 	// property list follows the message.
 	newline := bytes.IndexByte(data, '\n')
 	if newline < 0 {
-		return "", diagnostics, fmt.Errorf("message file has no length line")
+		return nil, fmt.Errorf("message file has no length line")
 	}
 	length, err := strconv.Atoi(strings.TrimSpace(string(data[:newline])))
-	if err != nil || length < 0 || newline+1+length > len(data) {
-		return "", diagnostics, fmt.Errorf("message file has an invalid length line")
+	if err != nil || length < 0 || length > len(data)-newline-1 {
+		return nil, fmt.Errorf("message file has an invalid length line")
 	}
 	message, err := mail.ReadMessage(bytes.NewReader(data[newline+1 : newline+1+length]))
 	if err != nil {
-		return "", diagnostics, fmt.Errorf("parse message file: %w", err)
+		return nil, fmt.Errorf("parse message file: %w", err)
 	}
-	header := map[string][]string(message.Header)
-	text, err := mimeBodyTextWithDiagnostics(func(key string) string { return firstHeader(header, key) }, message.Body, false, 0, "1", diagnostics)
-	if err != nil {
-		return "", diagnostics, err
-	}
-	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
-	if text == "" {
-		return "", diagnostics, fmt.Errorf("message file holds no text body")
-	}
-	diagnostics.ExtractedCharCount = utf8.RuneCountInString(text)
-	return text, diagnostics, nil
+	return message, nil
 }
 
 func firstHeader(header map[string][]string, key string) string {
