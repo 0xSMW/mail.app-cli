@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestResolveLocatedMessagesIndexMissFailsClosed(t *testing.T) {
