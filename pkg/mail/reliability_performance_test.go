@@ -49,15 +49,26 @@ else:print(response(script))
 	}
 	data, _ := json.Marshal(rows)
 	t.Setenv("RELIABILITY_ROWS", string(data))
-	sql := `#!/bin/sh
-case "$4" in
- *"m.size ="*"l.mailbox_id = 1"*|*"l.mailbox_id = 1"*"m.size ="*) printf '%s\n' '[]' ;;
- *"m.size ="*) printf '%s\n' "$RELIABILITY_ROWS" ;;
- *"All%20Mail"*) printf '%s\n' '[{"ID":2,"URL":"imap://ABC/%5BGmail%5D/All%20Mail","TotalCount":30,"UnreadCount":0}]' ;;
- *"imap://ABC/INBOX"*) printf '%s\n' '[{"ID":1,"URL":"imap://ABC/INBOX","TotalCount":30,"UnreadCount":0}]' ;;
- *) printf '%s\n' '[]' ;;
-esac
+	sql := `#!/usr/bin/python3
+import sys, os, json, re
+q = sys.argv[-1]
+if 'with verification_mailbox_0' in q:
+    rows = []
+    for scope, url in re.findall(r"verification_mailbox_(\d+) as \(select ROWID as ID, url as URL from mailboxes where url = '([^']+)'", q):
+        source = url.endswith('/INBOX')
+        rows.append({'VerificationScope': int(scope), 'MailboxID': 1 if source else 2, 'MailboxURL': url,
+                     'Matches': '[]' if source else os.environ['RELIABILITY_ROWS']})
+    print(json.dumps(rows))
+elif 'm.size =' in q:
+    print('[]' if 'l.mailbox_id = 1' in q else os.environ['RELIABILITY_ROWS'])
+elif 'All%20Mail' in q:
+    print('[{"ID":2,"URL":"imap://ABC/%5BGmail%5D/All%20Mail","TotalCount":30,"UnreadCount":0}]')
+elif 'imap://ABC/INBOX' in q:
+    print('[{"ID":1,"URL":"imap://ABC/INBOX","TotalCount":30,"UnreadCount":0}]')
+else:
+    print('[]')
 `
+
 	for name, script := range map[string]string{"osascript": osa, "sqlite3": sql} {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0755); err != nil {
 			t.Fatal(err)

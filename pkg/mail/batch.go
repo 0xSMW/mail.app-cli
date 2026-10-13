@@ -751,7 +751,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 			verified[i].VerifyStatus, verified[i].VerifyError, verified[i].Observed = "", "", nil
 		}
 	}
-	type groupKey struct{ account, mailbox string }
+	type groupKey = verificationMailboxKey
 	groups := make(map[groupKey][]int)
 	if opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" {
 		for i := range verified {
@@ -886,16 +886,17 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 	presences := make([]verificationPresence, len(verified))
 	states := make([]RelocationState, len(verified))
 	lookupErrors := make([]error, len(verified))
-	for attempt, delay := range schedule {
-		if attempt > 0 {
-			if err := waitForVerificationBackoff(client.Context(), delay); err != nil {
-				for i := range verified {
-					if verified[i].Status == "succeeded" {
-						lookupErrors[i] = err
-					}
+	observationStart := time.Now()
+	var observationOffset time.Duration
+	for _, delay := range schedule {
+		observationOffset += delay
+		if err := waitForVerificationObservation(client.Context(), observationStart, observationOffset); err != nil {
+			for i := range verified {
+				if verified[i].Status == "succeeded" {
+					lookupErrors[i] = err
 				}
-				break
 			}
+			break
 		}
 		presences = make([]verificationPresence, len(verified))
 		states = make([]RelocationState, len(verified))
@@ -908,12 +909,17 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 				states[i].SyncRequestedAt = requestedAt
 			}
 		}
+		scopes := make([]identityVerificationScope, 0, len(identityGroups))
 		for key, refs := range identityGroups {
 			identities := make([]StableIdentity, 0, len(refs))
 			for _, ref := range refs {
 				identities = append(identities, verified[ref.index].Identity)
 			}
-			matches, groupErr := client.getIdentityMatchesForVerification(key.account, key.mailbox, identities)
+			scopes = append(scopes, identityVerificationScope{key: key, identities: identities})
+		}
+		snapshot := client.getIdentitySnapshotForVerification(scopes)
+		for key, refs := range identityGroups {
+			matches, groupErr := snapshot[key].matches, snapshot[key].err
 			for _, ref := range refs {
 				item := verified[ref.index]
 				present := false

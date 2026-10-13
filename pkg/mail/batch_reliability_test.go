@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +15,41 @@ func fakeRelocationIndex(t *testing.T, source, target, actualSourceURL, sourceRo
 	t.Helper()
 	bin := t.TempDir()
 	counter := filepath.Join(t.TempDir(), "source-count")
+	// Return the two scopes from the same synthetic observation, in whichever
+	// order the production verifier requested them.
+	snapshotRows := func(sourceFirst, sourcePresent bool) string {
+		sourceData := sourceRows
+		if !sourcePresent {
+			sourceData = "[]"
+		}
+		rows := []map[string]any{
+			{"VerificationScope": 0, "MailboxID": 1, "MailboxURL": actualSourceURL, "Matches": sourceData},
+			{"VerificationScope": 1, "MailboxID": 2, "MailboxURL": indexMailboxURLPattern("ABC", target), "Matches": destinationRows},
+		}
+		if !sourceFirst {
+			rows[0], rows[1] = rows[1], rows[0]
+			rows[0]["VerificationScope"], rows[1]["VerificationScope"] = 0, 1
+		}
+		data, err := json.Marshal(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	snapshotScript := fmt.Sprintf(`
+ *"with verification_mailbox_0"*)
+ n=0; if [ -f '%s' ]; then read -r n < '%s'; fi
+ n=$((n+1)); printf '%%s\n' "$n" > '%s'
+ prefix=${4%%%%verification_mailbox_1*}
+ case "$prefix" in *"%s"*)
+ if [ '%t' = true ] && [ "$n" -lt 3 ]; then printf '%%s\n' '%s'; else printf '%%s\n' '%s'; fi ;;
+ *)
+ if [ '%t' = true ] && [ "$n" -lt 3 ]; then printf '%%s\n' '%s'; else printf '%%s\n' '%s'; fi ;;
+ esac ;;
+`, counter, counter, counter, indexMailboxURLPattern("ABC", source), recur, snapshotRows(true, false), snapshotRows(true, true), recur, snapshotRows(false, false), snapshotRows(false, true))
 	script := fmt.Sprintf(`#!/bin/sh
 case "$4" in
+%s
  *"m.size = 42"*"m.mailbox = 1"*|*"m.mailbox = 1"*"m.size = 42"*)
  n=0; if [ -f '%s' ]; then read -r n < '%s'; fi
  n=$((n+1)); printf '%%s\n' "$n" > '%s'
@@ -25,7 +59,7 @@ case "$4" in
  *"%s"*) printf '%%s\n' '[{"ID":2,"URL":"%s","TotalCount":1,"UnreadCount":0}]' ;;
  *) printf '[]\n' ;;
 esac
-`, counter, counter, counter, recur, sourceRows, destinationRows, indexMailboxURLPattern("ABC", source), actualSourceURL, indexMailboxURLPattern("ABC", target), indexMailboxURLPattern("ABC", target))
+`, snapshotScript, counter, counter, counter, recur, sourceRows, destinationRows, indexMailboxURLPattern("ABC", source), actualSourceURL, indexMailboxURLPattern("ABC", target), indexMailboxURLPattern("ABC", target))
 	if err := os.WriteFile(filepath.Join(bin, "sqlite3"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}

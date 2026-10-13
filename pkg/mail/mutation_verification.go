@@ -182,6 +182,20 @@ func waitForVerificationBackoff(ctx context.Context, delay time.Duration) error 
 	}
 }
 
+// Wait against a wall-clock observation horizon rather than adding query time
+// to every polling delay. Every scheduled observation still runs, including
+// the final check; a slow query never causes an early success.
+func waitForVerificationObservation(ctx context.Context, started time.Time, offset time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	remaining := time.Until(started.Add(offset))
+	if remaining <= 0 {
+		return nil
+	}
+	return waitForVerificationBackoff(ctx, remaining)
+}
+
 func isAutomationTimeout(err error) bool {
 	var timeout *AutomationTimeoutError
 	return errors.As(err, &timeout)
@@ -218,9 +232,10 @@ func effectiveVerifyBudget(opts BatchOptions) time.Duration {
 	return DefaultVerifyBudget
 }
 
-// DefaultGmailArchiveSettle observes local memberships for ten seconds after
-// Mail accepts an explicit sync request. It is not a server acknowledgement.
-const DefaultGmailArchiveSettle = 10 * time.Second
+// DefaultGmailArchiveSettle retains the original 3.85-second local observation
+// horizon. Longer evidence windows require an explicit --settle; neither is a
+// server acknowledgement.
+const DefaultGmailArchiveSettle = 3850 * time.Millisecond
 
 func relocationSettle(opts BatchOptions, items []BatchItem) time.Duration {
 	if opts.Settle != 0 || opts.readOnlyVerification || opts.Action != "archive" {

@@ -158,7 +158,7 @@ printf '%%s\n' "$destination"
 func TestGmailArchiveDefaultWindowAndExplicitBudget(t *testing.T) {
 	item := verificationItem()
 	item.GmailInboxSource = true
-	if got := relocationSettle(BatchOptions{Action: "archive"}, []BatchItem{item}); got != 10*time.Second {
+	if got := relocationSettle(BatchOptions{Action: "archive"}, []BatchItem{item}); got != 3850*time.Millisecond {
 		t.Fatalf("settle=%s", got)
 	}
 	if got := relocationSettle(BatchOptions{Action: "archive", Settle: 20 * time.Second}, []BatchItem{item}); got != 20*time.Second {
@@ -168,15 +168,15 @@ func TestGmailArchiveDefaultWindowAndExplicitBudget(t *testing.T) {
 		t.Fatalf("read-only default=%s", got)
 	}
 	mutated := false
-	_, err := RunBatch(NewClient(), BatchOptions{Action: "archive", Verify: true, VerifyBudget: 5 * time.Second, TrustSource: true, Receipt: nil}, []BatchItem{item}, func(*Client, *BatchItem) error { mutated = true; return nil })
+	_, err := RunBatch(NewClient(), BatchOptions{Action: "archive", Verify: true, Settle: 10 * time.Second, VerifyBudget: 5 * time.Second, TrustSource: true, Receipt: nil}, []BatchItem{item}, func(*Client, *BatchItem) error { mutated = true; return nil })
 	if err == nil || mutated {
 		t.Fatalf("insufficient budget: err=%v mutated=%t", err, mutated)
 	}
 }
 
-// A regenerated INBOX membership arriving after the previous 3.85-second
-// default must still be rejected by the new default observation window.
-func TestGmailArchiveDefaultRejectsRecurrenceAfterOldWindow(t *testing.T) {
+// An explicit longer window continues observing identities after the default
+// horizon, even when an early observation already confirmed the destination.
+func TestGmailArchiveExplicitWindowRejectsRecurrenceAfterDefaultWindow(t *testing.T) {
 	client := fakeRelocationIndex(t, "INBOX", "All Mail", "imap://ABC/INBOX", "["+fakeIdentityRow+"]", "["+fakeIdentityRow+"]", true)
 	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
 	path := filepath.Join(bin, "sqlite3")
@@ -185,7 +185,7 @@ func TestGmailArchiveDefaultRejectsRecurrenceAfterOldWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The seventh lookup is after 5.85 seconds with the production schedule.
-	data = []byte(strings.Replace(string(data), `[ "$n" -lt 3 ]`, `[ "$n" -lt 7 ]`, 1))
+	data = []byte(strings.Replace(string(data), `[ "$n" -lt 3 ]`, `[ "$n" -lt 7 ]`, -1))
 	if err := os.WriteFile(path, data, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -196,12 +196,12 @@ func TestGmailArchiveDefaultRejectsRecurrenceAfterOldWindow(t *testing.T) {
 	item := verificationItem()
 	item.Status, item.GmailInboxSource = "succeeded", true
 	started := time.Now()
-	got := VerifyMutations(client, BatchOptions{Action: "archive"}, []BatchItem{item})[0]
+	got := VerifyMutations(client, BatchOptions{Action: "archive", Settle: 10 * time.Second}, []BatchItem{item})[0]
 	if got.VerifyStatus != "present_in_source" || got.Observed == nil || !got.Observed.SourcePresent {
 		t.Fatalf("late recurrence accepted: %+v", got)
 	}
-	if time.Since(started) < DefaultGmailArchiveSettle {
-		t.Fatal("default settling window ended early")
+	if time.Since(started) < 10*time.Second {
+		t.Fatal("explicit settling window ended early")
 	}
 }
 

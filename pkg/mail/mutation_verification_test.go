@@ -22,6 +22,29 @@ func TestVerifyRelocationMatchesNewLocalIDInDestination(t *testing.T) {
 	}
 }
 
+func TestVerificationObservationCountsElapsedQueryTime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	// The query has already consumed the full interval. Adding another wait
+	// would exhaust the budget even though the next observation is due now.
+	if err := waitForVerificationObservation(ctx, time.Now().Add(-time.Second), time.Second); err != nil {
+		t.Fatalf("elapsed observation waited again: %v", err)
+	}
+}
+
+func TestVerificationObservationRespectsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitForVerificationObservation(ctx, time.Now().Add(-time.Second), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("elapsed observation ignored cancellation: %v", err)
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), time.Millisecond)
+	defer cancel()
+	if err := waitForVerificationObservation(ctx, time.Now(), time.Second); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("future observation ignored deadline: %v", err)
+	}
+}
+
 func TestStableIdentityAcceptsOnlyRFCFormattedHeader(t *testing.T) {
 	if got := validRFCMessageID("<stable@example.com>"); got != "<stable@example.com>" {
 		t.Fatalf("valid RFC Message-ID = %q", got)
@@ -447,40 +470,19 @@ func withGmailCapabilityScript(t *testing.T, result string) {
 }
 
 func TestArchiveVerificationReportsRegeneratedSourceCopy(t *testing.T) {
-	binDir := t.TempDir()
-	osaScript := `#!/bin/sh
-case "$*" in
-  *"const accounts = mail.accounts();"*) printf '%s\n' '[{"id":"ABC","name":"Work","emailAddresses":[],"userName":"work","enabled":true}]' ;;
-  *) printf '%s\n' 'Success' ;;
-esac
-`
 	// The archived message left local ID 100. Mail regenerated it in INBOX
 	// as 205, and All Mail holds the read copy as 204.
-	sqliteScript := `#!/bin/sh
-case "$4" in
-  *"m.size = 42"*"l.mailbox_id = 1"*|*"l.mailbox_id = 1"*"m.size = 42"*) printf '%s\n' '[{"ID":205,"Subject":"subject","Sender":"sender@example.com","DateSent":"2026-08-29T00:00:00Z","MessageSize":42,"Read":0}]' ;;
-  *"m.size = 42"*) printf '%s\n' '[{"ID":204,"Subject":"subject","Sender":"sender@example.com","DateSent":"2026-08-29T00:00:00Z","MessageSize":42,"Read":1}]' ;;
-  *"All%20Mail"*) printf '%s\n' '[{"ID":2,"URL":"imap://ABC/%5BGmail%5D/All%20Mail","TotalCount":9,"UnreadCount":0}]' ;;
-  *"imap://ABC/INBOX"*) printf '%s\n' '[{"ID":1,"URL":"imap://ABC/INBOX","TotalCount":3,"UnreadCount":1}]' ;;
-  *) printf '%s\n' '[]' ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(osaScript), 0o755); err != nil {
+	source := "[" + strings.Replace(fakeIdentityRow, `"Read":1`, `"Read":0`, 1) + "]"
+	destination := "[" + strings.Replace(fakeIdentityRow, `"ID":205`, `"ID":204`, 1) + "]"
+	client := fakeRelocationIndex(t, "INBOX", "All Mail", "imap://ABC/INBOX", source, destination, false)
+	bin := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))[0]
+	if err := os.WriteFile(filepath.Join(bin, "osascript"), []byte("#!/bin/sh\nprintf Success\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "sqlite3"), []byte(sqliteScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", binDir)
-	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
-	previousBackoff := verificationBackoff
-	verificationBackoff = []time.Duration{0, 0}
-	t.Cleanup(func() { verificationBackoff = previousBackoff })
 
 	item := verificationItem()
 	item.ID, item.Status, item.TargetMailbox, item.GmailInboxSource = "100", "succeeded", "All Mail", true
-	verified := VerifyMutations(NewClient(), BatchOptions{Action: "archive", Verify: true}, []BatchItem{item})
+	verified := VerifyMutations(client, BatchOptions{Action: "archive", Verify: true}, []BatchItem{item})
 	got := verified[0]
 	if got.VerifyStatus != "present_in_source" || got.Observed == nil {
 		t.Fatalf("item = %+v", got)

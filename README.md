@@ -157,8 +157,9 @@ Batch mark, flag, delete, and move reuse a serial bridge in chunks of at most 25
 messages. Receipts remain durable between every message phase. Mark/flag
 verification stops polling each ID when its requested state is observed;
 delete and Gmail archive retain their settling checks. Verified Gmail archives
-observe local membership for 10 seconds by default after an account-scoped
-IMAP synchronization request; `--settle` overrides that window. `--mark-read` marks the
+observe local membership across a 3.85-second default window after an account-scoped
+IMAP synchronization request. Source and destination share one indexed snapshot
+per observation; `--settle 10s` requests a longer window. `--mark-read` marks the
 source before relocation; still check destination read status and visible copies
 when your workflow requires them.
 
