@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -47,7 +47,11 @@ var accountsShowCmd = &cobra.Command{
 		// account-list cache is intentionally long-lived, so use a separate
 		// client to bypass both its on-disk entry and any in-process cache
 		// primed from it.
-		accounts, err := mail.NewClient().WithContext(cmd.Context()).GetAccountsJSON()
+		client := mail.NewClient().WithContext(cmd.Context())
+		if err := client.SetBackend(flagBackend); err != nil {
+			return clierr.Usage(err.Error())
+		}
+		accounts, err := client.GetAccountsJSON()
 		if err != nil {
 			return fmt.Errorf("get accounts: %w", err)
 		}
