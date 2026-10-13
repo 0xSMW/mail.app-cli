@@ -129,6 +129,12 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 		return err
 	}
 	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
+	// Combined verification scopes can exceed the OS argument-size limit.
+	// Stream large statements without splitting their database snapshot.
+	if len(query) > 64*1024 {
+		cmd = exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath)
+		cmd.Stdin = strings.NewReader(query)
+	}
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
