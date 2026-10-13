@@ -155,6 +155,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 // This read bypasses Envelope Index latency and requires one unambiguous exact
 // local ID in the account-owned special Drafts mailbox. Every property read is strict.
 func (c *Client) readDraftSnapshot(accountName, draftID string) (*draftSnapshot, error) {
+	if c.nativeEnabled() {
+		return c.readNativeDraftSnapshot(accountName, draftID)
+	}
 	script := jxaDraftSnapshotScript(accountName, draftID)
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -220,6 +223,9 @@ func sameDraftSnapshot(a, b *draftSnapshot) bool {
 // Compare source and compose properties again inside the deletion bridge, so
 // another edit between submission and cleanup cannot remove the edited draft.
 func (c *Client) deleteUnchangedDraft(snapshot *draftSnapshot) error {
+	if c.nativeEnabled() {
+		return c.deleteNativeUnchangedDraft(snapshot)
+	}
 	script := jxaDraftCleanupScript(snapshot)
 	output, err := c.runJXA(script)
 	if err != nil {
