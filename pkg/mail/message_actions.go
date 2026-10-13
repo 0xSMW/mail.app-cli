@@ -164,6 +164,13 @@ func (c *Client) ArchiveMessageToDestination(accountName, mailboxName, messageID
 	if destination != "All Mail" && destination != "Archive" {
 		return fmt.Errorf("invalid archive destination: %q", destination)
 	}
+	useNative, err := c.archiveUsesNative(accountName, mailboxName, destination)
+	if err != nil {
+		return err
+	}
+	if useNative {
+		return c.archiveInboxThroughMail(accountName, messageID)
+	}
 	output, err := c.runAppleScript(archiveMessageScript(accountName, mailboxName, messageID, destination))
 	if err != nil {
 		return archiveBridgeError(err)
