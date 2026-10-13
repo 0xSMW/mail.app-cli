@@ -22,18 +22,24 @@ type syncResult struct {
 	StartedAt        time.Time `json:"startedAt"`
 	EndedAt          time.Time `json:"endedAt"`
 	Status           string    `json:"status"`
+	CompletionBasis  string    `json:"completionBasis,omitempty"`
 	Error            string    `json:"error,omitempty"`
 }
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Ask Mail.app to check for new mail",
-	Long: `Ask Mail.app to check for new mail. Mail.app syncs every account
-regardless of --account; the flag only scopes --wait, which polls counts until
-they hold still for two samples.`,
+	Short: "Request account synchronization in Mail.app",
+	Long: `Request synchronization of IMAP accounts (including iCloud), then check
+the selected receiving accounts for new mail. --account limits the request to that
+account; without it, enabled accounts are requested individually.
+
+Success means Mail.app accepted the requests, not that server changes finished.
+--wait observes local counts until they hold still for two samples; it does not
+verify individual message memberships. Use messages reconcile after syncing
+to recheck an archive or move receipt.`,
 	Args: cobra.NoArgs,
 	Annotations: map[string]string{
-		annotationAgentNotes: "Mail.app has no per-account sync; actualScope says what happened. Use --wait before reading a mailbox you expect to have changed.",
+		annotationAgentNotes: "Account-scoped IMAP synchronize followed by a scoped fetch; other account types fetch new mail. completed means requests accepted. --wait only observes stable local counts and does not prove server label state. Use read-only messages reconcile to recheck saved identities after sync.",
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		account := resolved.Account.Value
@@ -44,7 +50,7 @@ they hold still for two samples.`,
 		result := syncResult{
 			Account:          account,
 			RequestedMailbox: mailbox,
-			ActualScope:      "all-accounts",
+			ActualScope:      "enabled-accounts",
 			StartedAt:        time.Now().UTC(),
 			Status:           "running",
 		}
@@ -56,9 +62,9 @@ they hold still for two samples.`,
 				result.Error = err.Error()
 				resultErr = clierr.Classify(err)
 			}
-			summary := "Synced all accounts"
+			summary := "Synchronization requested for enabled accounts"
 			if account != "" {
-				summary = "Sync requested for " + account + " (Mail.app syncs globally)"
+				summary = "Synchronization requested for " + account
 			}
 			if status != "completed" {
 				summary = "Sync " + status
@@ -74,7 +80,7 @@ they hold still for two samples.`,
 		}
 
 		if account != "" {
-			result.ActualScope = "account-requested; Mail.app may synchronize globally"
+			result.ActualScope = "account"
 			if err := mailClient.SyncAccount(account); err != nil {
 				return finish("failed", fmt.Errorf("sync account %s: %w", account, err))
 			}
@@ -82,6 +88,7 @@ they hold still for two samples.`,
 			return finish("failed", fmt.Errorf("sync accounts: %w", err))
 		}
 
+		result.CompletionBasis = "request-accepted"
 		if syncWait {
 			if syncTimeout <= 0 {
 				return finish("timeout", clierr.New(clierr.CodeTimeout, "sync wait timed out"))
@@ -93,6 +100,7 @@ they hold still for two samples.`,
 				}
 				return finish(status, err)
 			}
+			result.CompletionBasis = "local-counts-stable"
 		}
 		return finish("completed", nil)
 	},

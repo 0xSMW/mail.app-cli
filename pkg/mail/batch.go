@@ -44,6 +44,8 @@ type BatchItem struct {
 // when Mail.app regenerated the message.
 type RelocationState struct {
 	ObservedAt            string   `json:"observedAt"`
+	VerificationScope     string   `json:"verificationScope,omitempty"`
+	SyncRequestedAt       string   `json:"syncRequestedAt,omitempty"`
 	Account               string   `json:"account"`
 	SourceMailbox         string   `json:"sourceMailbox"`
 	DestinationMailbox    string   `json:"destinationMailbox"`
@@ -141,13 +143,18 @@ func ArchiveMutator(journal bool) Mutator {
 		if journal {
 			_ = client.RecordRecentEnvelope(item.Account, item.SourceMailbox, item.ID, "archive")
 		}
-		destination, err := client.ArchiveMessageWithDestination(item.Account, item.SourceMailbox, item.ID)
-		if err != nil {
+		if item.TargetMailbox == "" {
+			destination, err := client.ResolveArchiveMailbox(item.Account)
+			if err != nil {
+				return err
+			}
+			item.TargetMailbox = destination
+		}
+		if err := client.ArchiveMessageToDestination(item.Account, item.SourceMailbox, item.ID, item.TargetMailbox); err != nil {
 			return err
 		}
-		item.TargetMailbox = destination
 		if journal {
-			_ = UpdateRecentMessageLocation(item.Account, item.ID, destination, "archive")
+			_ = UpdateRecentMessageLocation(item.Account, item.ID, item.TargetMailbox, "archive")
 		}
 		return nil
 	}
@@ -267,6 +274,12 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	if opts.Action == "archive" && !opts.TrustSource {
 		items = client.archiveSources(items, opts.ExplicitSource)
 	}
+	if opts.Verify && !opts.DryRun {
+		opts.Settle = relocationSettle(opts, items)
+		if err := ValidateBatchOptions(opts); err != nil {
+			return result, err
+		}
+	}
 	if opts.DryRun {
 		// A preview shows the same sources and skips the real run would use.
 		for _, item := range items {
@@ -367,6 +380,23 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 				continue
 			}
 			result.Attempted++
+			if opts.Action == "archive" && item.TargetMailbox == "" {
+				destination, err := chunkClient.ResolveArchiveMailbox(item.Account)
+				if err != nil {
+					item.Status, item.Error = "failed", "resolve archive destination: "+err.Error()
+					result.Failed++
+					result.Items = append(result.Items, item)
+					if journalErr := opts.Receipt.Record("preflight_failed", journalItem(item)); journalErr != nil {
+						return result, journalErr
+					}
+					// No mutation was issued; a failed read is never an unknown archive.
+					if isVerificationTimeout(err) {
+						return result, err
+					}
+					continue
+				}
+				item.TargetMailbox = destination
+			}
 			if opts.MarkReadBefore && opts.Action != "mark" {
 				if err := opts.Receipt.Record("mark_read_started", journalItem(item)); err != nil {
 					return result, err
@@ -707,7 +737,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 	ctx, cancel := context.WithTimeout(client.Context(), effectiveVerifyBudget(opts))
 	defer cancel()
 	client = client.WithContext(ctx)
-	schedule := verificationSchedule(opts.Settle)
+	schedule := verificationSchedule(relocationSettle(opts, items))
 	for i := range verified {
 		if verified[i].Status == "succeeded" {
 			verified[i].VerifyStatus, verified[i].VerifyError, verified[i].Observed = "", "", nil
@@ -808,6 +838,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 	}
 
 	syncErrors := make(map[string]error)
+	syncRequests := make(map[string]string)
 	successful := 0
 	for _, item := range verified {
 		if item.Status == "succeeded" {
@@ -815,6 +846,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		}
 		if !opts.readOnlyVerification && item.Status == "succeeded" && isValidGmailInboxTransition(item) {
 			if _, seen := syncErrors[item.Account]; !seen {
+				syncRequests[item.Account] = time.Now().Format(time.RFC3339Nano)
 				syncErrors[item.Account] = client.SyncAccount(item.Account)
 			}
 		}
@@ -862,6 +894,11 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 		lookupErrors = make([]error, len(verified))
 		for i, item := range verified {
 			states[i] = RelocationState{ObservedAt: time.Now().Format(time.RFC3339Nano), Account: item.Account, SourceMailbox: item.SourceMailbox, DestinationMailbox: item.TargetMailbox, SourceRemovalRequired: sourceRemoval[i]}
+			states[i].VerificationScope = "mail-local"
+			if requestedAt, ok := syncRequests[item.Account]; ok {
+				states[i].VerificationScope = "mail-local-after-sync-request"
+				states[i].SyncRequestedAt = requestedAt
+			}
 		}
 		for key, refs := range identityGroups {
 			identities := make([]StableIdentity, 0, len(refs))

@@ -156,7 +156,9 @@ The existing single-message `show` output is unchanged apart from an optional
 Batch mark, flag, delete, and move reuse a serial bridge in chunks of at most 25
 messages. Receipts remain durable between every message phase. Mark/flag
 verification stops polling each ID when its requested state is observed;
-delete and Gmail archive retain their settling checks. `--mark-read` marks the
+delete and Gmail archive retain their settling checks. Verified Gmail archives
+observe local membership for 10 seconds by default after an account-scoped
+IMAP synchronization request; `--settle` overrides that window. `--mark-read` marks the
 source before relocation; still check destination read status and visible copies
 when your workflow requires them.
 
@@ -333,6 +335,15 @@ mail-app-cli recent search "sample project update"
 mail-app-cli sync --wait
 ```
 
+`sync -a "Example Account"` requests synchronization only for that account.
+IMAP accounts (including iCloud) use Mail's explicit synchronization operation
+followed by a check for new mail; other receiving accounts check for new mail. Without `-a`, enabled accounts
+are requested individually. A completed result means Mail accepted the request.
+`--wait` additionally observes stable local counts, which do not establish that
+individual messages or server-side labels are synchronized. Use
+`messages reconcile receipt.json` to recheck archive or move identities.
+
+
 `messages show|mark|flag|archive|delete|move` are the 1.x spellings and still work; they now return receipts and accept `--dry-run`.
 
 ## For agents
@@ -409,9 +420,13 @@ This project is a hard fork of [intelligrit/mail-app-cli](https://github.com/int
 
 Verified archive and move capture message identity without asking Mail to render
 a body. `--settle` extends final observation and `--verify-budget` bounds the
-stage. `messages reconcile receipt.json --settle 10s --verify-budget 30s --json`
+stage. Archive destinations are recorded before the move so an interrupted
+operation retains the scope needed for recovery.
+`messages reconcile receipt.json --settle 10s --verify-budget 30s --json`
 rechecks saved archive/move identities without repeating the operation. Receipts
-report when and where the final source/destination state was observed.
+report when and where the final source/destination state was observed, and
+whether observation followed a synchronization request. These observations
+cover Mail's local state; they do not certify server-side labels or future state.
 
 `messages batch archive 12345 --mark-read --mark-read-on-skip --verify --dry-run`
 previews the explicit choice to mark an already-archived record read. Without

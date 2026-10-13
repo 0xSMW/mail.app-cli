@@ -218,6 +218,22 @@ func effectiveVerifyBudget(opts BatchOptions) time.Duration {
 	return DefaultVerifyBudget
 }
 
+// DefaultGmailArchiveSettle observes local memberships for ten seconds after
+// Mail accepts an explicit sync request. It is not a server acknowledgement.
+const DefaultGmailArchiveSettle = 10 * time.Second
+
+func relocationSettle(opts BatchOptions, items []BatchItem) time.Duration {
+	if opts.Settle != 0 || opts.readOnlyVerification || opts.Action != "archive" {
+		return opts.Settle
+	}
+	for _, item := range items {
+		if item.GmailInboxSource && strings.EqualFold(item.SourceMailbox, "INBOX") && item.Status != "failed" {
+			return DefaultGmailArchiveSettle
+		}
+	}
+	return opts.Settle
+}
+
 // verificationSchedule preserves the existing six observations by default.
 // Longer windows continue observing every two seconds, including identities
 // whose destination was already confirmed in an earlier observation.

@@ -49,7 +49,7 @@ func TestBatchJournalSurvivesInterruptedRunAfterCompletedItems(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	client := NewClient().WithContext(ctx)
-	items := []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX"}, {ID: "2", Account: "Work", SourceMailbox: "INBOX"}, {ID: "3", Account: "Work", SourceMailbox: "INBOX"}}
+	items := []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail"}, {ID: "2", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail"}, {ID: "3", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail"}}
 	result, err := RunBatch(client, BatchOptions{Action: "archive", Receipt: journal, TrustSource: true}, items, func(_ *Client, item *BatchItem) error {
 		if item.ID == "2" {
 			cancel()
@@ -85,7 +85,7 @@ func TestBatchJournalPersistsPhasesWithoutReceiptStdout(t *testing.T) {
 	}
 	defer journal.Close()
 
-	_, err = RunBatch(NewClient(), BatchOptions{Action: "archive", MarkReadBefore: true, Receipt: journal, TrustSource: true}, []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX"}}, func(*Client, *BatchItem) error { return nil })
+	_, err = RunBatch(NewClient(), BatchOptions{Action: "archive", MarkReadBefore: true, Receipt: journal, TrustSource: true}, []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail"}}, func(*Client, *BatchItem) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestRunBatchCreatesPersistentReceiptWhenCallerDoesNotConfigureOne(t *testin
 	previousConfigDir := userConfigDir
 	userConfigDir = func() (string, error) { return configDir, nil }
 	t.Cleanup(func() { userConfigDir = previousConfigDir })
-	result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", TrustSource: true}, []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX"}}, func(*Client, *BatchItem) error { return nil })
+	result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", TrustSource: true}, []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail"}}, func(*Client, *BatchItem) error { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -120,54 +120,91 @@ func (c *Client) ArchiveMessage(accountName, mailboxName, messageID string) erro
 	return err
 }
 
-func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, messageID string) (string, error) {
-	script := archiveMessageScript(accountName, mailboxName, messageID)
-
+// ResolveArchiveMailbox is read-only so callers can durably record the
+// intended destination before Mail is asked to move anything.
+func (c *Client) ResolveArchiveMailbox(accountName string) (string, error) {
+	script := archiveMailboxLookupScript + fmt.Sprintf(`
+tell application "Mail"
+ set targetAccount to account "%s"
+ set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "All Mail")
+ if archiveMailbox is missing value then set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "Archive")
+ if archiveMailbox is missing value then error "Archive mailbox not found"
+ return name of archiveMailbox
+end tell
+`, escapeAppleScriptString(accountName))
 	output, err := c.runAppleScript(script)
 	if err != nil {
-		if classified := bridgeError(err.Error()); errors.Is(classified, ErrNotFound) {
-			return "", classified
-		}
-		return "", err
+		return "", archiveBridgeError(err)
 	}
-	if strings.Contains(output, "Error") {
-		return "", bridgeError(output)
+	destination := strings.TrimSpace(output)
+	if destination != "All Mail" && destination != "Archive" {
+		return "", fmt.Errorf("archive destination resolution returned an invalid mailbox: %q", destination)
 	}
-	return strings.TrimSpace(output), nil
+	return destination, nil
 }
 
-func archiveMessageScript(accountName, mailboxName, messageID string) string {
-	return fmt.Sprintf(`
+func archiveBridgeError(err error) error {
+	if classified := bridgeError(err.Error()); errors.Is(classified, ErrNotFound) {
+		return classified
+	}
+	return err
+}
+
+func (c *Client) ArchiveMessageWithDestination(accountName, mailboxName, messageID string) (string, error) {
+	destination, err := c.ResolveArchiveMailbox(accountName)
+	if err != nil {
+		return "", err
+	}
+	return destination, c.ArchiveMessageToDestination(accountName, mailboxName, messageID, destination)
+}
+
+// ArchiveMessageToDestination uses the destination already persisted in a
+// batch receipt; it never chooses a different mailbox after mutation starts.
+func (c *Client) ArchiveMessageToDestination(accountName, mailboxName, messageID, destination string) error {
+	if destination != "All Mail" && destination != "Archive" {
+		return fmt.Errorf("invalid archive destination: %q", destination)
+	}
+	output, err := c.runAppleScript(archiveMessageScript(accountName, mailboxName, messageID, destination))
+	if err != nil {
+		return archiveBridgeError(err)
+	}
+	if strings.Contains(output, "Error") {
+		return bridgeError(output)
+	}
+	if strings.TrimSpace(output) != destination {
+		return fmt.Errorf("archive destination readback did not match %q", destination)
+	}
+	return nil
+}
+
+const archiveMailboxLookupScript = `
 on findMailboxByName(mailboxList, targetName)
-	repeat with candidate in mailboxList
-		try
-			if name of candidate is targetName then return candidate
-			set childMailbox to my findMailboxByName(mailboxes of candidate, targetName)
-			if childMailbox is not missing value then return childMailbox
-		end try
-	end repeat
-	return missing value
+ repeat with candidate in mailboxList
+  try
+   if name of candidate is targetName then return candidate
+   set childMailbox to my findMailboxByName(mailboxes of candidate, targetName)
+   if childMailbox is not missing value then return childMailbox
+  end try
+ end repeat
+ return missing value
 end findMailboxByName
+`
 
+func archiveMessageScript(accountName, mailboxName, messageID, destination string) string {
+	return archiveMailboxLookupScript + fmt.Sprintf(`
 tell application "Mail"
-	set targetAccount to account "%s"
-	set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, "%s")
-	if sourceMailbox is missing value then error "Mailbox not found: %s"
-
-	set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "All Mail")
-	if archiveMailbox is missing value then set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "Archive")
-	if archiveMailbox is missing value then error "Archive mailbox not found"
-
-	if name of sourceMailbox is name of archiveMailbox then
-		return name of archiveMailbox
-	end if
-
-	set targetId to "%s" as integer
-	set targetMessage to first message of sourceMailbox whose id is targetId
-	move targetMessage to archiveMailbox
-	return name of archiveMailbox
+ set targetAccount to account "%s"
+ set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, "%s")
+ if sourceMailbox is missing value then error "Mailbox not found: %s"
+ set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, "%s")
+ if archiveMailbox is missing value then error "Archive mailbox not found"
+ if sourceMailbox is archiveMailbox then return name of archiveMailbox
+ set targetId to "%s" as integer
+ set targetMessage to first message of sourceMailbox whose id is targetId
+ move targetMessage to archiveMailbox
+ return name of archiveMailbox
 end tell
-`, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(messageID))
+`, escapeAppleScriptString(accountName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(mailboxName), escapeAppleScriptString(destination), escapeAppleScriptString(messageID))
 }
 
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
