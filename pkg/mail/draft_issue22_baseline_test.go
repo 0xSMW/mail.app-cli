@@ -178,9 +178,9 @@ let deletes=0, reads=0;
 const props=snapshot.message;
 const msg={id:()=>42,subject:()=>props.subject,sender:()=>props.sender,content:()=>props.content,source:()=>scenario==='changed_source' ? 'changed' : snapshot.source,toRecipients:()=>props.toRecipients.map(v=>({address:()=>v})),ccRecipients:()=>props.ccRecipients.map(v=>({address:()=>v})),bccRecipients:()=> (scenario==='changed_bcc' ? ['changed@example.test'] : props.bccRecipients).map(v=>({address:()=>v})),delete:()=>{deletes++}};
 const messages={id:()=>{reads++;if(scenario==='read_failure' && deletes)throw new Error('bridge unavailable');return deletes && scenario!=='still_present' ? [] : [42]},at:()=>msg};
-const box={name:()=> 'Drafts',messages:messages};
+const box={name:()=> 'Drafts',account:()=>acc,messages:messages};
 const boxes=()=>[box]; boxes.name=()=>['Drafts'];boxes.mailboxes={name:()=>[[]]};boxes[0]=box;
-const acc={mailboxes:boxes};const Application=()=>({accounts:{byName:()=>acc}});const delay=()=>{};
+const acc={id:()=> 'work-id',mailboxes:boxes};const Application=()=>({accounts:{byName:()=>acc},draftsMailbox:()=>({mailboxes:()=>[box]})});const delay=()=>{};
 let error='';try{(function(){` + jxaDraftCleanupScript(snapshot) + `})()}catch(e){error=e.message};console.log(JSON.stringify({deletes,error,reads}));`
 			command := exec.Command(node, "-e", prelude)
 			output, err := command.CombinedOutput()
