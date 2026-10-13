@@ -329,6 +329,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 	// Resolve once per account, then pin that destination on every item before
 	// mutation. Repeated preflight bridge launches add no new scope evidence.
 	archiveDestinations := make(map[string]string)
+	nativeArchiveReady := false
 	for start := 0; start < len(items); start += chunkSize {
 		end := min(start+chunkSize, len(items))
 		chunkClient := client
@@ -422,6 +423,32 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 					archiveDestinations[item.Account] = destination
 				}
 				item.TargetMailbox = destination
+			}
+			useNativeArchive := false
+			if opts.Action == "archive" {
+				var err error
+				useNativeArchive, err = chunkClient.archiveUsesNative(item.Account, item.SourceMailbox, item.TargetMailbox)
+				if err != nil {
+					item.Status, item.Error = "failed", "archive account preflight: "+err.Error()
+					result.Failed++
+					result.Items = append(result.Items, item)
+					if journalErr := opts.Receipt.Record("preflight_failed", journalItem(item)); journalErr != nil {
+						return result, journalErr
+					}
+					return result, err
+				}
+			}
+			if useNativeArchive && !nativeArchiveReady {
+				if err := chunkClient.preflightNativeArchive(); err != nil {
+					item.Status, item.Error = "failed", "native archive preflight: "+err.Error()
+					result.Failed++
+					result.Items = append(result.Items, item)
+					if journalErr := opts.Receipt.Record("preflight_failed", journalItem(item)); journalErr != nil {
+						return result, journalErr
+					}
+					return result, err
+				}
+				nativeArchiveReady = true
 			}
 			if opts.MarkReadBefore && opts.Action != "mark" {
 				if err := opts.Receipt.Record("mark_read_started", journalItem(item)); err != nil {
@@ -554,6 +581,10 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 func isUnknownMutationError(client *Client, err error) bool {
 	if err == nil {
 		return false
+	}
+	var nativeArchiveErr *NativeArchiveError
+	if errors.As(err, &nativeArchiveErr) {
+		return true
 	}
 	if client.Done() != nil {
 		return true
