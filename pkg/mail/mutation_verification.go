@@ -316,7 +316,7 @@ func captureBatchIdentities(client *Client, opts BatchOptions, items []BatchItem
 				session = nil
 				reader.session = nil
 			}
-			if opts.ReuseBridge && len(items) > 1 && session == nil {
+			if !reader.nativeEnabled() && opts.ReuseBridge && len(items) > 1 && session == nil {
 				session, err = newJXASession(ctx)
 				reader.session = session
 			}
