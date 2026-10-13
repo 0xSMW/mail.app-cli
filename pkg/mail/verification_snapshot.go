@@ -47,9 +47,11 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		ctes = append(ctes, name+" as ("+verificationMailboxSelect(account.ID, scope.key.mailbox)+")")
 		// All Mail and Archive use the backing mailbox, while other mailboxes
 		// also include their labels, as in indexMailboxMembershipCondition.
+		// GLOB treats the URL-encoded percent sign literally; LIKE would also
+		// match custom labels such as All%20Work%20Mail as All Mail.
 		membership := `(m.mailbox = box.ID or (
-			lower(box.URL) not like '%/all%20mail' and lower(box.URL) not like '%/all mail'
-			and lower(box.URL) not like '%/archive'
+			lower(box.URL) not glob '*/all%20mail' and lower(box.URL) not glob '*/all mail'
+			and lower(box.URL) not glob '*/archive'
 			and exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = box.ID)))`
 		selects = append(selects, fmt.Sprintf(`select %d as VerificationScope,
 		(select ID from %s) as MailboxID,
@@ -61,7 +63,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 			'MessageSize', m.size, 'Read', m.read))
 		from messages m join subjects s on s.ROWID = m.subject
 		join addresses a on a.ROWID = m.sender cross join %s box
-		where %s and m.deleted = 0 and (%s)) as Matches`, index, name, name, name, membership, strings.Join(conditions, " or ")))
+		where %s and m.deleted = 0 and (%s)) as Matches`, index, name, name, name, membership, verificationIdentityPredicate(conditions)))
 	}
 	if len(queried) == 0 {
 		return results
@@ -72,7 +74,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		MailboxURL        string
 		Matches           string
 	}
-	err := c.runEnvelopeIndexQuery("with "+strings.Join(ctes, ",\n")+"\n"+strings.Join(selects, "\nunion all\n")+";", &rows)
+	err := c.runEnvelopeIndexQuery("with "+strings.Join(ctes, ",\n")+"\n"+verificationUnion(selects)+";", &rows)
 	for _, scope := range queried {
 		results[scope.key] = identityVerificationResult{err: fmt.Errorf("mailbox unavailable in Envelope Index: %s", scope.key.mailbox)}
 		if err != nil {
@@ -122,6 +124,31 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		results[scope.key] = identityVerificationResult{matches: matches}
 	}
 	return results
+}
+
+// Large identity sets must not turn a compound snapshot into a linear-depth
+// expression tree. Parentheses preserve every exact tuple while bounding depth.
+func verificationIdentityPredicate(conditions []string) string {
+	if len(conditions) <= 32 {
+		return strings.Join(conditions, " or ")
+	}
+	middle := len(conditions) / 2
+	return "(" + verificationIdentityPredicate(conditions[:middle]) + ") or (" + verificationIdentityPredicate(conditions[middle:]) + ")"
+}
+
+// SQLite limits each compound SELECT to 500 terms. Nest bounded groups in the
+// same statement so large batches retain a single consistent database snapshot.
+func verificationUnion(selects []string) string {
+	const termsPerGroup = 100
+	if len(selects) <= termsPerGroup {
+		return strings.Join(selects, "\nunion all\n")
+	}
+	groups := make([]string, 0, (len(selects)+termsPerGroup-1)/termsPerGroup)
+	for start := 0; start < len(selects); start += termsPerGroup {
+		end := min(start+termsPerGroup, len(selects))
+		groups = append(groups, "select * from ("+strings.Join(selects[start:end], "\nunion all\n")+")")
+	}
+	return verificationUnion(groups)
 }
 
 // Preserve resolveIndexMailbox's exact/Gmail, literal Archive, nested Archive,
