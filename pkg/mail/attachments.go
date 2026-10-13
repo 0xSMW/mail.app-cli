@@ -61,13 +61,18 @@ func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentN
 }
 
 func (c *Client) SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath string) error {
+	return c.saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName, index, savePath, jxaMailboxLookupHelper()+jxaMessageByIdHelper(), jxaMailboxLookupExpression(mailboxName))
+}
+
+// Callers preserving a draft supply its account-owned special mailbox lookup;
+// ordinary attachment commands retain their explicit mailbox-name lookup.
+func (c *Client) saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath, lookupHelper, lookupExpression string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const app = Application.currentApplication();
 app.includeStandardAdditions = true;
 const requestedMailbox = '%s';
 const requestedIndex = %d;
-%s
 %s
 
 try {
@@ -103,7 +108,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(mailboxName), index, jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
+`, escapeJSString(mailboxName), index, lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
 
 	output, err := c.runJXA(script)
 	if err != nil {
