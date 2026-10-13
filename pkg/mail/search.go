@@ -84,6 +84,9 @@ func searchTerms(query string) []string {
 }
 
 func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchLegacy(query, limit)
+	}
 	limitClause := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if msgCount > %d then set msgCount to %d", limit, limit)
@@ -170,6 +173,22 @@ func (c *Client) SearchMessagesJSONSinceWithOptions(query string, accountName st
 			return SearchResult{}, err
 		}
 		return completeSearchResult(messages, []searchTarget{target}), nil
+	}
+
+	// Reuse one read-only account snapshot for this search's parallel targets.
+	// A named scope must not depend on unrelated account metadata.
+	if c.nativeEnabled() {
+		if accountName != "" {
+			account, err := c.accountByName(accountName)
+			if err != nil {
+				return SearchResult{}, err
+			}
+			searchClient := *c
+			searchClient.readAccountSnapshot = account
+			c = &searchClient
+		} else if _, err := c.GetAccountsJSON(); err != nil {
+			return SearchResult{}, err
+		}
 	}
 
 	targets, err := c.defaultSearchTargets(accountName)
@@ -410,6 +429,9 @@ func accountScopedSearchTargets(mailboxes []Mailbox, accountName string) []searc
 }
 
 func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchMailbox(query, accountName, mailboxName, limit, since, true)
+	}
 	// Use helper for escaping
 	terms := searchTerms(query)
 	if len(terms) == 0 {
@@ -513,6 +535,9 @@ JSON.stringify(result);
 }
 
 func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchMailbox(query, accountName, mailboxName, limit, since, false)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
