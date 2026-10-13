@@ -54,6 +54,7 @@ func (c *Client) ResetAccountCache() {
 	defer c.shared.accountsMu.Unlock()
 	c.shared.accounts = nil
 	c.shared.accountsLoaded = false
+	c.shared.nativeArchiveAccounts = nil
 }
 
 // cloneAccounts copies the slice and each account's address list, so a
