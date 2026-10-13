@@ -155,6 +155,118 @@ printf '%%s\n' "$destination"
 	}
 }
 
+func TestArchiveDryRunResolvesOncePerAccountAndPreservesPinnedOrSkippedItems(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "bridge.log")
+	t.Setenv("ARCHIVE_DRY_RUN_LOG", log)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
+	writeFakeOsaScript(t, `printf '%s\n' "$*" >> "$ARCHIVE_DRY_RUN_LOG"
+case "$*" in *'account "Beta"'*) printf 'Archive\n' ;; *) printf 'All Mail\n' ;; esac
+`)
+	journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	items := []BatchItem{
+		{ID: "1", Account: "Alpha", SourceMailbox: "INBOX"},
+		{ID: "2", Account: "Alpha", SourceMailbox: "INBOX"},
+		{ID: "3", Account: "Beta", SourceMailbox: "INBOX"},
+		{ID: "4", Account: "Pinned", SourceMailbox: "INBOX", TargetMailbox: "Archive"},
+		{ID: "5", Account: "Skipped", SourceMailbox: "All Mail"},
+	}
+	result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", DryRun: true, TrustSource: true, MarkReadBefore: true, Receipt: journal}, items, func(*Client, *BatchItem) error {
+		t.Fatal("dry-run invoked a mutator")
+		return nil
+	})
+	if err != nil || result.Attempted != 0 || result.Failed != 0 || len(result.Items) != len(items) {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	for i, want := range []string{"All Mail", "All Mail", "Archive", "Archive"} {
+		if result.Items[i].Status != "dry-run" || result.Items[i].TargetMailbox != want || result.Items[i].MarkedRead {
+			t.Fatalf("item %d=%+v, want dry-run destination %q", i, result.Items[i], want)
+		}
+	}
+	if result.Items[4].Status != "skipped" || result.Items[4].TargetMailbox != "" {
+		t.Fatalf("skipped archive changed: %+v", result.Items[4])
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(data)
+	if strings.Count(script, `set targetAccount to account "Alpha"`) != 1 || strings.Count(script, `set targetAccount to account "Beta"`) != 1 || strings.Contains(script, `account "Pinned"`) || strings.Contains(script, `account "Skipped"`) || strings.Contains(script, "move targetMessage") || strings.Contains(script, "set read status") {
+		t.Fatalf("unexpected dry-run bridge calls: %s", script)
+	}
+	allMail := strings.Index(script, `findMailboxByName(mailboxes of targetAccount, "All Mail")`)
+	archive := strings.Index(script, `findMailboxByName(mailboxes of targetAccount, "Archive")`)
+	if allMail < 0 || archive < allMail {
+		t.Fatalf("dry-run did not use the recursive archive resolver: %s", script)
+	}
+	events := readJournalEvents(t, journal.Path())
+	if countJournalEvents(events, "mutation_started") != 0 || countJournalEvents(events, "mark_read_started") != 0 {
+		t.Fatalf("dry-run recorded a mutation attempt: %+v", events)
+	}
+}
+
+func TestArchiveDryRunFailsClosedOnDestinationResolutionError(t *testing.T) {
+	for _, body := range []string{
+		`printf 'Archive mailbox not found' >&2; exit 1`,
+		`printf 'applescript timed out after 30s' >&2; exit 1`,
+		`printf 'unexpected mailbox\n'`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
+			writeFakeOsaScript(t, body)
+			journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", DryRun: true, TrustSource: true, MarkReadBefore: true, Receipt: journal}, []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX"}}, func(*Client, *BatchItem) error {
+				t.Fatal("failed preview invoked a mutator")
+				return nil
+			})
+			if err == nil || result.Attempted != 0 || result.Failed != 1 || len(result.Items) != 1 || result.Items[0].Status != "failed" || result.Items[0].TargetMailbox != "" || result.Items[0].MarkedRead {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			events := readJournalEvents(t, journal.Path())
+			if countJournalEvents(events, "mutation_started") != 0 || countJournalEvents(events, "mark_read_started") != 0 {
+				t.Fatalf("failed preview recorded a mutation attempt: %+v", events)
+			}
+		})
+	}
+}
+
+func TestArchiveDryRunTimeoutStopsBeforeNextDestinationLookup(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "bridge.log")
+	t.Setenv("ARCHIVE_DRY_RUN_LOG", log)
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
+	writeFakeOsaScript(t, `printf 'lookup\n' >> "$ARCHIVE_DRY_RUN_LOG"
+printf 'applescript timed out after 30s' >&2
+exit 1
+`)
+	journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	items := []BatchItem{
+		{ID: "1", Account: "Alpha", SourceMailbox: "INBOX"},
+		{ID: "2", Account: "Beta", SourceMailbox: "INBOX"},
+	}
+	result, err := RunBatch(NewClient(), BatchOptions{Action: "archive", DryRun: true, TrustSource: true, MarkReadBefore: true, Receipt: journal}, items, func(*Client, *BatchItem) error {
+		t.Fatal("timed-out preview invoked a mutator")
+		return nil
+	})
+	if !isVerificationTimeout(err) || result.Failed != 1 || result.Attempted != 0 || len(result.Items) != 1 || result.Items[0].Status != "failed" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil || string(data) != "lookup\n" {
+		t.Fatalf("lookup log=%q err=%v", data, err)
+	}
+}
+
 func TestGmailArchiveDefaultWindowAndExplicitBudget(t *testing.T) {
 	item := verificationItem()
 	item.GmailInboxSource = true
