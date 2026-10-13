@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -22,6 +22,7 @@ var (
 	draftDryRun      bool
 	draftLimit       int
 	draftFrom        string
+	draftThreading   threadedOutgoingFlags
 )
 
 var draftsCmd = &cobra.Command{
@@ -59,7 +60,20 @@ var draftsListCmd = &cobra.Command{
 var draftsCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create a draft without sending it",
+	Long: `Create a draft without sending it. Reply and forward use the native backend
+and require the original message's explicit mailbox and a complete outgoing body.
+
+Examples:
+  mail-app-cli drafts create -a "Personal" -m INBOX --reply-to 123 --to user@example.com --subject "Re: Hello" --body "Complete reply body"
+  mail-app-cli drafts create -a "Personal" -m INBOX --forward-of 123 --to user@example.com --subject "Fwd: Hello" --body-file forward.txt`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		threading, err := draftThreading.selection(cmd)
+		if err != nil {
+			return err
+		}
+		if threading != nil && len(draftTo)+len(draftCc)+len(draftBcc) == 0 {
+			return clierr.Usage("reply and forward require at least one recipient")
+		}
 		account, err := requireAccount()
 		if err != nil {
 			return err
@@ -73,35 +87,59 @@ var draftsCreateCmd = &cobra.Command{
 			return err
 		}
 		input := mail.DraftInput{Account: account, Sender: draftFrom, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments}
+		if threading != nil {
+			threading.Account = account
+		}
 		if draftDryRun {
 			identity, err := mailClient.PreviewOutgoing(mail.OutgoingInput{Account: account, Sender: draftFrom, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments})
 			if err != nil {
 				return err
 			}
 			input.Sender = identity.Sender
+			data := map[string]any{"dryRun": true, "draft": input, "accountId": identity.AccountID}
+			if threading != nil {
+				data["threading"] = threading
+			}
 			return writer.Write(output.Result{
-				Data:    map[string]any{"dryRun": true, "draft": input, "accountId": identity.AccountID},
+				Data:    data,
 				Summary: "Dry run: would create draft " + input.Subject,
-				Notices: previewNotices(true),
+				Notices: threadedPreviewNotices(threading, true),
 				Plain:   renderLine("Dry run: would create draft %q for %v", input.Subject, input.To),
 			})
 		}
-		message, err := mailClient.CreateDraft(input)
+		var message *mail.Message
+		if threading != nil {
+			var result *mail.OutgoingResult
+			result, err = mailClient.SaveThreadedOutgoing(threading.input(mail.OutgoingInput{Account: account, Sender: draftFrom, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments}))
+			if result != nil {
+				message = result.Draft
+			}
+		} else {
+			message, err = mailClient.CreateDraft(input)
+		}
 		if err != nil {
 			var mutation *mail.MutationError
 			if errors.As(err, &mutation) {
+				data := map[string]any{"account": account, "sender": mutation.Sender, "draft": message,
+					"saved": mutation.Saved, "uncertain": mutation.Uncertain, "status": "verification_failed", "phase": mutation.Phase}
+				if threading != nil {
+					data["threading"] = threading
+				}
 				return writer.Write(output.Result{
-					Data: map[string]any{"account": account, "sender": mutation.Sender, "draft": message,
-						"saved": mutation.Saved, "uncertain": mutation.Uncertain, "status": "verification_failed", "phase": mutation.Phase},
+					Data:    data,
 					Summary: mutation.Error(), Err: clierr.Classify(err),
 				})
 			}
 			return fmt.Errorf("create draft: %w", err)
 		}
+		meta := map[string]any{"account": account}
+		if threading != nil {
+			meta["threading"] = threading
+		}
 		return writer.Write(output.Result{
 			Data:    message,
 			Summary: "Created draft " + message.ID,
-			Meta:    map[string]any{"account": account},
+			Meta:    meta,
 			Plain:   renderLine("Created draft %s (%s)", message.ID, message.Subject),
 		})
 	},
@@ -230,6 +268,7 @@ func readBodyValue(inline, file string) (string, error) {
 }
 
 func init() {
+	draftThreading.register(draftsCreateCmd)
 	draftsCmd.AddCommand(draftsListCmd, draftsCreateCmd, draftsShowCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd)
 	draftsListCmd.Flags().IntVarP(&draftLimit, "limit", "l", 25, "Maximum drafts")
 	for _, cmd := range []*cobra.Command{draftsCreateCmd, draftsUpdateCmd} {
