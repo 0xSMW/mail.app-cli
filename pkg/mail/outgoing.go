@@ -71,6 +71,9 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 		return nil, err
 	}
 	input.Attachments = attachments
+	if c.nativeEnabled() {
+		return c.composeNativeOutgoing(input, action)
+	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
