@@ -7,9 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/skills"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/skills"
 	"github.com/spf13/cobra"
 )
 
