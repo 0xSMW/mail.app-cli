@@ -43,6 +43,9 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 }
 
 func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+	}
 	// Build filter/offset/limit clauses using index-based approach.
 	// Bulk property accessors (mbox.messages.readStatus()) fetch all values in a
 	// single IPC call rather than one round-trip per message.
@@ -167,6 +170,9 @@ JSON.stringify(result);
 }
 
 func (c *Client) getArchiveMessagesWithWhoseJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+	}
 	sinceUnix := int64(0)
 	if strings.TrimSpace(since) != "" {
 		parsedSince, _, err := parseSinceUnix(since)
@@ -281,6 +287,9 @@ func (c *Client) getMessageDetailsFromMail(accountName, mailboxName, messageID s
 // disk, and Mail.app is asked only for metadata. Mail.app renders a body on
 // request, and that request can stall it for every later caller.
 func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID string, timeout time.Duration, preferDisk bool) (*Message, *PhaseTrace, error) {
+	if c.nativeEnabled() {
+		return c.nativeMessageDetails(accountName, mailboxName, messageID, timeout, preferDisk, false)
+	}
 	var diskPhase *AutomationPhase
 	var bodyDiagnostics *BodyDiagnostics
 	diskBody, haveDiskBody := "", false
@@ -467,6 +476,10 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 // nil message is therefore proof that the message is absent, rather than a
 // catch-all result for an automation failure.
 func (c *Client) GetMessageDetailsForVerificationJSON(accountName, mailboxName, messageID string) (*Message, error) {
+	if c.nativeEnabled() {
+		message, _, err := c.nativeMessageDetails(accountName, mailboxName, messageID, identityEnrichmentTimeout, false, true)
+		return message, err
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 let result = null;
@@ -534,6 +547,10 @@ JSON.stringify(result);
 // Mail.app. It is the verification fallback when the Envelope Index is not
 // available; it never enumerates all IDs in the mailbox.
 func (c *Client) GetMessageStateForVerificationJSON(accountName, mailboxName, messageID string) (*Message, error) {
+	if c.nativeEnabled() {
+		message, _, err := c.nativeMessageDetails(accountName, mailboxName, messageID, defaultAutomationTimeout, false, true)
+		return message, err
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const requestedMailbox = '%s';
