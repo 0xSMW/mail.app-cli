@@ -3,7 +3,7 @@ package tui
 import (
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // settled is the state a receipt confirmed for a message, held until the
