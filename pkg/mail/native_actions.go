@@ -118,7 +118,9 @@ func (n *nativeMail) attachments(ref appleevents.Value) ([]Attachment, []appleev
 		}
 		mime, err := n.stringProperty("attp", attachment)
 		if err != nil {
-			if !nativeOptionalProperty(err) {
+			// Mail can reject this optional MIME getter even when the other
+			// attachment properties are available. Keep this exception local.
+			if !nativeOptionalProperty(err) && !nativeAppleError(err, -10000) {
 				return nil, nil, err
 			}
 			mime = "unknown"
