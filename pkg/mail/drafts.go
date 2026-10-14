@@ -61,21 +61,7 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, err
 	}
-	replacement := DraftInput{
-		Account: draft.Account,
-		Sender:  sender,
-		Subject: details.Subject,
-		Body:    details.Content,
-		To:      details.ToRecipients,
-		Cc:      details.CcRecipients,
-		Bcc:     details.BccRecipients,
-	}
-	if input.SubjectSet {
-		replacement.Subject = input.Subject
-	}
-	if input.BodySet {
-		replacement.Body = input.Body
-	}
+	replacement := draftReplacement(draft.Account, details, sender, details.Content, input)
 	if replacement.Subject == details.Subject && replacement.Body == details.Content && len(attachments) == 0 {
 		return draft, nil
 	}
@@ -146,46 +132,6 @@ func (c *Client) DeleteDraft(accountName, draftID string) error {
 	return nil
 }
 
-func (c *Client) findDraftBySubject(accountName, subject string) (*Message, error) {
-	return c.findDraftBySubjectContentSince(accountName, subject, "", time.Time{})
-}
-
-func (c *Client) findDraftBySubjectContentSince(accountName, subject, content string, since time.Time) (*Message, error) {
-	var best *Message
-	const pageSize = 500
-	for offset := 0; ; offset += pageSize {
-		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
-		if err != nil {
-			return nil, err
-		}
-		for _, message := range messages {
-			if message.Subject != subject || (accountName != "" && message.Account != accountName) {
-				continue
-			}
-			if content != "" && normalizeDraftContent(message.Content) != normalizeDraftContent(content) {
-				continue
-			}
-			if !since.IsZero() {
-				messageTime, ok := parseMessageTimestamp(message.DateReceived)
-				if !ok || messageTime.Before(since) {
-					continue
-				}
-			}
-			if best == nil || message.DateReceived > best.DateReceived {
-				copy := message
-				best = &copy
-			}
-		}
-		if len(messages) < pageSize {
-			break
-		}
-	}
-	if best == nil {
-		return nil, fmt.Errorf("draft not found by subject: %s", subject)
-	}
-	return best, nil
-}
-
 // ParseMessageTime parses the timestamp shapes Mail.app and the Envelope
 // Index produce.
 func ParseMessageTime(value string) (time.Time, bool) {
@@ -195,14 +141,6 @@ func ParseMessageTime(value string) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
-}
-
-func parseMessageTimestamp(value string) (time.Time, bool) { return ParseMessageTime(value) }
-
-func normalizeDraftContent(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
-	return strings.TrimSpace(value)
 }
 
 func (c *Client) deleteDraftByID(accountName, mailboxName, draftID string) error {
@@ -229,12 +167,5 @@ try {
 	'Error: ' + e;
 }
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(draftID))
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }
