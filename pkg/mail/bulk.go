@@ -7,14 +7,10 @@ import (
 const maxConcurrentMailCommands = 4
 
 func runWithMailCommandLimit[T any](items []T, run func(T)) {
-	limit := maxConcurrentMailCommands
-	if len(items) < limit {
-		limit = len(items)
-	}
+	limit := min(len(items), maxConcurrentMailCommands)
 	if limit <= 0 {
 		return
 	}
-
 	sem := make(chan struct{}, limit)
 	for _, item := range items {
 		sem <- struct{}{}
@@ -23,6 +19,31 @@ func runWithMailCommandLimit[T any](items []T, run func(T)) {
 			run(v)
 		}(item)
 	}
+}
+
+// Successful values and errors arrive in completion order. Ordered reads carry
+// their request index as part of the value, preserving their original slots.
+func collectMailCommands[R, V any](requests []R, run func(R) (V, error), accept func(V)) []error {
+	type result struct {
+		value V
+		err   error
+	}
+	results := make(chan result, len(requests))
+	runWithMailCommandLimit(requests, func(request R) {
+		value, err := run(request)
+		results <- result{value, err}
+	})
+
+	var errors []error
+	for range requests {
+		res := <-results
+		if res.err != nil {
+			errors = append(errors, res.err)
+		} else {
+			accept(res.value)
+		}
+	}
+	return errors
 }
 
 // MailboxListRequest selects messages from one mailbox for a fan-out read.
@@ -55,30 +76,10 @@ func (c *Client) GetMessagesFromMultipleMailboxes(requests []MailboxListRequest)
 		return c.GetMessagesJSON(req.AccountName, req.MailboxName, req.Limit, req.Offset, req.UnreadOnly, req.FlaggedOnly, req.WithContent, req.Since)
 	}
 
-	// Load messages from multiple mailboxes in parallel
-	type result struct {
-		messages []Message
-		err      error
-	}
-	results := make(chan result, len(requests))
-
-	// Launch bounded goroutines for mailbox retrieval.
-	runWithMailCommandLimit(requests, func(r MailboxListRequest) {
-		messages, err := c.GetMessagesJSON(r.AccountName, r.MailboxName, r.Limit, r.Offset, r.UnreadOnly, r.FlaggedOnly, r.WithContent, r.Since)
-		results <- result{messages: messages, err: err}
-	})
-
-	// Collect results
 	var allMessages []Message
-	var errors []error
-	for i := 0; i < len(requests); i++ {
-		res := <-results
-		if res.err != nil {
-			errors = append(errors, res.err)
-		} else {
-			allMessages = append(allMessages, res.messages...)
-		}
-	}
+	errors := collectMailCommands(requests, c.ListMessages, func(messages []Message) {
+		allMessages = append(allMessages, messages...)
+	})
 
 	// Return partial results even if some mailboxes failed
 	if len(errors) > 0 && len(allMessages) == 0 {
@@ -103,45 +104,28 @@ func (c *Client) GetMultipleMessageDetails(requests []MessageRef) ([]*Message, e
 		return []*Message{msg}, nil
 	}
 
-	// Load message details in parallel
-	type result struct {
-		message *Message
-		err     error
-		index   int
-	}
-	results := make(chan result, len(requests))
-
 	type indexedRequest struct {
 		index int
 		req   MessageRef
 	}
-	indexedRequests := make([]indexedRequest, 0, len(requests))
-	for i, req := range requests {
-		indexedRequests = append(indexedRequests, indexedRequest{index: i, req: req})
+	type indexedMessage struct {
+		index   int
+		message *Message
 	}
-	runWithMailCommandLimit(indexedRequests, func(item indexedRequest) {
+	indexed := make([]indexedRequest, 0, len(requests))
+	for i, req := range requests {
+		indexed = append(indexed, indexedRequest{i, req})
+	}
+	messages := make([]*Message, len(requests))
+	errors := collectMailCommands(indexed, func(item indexedRequest) (indexedMessage, error) {
 		message, err := c.GetMessageDetailsJSON(item.req.AccountName, item.req.MailboxName, item.req.MessageID)
-		results <- result{message: message, err: err, index: item.index}
+		return indexedMessage{item.index, message}, err
+	}, func(item indexedMessage) {
+		messages[item.index] = item.message
 	})
 
-	// Collect results in original order
-	messages := make([]*Message, len(requests))
-	var errors []error
-	successCount := 0
-
-	for i := 0; i < len(requests); i++ {
-		res := <-results
-		if res.err != nil {
-			errors = append(errors, res.err)
-			messages[res.index] = nil
-		} else {
-			messages[res.index] = res.message
-			successCount++
-		}
-	}
-
 	// Return error if all requests failed
-	if successCount == 0 {
+	if len(errors) == len(requests) {
 		return nil, fmt.Errorf("failed to get all message details: %v", errors)
 	}
 
@@ -217,18 +201,9 @@ func runBulkOperations[T any](requests []T, failureMessage string, run func(T) e
 		return run(requests[0])
 	}
 
-	errors := make(chan error, len(requests))
-
-	runWithMailCommandLimit(requests, func(r T) {
-		errors <- run(r)
-	})
-
-	var errorList []error
-	for i := 0; i < len(requests); i++ {
-		if err := <-errors; err != nil {
-			errorList = append(errorList, err)
-		}
-	}
+	errorList := collectMailCommands(requests, func(req T) (struct{}, error) {
+		return struct{}{}, run(req)
+	}, func(struct{}) {})
 
 	if len(errorList) > 0 {
 		return fmt.Errorf("%s: %v", failureMessage, errorList)
