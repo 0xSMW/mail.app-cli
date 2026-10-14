@@ -20,6 +20,20 @@ func indexAccountCondition(accountID string) string {
 	return fmt.Sprintf("substr(mb.url, 1, %d) = %s", utf8.RuneCountInString(prefix), sqlQuote(prefix))
 }
 
+// resolveLocalMessageScope checks membership separately from physical ownership.
+// An empty condition means the mailbox could not be resolved locally.
+func (c *Client) resolveLocalMessageScope(accountName, mailboxName string) (*indexMailbox, string, error) {
+	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
+	if err != nil || !ok {
+		return nil, "", err
+	}
+	account, err := c.accountByName(accountName)
+	if err != nil {
+		return nil, "", err
+	}
+	return mbox, indexMailboxMembershipCondition(mbox) + " and " + indexAccountCondition(account.ID), nil
+}
+
 func (c *Client) nativeDiskAccessError(err error) error {
 	if err != nil && c.nativeEnabled() && (os.IsPermission(err) || strings.Contains(strings.ToLower(err.Error()), "operation not permitted")) {
 		return &nativeIndexError{err}
@@ -40,16 +54,12 @@ func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID s
 	if err != nil || id <= 0 {
 		return nil, false, nil
 	}
-	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
-	if err != nil || !ok {
-		return nil, false, err
-	}
-	account, err := c.accountByName(accountName)
-	if err != nil {
+	mbox, membership, err := c.resolveLocalMessageScope(accountName, mailboxName)
+	if err != nil || mbox == nil {
 		return nil, false, err
 	}
 	selectSQL := strings.Replace(buildIndexMessageSelect(accountName, mbox.Name), "\nfrom messages m", ",\nmb.url as OwnerURL\nfrom messages m", 1)
-	query := selectSQL + fmt.Sprintf(" where m.ROWID = %d and m.deleted = 0 and %s and %s limit 1;", id, indexMailboxMembershipCondition(mbox), indexAccountCondition(account.ID))
+	query := selectSQL + fmt.Sprintf(" where m.ROWID = %d and m.deleted = 0 and %s limit 1;", id, membership)
 	var rows []struct {
 		indexMessage
 		OwnerURL string
@@ -68,32 +78,47 @@ func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID s
 		}
 		return &message, false, nil
 	}
+	// Keep the indexed envelope on a native access failure, as before.
+	hydrated := message
+	complete, err := c.hydrateLocalMessage(&hydrated, path)
+	if err != nil {
+		return &message, false, err
+	}
+	return &hydrated, complete, nil
+}
+
+// hydrateLocalMessage enriches a known physical file without rendering in Mail.
+// Decode failures remain content diagnostics; only native access denial is fatal.
+func (c *Client) hydrateLocalMessage(message *Message, path string) (bool, error) {
 	rfc, err := readEMLXMessage(path)
 	if err != nil {
-		if denied := c.nativeDiskAccessError(err); denied != nil {
-			return &message, false, denied
-		}
-		message.BodyDiagnostics = &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx"), ExtractionError: err.Error()}
-		message.BodyDiagnostics.finish()
+		message.BodyDiagnostics = failedEMLXDiagnostics(path, err)
 		message.ContentError = err.Error()
-		return &message, false, nil
+		return false, c.nativeDiskAccessError(err)
 	}
-	if err := populateMIMEEnvelope(&message, rfc.Header); err != nil {
+	if err := populateMIMEEnvelope(message, rfc.Header); err != nil {
 		message.ContentError = err.Error()
-		return &message, false, nil
+		return false, nil
 	}
-	message.Content, message.BodyDiagnostics, err = extractEMLXBody(rfc, path)
-	trimBodyAlternatives(message.BodyDiagnostics, c.shared.bodyAlternatives)
+	body, diagnostics, err := extractEMLXBody(rfc, path)
+	trimBodyAlternatives(diagnostics, c.shared.bodyAlternatives)
+	message.BodyDiagnostics = diagnostics
 	if err != nil {
 		message.ContentError = err.Error()
-		return &message, false, nil
+		return false, nil
 	}
-	message.ContentSource = BodySourceDisk
-	if message.BodyDiagnostics.PartialFile {
+	message.Content, message.ContentSource = body, BodySourceDisk
+	if diagnostics.PartialFile {
 		message.ContentError = errPartialBodyOnDisk.Error()
-		return &message, false, nil
+		return false, nil
 	}
-	return &message, true, nil
+	return true, nil
+}
+
+func failedEMLXDiagnostics(path string, err error) *BodyDiagnostics {
+	diagnostics := &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx"), ExtractionError: err.Error()}
+	diagnostics.finish()
+	return diagnostics
 }
 
 func headerWordDecoder() *mime.WordDecoder {
@@ -201,18 +226,13 @@ func (c *Client) messageFilePathsForMessages(accountName, mailboxName string, me
 	paths := make(map[string]string)
 	var predicates []string
 	for group, ids := range groups {
-		mbox, ok, err := c.resolveIndexMailbox(group.account, group.mailbox)
+		_, membership, err := c.resolveLocalMessageScope(group.account, group.mailbox)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			continue
+		if membership != "" {
+			predicates = append(predicates, "(m.ROWID in ("+strings.Join(ids, ",")+") and "+membership+")")
 		}
-		account, err := c.accountByName(group.account)
-		if err != nil {
-			return nil, err
-		}
-		predicates = append(predicates, "(m.ROWID in ("+strings.Join(ids, ",")+") and "+indexMailboxMembershipCondition(mbox)+" and "+indexAccountCondition(account.ID)+")")
 	}
 	if len(predicates) == 0 {
 		return paths, nil
@@ -263,36 +283,14 @@ func (c *Client) enrichMessagesFromDisk(accountName, mailboxName string, message
 				if path == "" {
 					continue
 				}
-				rfc, err := readEMLXMessage(path)
+				var err error
+				complete[i], err = c.hydrateLocalMessage(&messages[i], path)
 				if err != nil {
-					if denied := c.nativeDiskAccessError(err); denied != nil {
-						accessMu.Lock()
-						if accessErr == nil {
-							accessErr = denied
-						}
-						accessMu.Unlock()
+					accessMu.Lock()
+					if accessErr == nil {
+						accessErr = err
 					}
-					diagnostics := &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx"), ExtractionError: err.Error()}
-					diagnostics.finish()
-					messages[i].BodyDiagnostics = diagnostics
-					messages[i].ContentError = err.Error()
-					continue
-				}
-				if err := populateMIMEEnvelope(&messages[i], rfc.Header); err != nil {
-					messages[i].ContentError = err.Error()
-					continue
-				}
-				body, diagnostics, err := extractEMLXBody(rfc, path)
-				trimBodyAlternatives(diagnostics, c.shared.bodyAlternatives)
-				messages[i].BodyDiagnostics = diagnostics
-				if err != nil {
-					messages[i].ContentError = err.Error()
-					continue
-				}
-				messages[i].Content, messages[i].ContentSource = body, BodySourceDisk
-				complete[i] = !diagnostics.PartialFile
-				if !complete[i] {
-					messages[i].ContentError = errPartialBodyOnDisk.Error()
+					accessMu.Unlock()
 				}
 			}
 		}()
