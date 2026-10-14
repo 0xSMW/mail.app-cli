@@ -229,9 +229,10 @@ func TestNativeSearchIndexUnavailableUsesNativeScopedRoute(t *testing.T) {
 	}
 	identity := StableIdentityFromMessage(result.Messages[0])
 	identity.RFCMessageID = ""
-	present, err := c.hasMessageIdentityForVerification("Personal", "INBOX", identity)
-	if err != nil || !present {
-		t.Fatalf("index identity fallback: %v %v", present, err)
+	verified := VerifyMutations(c, BatchOptions{Action: "move", Verify: true}, []BatchItem{{ID: "42", Account: "Personal", SourceMailbox: "INBOX", TargetMailbox: "INBOX", Status: "succeeded", Identity: identity}})
+	observed := verified[0].Observed
+	if verified[0].VerifyStatus != "present_in_source" || observed == nil || !observed.SourcePresent || !observed.DestinationPresent {
+		t.Fatalf("index identity fallback: %+v", verified[0])
 	}
 	if _, err := c.SearchMessagesJSONSinceWithOptions("fixture", "Personal", "", 1, "", SearchOptions{}); err == nil {
 		t.Fatal("unbounded index-unavailable search permitted")
