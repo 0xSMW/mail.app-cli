@@ -42,15 +42,8 @@ func (c *Client) LocateMessages(ids []string) (map[string]MessageLocation, error
 	idList := strings.Join(numeric, ", ")
 
 	var rows []struct {
-		ID           int64  `json:"ID"`
-		Subject      string `json:"Subject"`
-		Sender       string `json:"Sender"`
-		DateSent     string `json:"DateSent"`
-		DateReceived string `json:"DateReceived"`
-		Read         int    `json:"Read"`
-		Flagged      int    `json:"Flagged"`
-		MessageSize  int    `json:"MessageSize"`
-		URL          string `json:"URL"`
+		indexMessage
+		URL string `json:"URL"`
 	}
 	query := fmt.Sprintf(`
 select
@@ -113,19 +106,19 @@ where l.message_id in (%s);
 
 	located := make(map[string]MessageLocation, len(rows))
 	for _, row := range rows {
-		id := strconv.FormatInt(row.ID, 10)
 		accountID := indexMailboxAccountID(row.URL)
 		accountName, ok := accountNames[accountID]
 		if !ok {
 			continue
 		}
+		envelope := row.indexMessage.message()
 		backing := indexMailboxDisplayName(row.URL)
 		labels := labelsByID[row.ID]
 		if labels == nil {
 			labels = []string{}
 		}
 		location := MessageLocation{
-			ID:             id,
+			ID:             envelope.ID,
 			Account:        accountName,
 			Mailbox:        preferredMessageMailbox(backing, userLabelsByID[row.ID]),
 			BackingMailbox: backing,
@@ -133,19 +126,9 @@ where l.message_id in (%s);
 			Labels:         labels,
 			IsGmail:        strings.Contains(row.URL, "/%5BGmail%5D/"),
 		}
-		location.Envelope = Message{
-			ID:           id,
-			Subject:      row.Subject,
-			Sender:       row.Sender,
-			DateSent:     row.DateSent,
-			DateReceived: row.DateReceived,
-			Read:         row.Read != 0,
-			Flagged:      row.Flagged != 0,
-			MessageSize:  row.MessageSize,
-			Mailbox:      location.Mailbox,
-			Account:      accountName,
-		}
-		located[id] = location
+		envelope.Mailbox, envelope.Account = location.Mailbox, accountName
+		location.Envelope = envelope
+		located[envelope.ID] = location
 	}
 	return located, nil
 }
@@ -205,33 +188,6 @@ limit 2;
 		return 0, err
 	}
 	return len(rows), nil
-}
-
-func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName string, identity StableIdentity) (bool, error) {
-	// A unique complete tuple is safe to use without enumerating a potentially
-	// enormous Mail.app mailbox. Ambiguous or incomplete identities fail closed;
-	// verification never falls back to a mailbox-wide RFC scan.
-	if identity.hasFallback() {
-		matches, err := c.countMessageIdentityInMailbox(accountName, mailboxName, identity)
-		if err != nil {
-			if isVerificationTimeout(err) {
-				return false, err
-			}
-			return c.hasMessageIdentityWithWhoseJXA(accountName, mailboxName, identity)
-		}
-		switch matches {
-		case 0:
-			return false, nil
-		case 1:
-			return true, nil
-		default:
-			return false, fmt.Errorf("stable identity is ambiguous in %s", mailboxName)
-		}
-	}
-	if identity.RFCMessageID != "" {
-		return false, fmt.Errorf("stable identity lacks complete indexed metadata; refusing mailbox-wide RFC lookup in %s", mailboxName)
-	}
-	return false, fmt.Errorf("invalid stable identity")
 }
 
 func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
