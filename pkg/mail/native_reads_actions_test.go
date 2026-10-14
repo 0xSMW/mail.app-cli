@@ -1023,3 +1023,49 @@ func TestNativeReadListProjectionAvoidsStoredIdentityAndSize(t *testing.T) {
 		})
 	}
 }
+
+func TestNativeReadAccountProjectionPreservesIdentityBracket(t *testing.T) {
+	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
+	for _, scenario := range []string{"changed ID", "final shape", "duplicate ID"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newNativeReadFixture()
+			c := fixtureClient(t, f)
+			if scenario == "duplicate ID" {
+				f.accounts = append(f.accounts, f.accounts[0])
+			}
+			idReads := 0
+			c.shared.nativeSender = func(ctx context.Context, event appleevents.Event) (appleevents.Value, appleevents.Stats, error) {
+				object := event.Params["----"]
+				if object.Fields["seld"].Code == "ID  " {
+					idReads++
+					if idReads == 2 && scenario != "duplicate ID" {
+						f.events = append(f.events, event)
+						value := appleevents.List(appleevents.String("changed"))
+						if scenario == "final shape" {
+							value = appleevents.String("a")
+						}
+						return value, appleevents.Stats{}, nil
+					}
+				}
+				return f.sender(ctx, event)
+			}
+			_, err := c.GetAccountsJSON()
+			want := "account collection changed during metadata read"
+			if scenario == "duplicate ID" {
+				want = `Mail returned duplicate account ID "a"`
+			}
+			if err == nil || err.Error() != want || c.shared.accountsLoaded {
+				t.Fatalf("identity failure accepted: error=%v cached=%v", err, c.shared.accountsLoaded)
+			}
+			codes := []string{"ID  ", "pnam", "emad", "unme", "isac", "atyp", "ID  "}
+			if len(f.events) != len(codes) {
+				t.Fatalf("projection event count=%d expected=%d", len(f.events), len(codes))
+			}
+			for i, event := range f.events {
+				if event.ID != "getd" || event.Params["----"].Fields["seld"].Code != codes[i] {
+					t.Fatalf("projection event %d changed: %+v", i, event)
+				}
+			}
+		})
+	}
+}
