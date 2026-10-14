@@ -21,7 +21,7 @@ func (n *nativeMail) collection(class string, container appleevents.Value) ([]ap
 		return nil, fmt.Errorf("Mail returned %s for %s collection", v.Kind, class)
 	}
 	for _, ref := range v.Items {
-		if ref.Kind != "object" && ref.Kind != "opaque" {
+		if !nativeReference(ref) {
 			return nil, fmt.Errorf("Mail returned %s for %s object reference", ref.Kind, class)
 		}
 	}
@@ -44,7 +44,7 @@ func (n *nativeMail) account(name string) (appleevents.Value, error) {
 		return appleevents.Value{}, fmt.Errorf("account name is ambiguous: %s", name)
 	}
 	ref := value.Items[0]
-	if ref.Kind != "object" && ref.Kind != "opaque" {
+	if !nativeReference(ref) {
 		return appleevents.Value{}, fmt.Errorf("Mail returned %s for account reference", ref.Kind)
 	}
 	return ref, nil
@@ -211,7 +211,7 @@ func (n *nativeMail) canonicalMailbox(candidate nativeMailboxRef, expectedAccoun
 	if err != nil {
 		return "", "", err
 	}
-	if owner.Kind != "object" && owner.Kind != "opaque" {
+	if !nativeReference(owner) {
 		return "", "", fmt.Errorf("Mail returned %s for mailbox account; expected reference", owner.Kind)
 	}
 	actualID, err := n.stringProperty("ID  ", owner)
@@ -272,10 +272,6 @@ func (n *nativeMail) message(mailbox appleevents.Value, id string) (appleevents.
 		return appleevents.Value{}, fmt.Errorf("message ID resolution mismatch: requested %s, got %d", id, actual)
 	}
 	return ref, nil
-}
-
-func (n *nativeMail) messages(mailbox appleevents.Value) ([]appleevents.Value, error) {
-	return n.collection("mssg", mailbox)
 }
 
 func (n *nativeMail) scopedMessage(account, mailbox, id string) (appleevents.Value, error) {
