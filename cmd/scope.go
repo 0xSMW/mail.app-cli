@@ -13,33 +13,21 @@ import (
 
 // accountsCached returns accounts from the on-disk cache when fresh,
 // otherwise from Mail.app, and primes the client either way.
-func accountsCached(noCache, forceRefresh bool) ([]mail.Account, error) {
-	var c *cache.Cache
-	var cacheErr error
-	if !noCache {
-		c, cacheErr = cache.New()
+func (a *application) accountsCached(noCache, forceRefresh bool) ([]mail.Account, error) {
+	accounts, source, err := loadCached("accounts", noCache, forceRefresh, false, cache.DefaultTTL, a.mailClient.GetAccountsJSON)
+	if source == "cache" {
+		a.mailClient.PrimeAccounts(accounts)
 	}
-	if !noCache && !forceRefresh && cacheErr == nil {
-		var cached []mail.Account
-		if found, err := c.Get("accounts", &cached); err == nil && found {
-			mailClient.PrimeAccounts(cached)
-			return cached, nil
-		}
-	}
-	accounts, err := mailClient.GetAccountsJSON()
 	if err != nil {
 		return nil, err
-	}
-	if !noCache && cacheErr == nil {
-		_ = c.Set("accounts", accounts)
 	}
 	return accounts, nil
 }
 
 // requireAccount returns the account in scope. With nothing configured it
 // picks the only account Mail.app has; with several it asks the user to choose.
-func requireAccount() (string, error) {
-	if name := strings.TrimSpace(resolved.Account.Value); name != "" {
+func (a *application) requireAccount() (string, error) {
+	if name := strings.TrimSpace(a.resolved.Account.Value); name != "" {
 		return name, nil
 	}
 	// Account auto-selection must reflect Mail.app right now. The disk cache is
@@ -47,8 +35,8 @@ func requireAccount() (string, error) {
 	// a command silently scoped to an account after another account is added or
 	// enabled. A new client also bypasses any in-process cache primed from that
 	// disk entry.
-	client := mail.NewClient().WithContext(mailClient.Context())
-	if err := client.SetBackend(flagBackend); err != nil {
+	client := mail.NewClient().WithContext(a.mailClient.Context())
+	if err := client.SetBackend(a.flagBackend); err != nil {
 		return "", clierr.Usage(err.Error())
 	}
 	accounts, err := client.GetAccountsJSON()
@@ -70,7 +58,7 @@ func requireAccount() (string, error) {
 	case 0:
 		return "", clierr.New(clierr.CodeUnavailable, "Mail.app has no accounts").WithHint("add an account in Mail.app, then rerun")
 	case 1:
-		resolved.Account = config.Value{Value: enabled[0], Source: "auto"}
+		a.resolved.Account = config.Value{Value: enabled[0], Source: "auto"}
 		return enabled[0], nil
 	}
 	sort.Strings(enabled)
@@ -79,8 +67,8 @@ func requireAccount() (string, error) {
 }
 
 // mailboxInScope is the mailbox to read or act on when none is named.
-func mailboxInScope() string {
-	if name := strings.TrimSpace(resolved.Mailbox.Value); name != "" {
+func (a *application) mailboxInScope() string {
+	if name := strings.TrimSpace(a.resolved.Mailbox.Value); name != "" {
 		return name
 	}
 	return "INBOX"
@@ -88,13 +76,13 @@ func mailboxInScope() string {
 
 // mailboxExplicit reports whether the user named the mailbox on the command
 // line, which is the only case a message ID is trusted to live there.
-func mailboxExplicit() bool {
-	return resolved.Mailbox.Source == config.SourceFlag
+func (a *application) mailboxExplicit() bool {
+	return a.resolved.Mailbox.Source == config.SourceFlag
 }
 
 // accountExplicit reports whether the user named the account on the command line.
-func accountExplicit() bool {
-	return resolved.Account.Source == config.SourceFlag
+func (a *application) accountExplicit() bool {
+	return a.resolved.Account.Source == config.SourceFlag
 }
 
 // messageRef is a message ID with the account and mailbox it can be reached in.
@@ -108,7 +96,7 @@ type messageRef struct {
 // locateMessages resolves IDs to accounts and mailboxes. An explicit
 // --mailbox is trusted; otherwise the Envelope Index says where each message
 // lives, and the configured scope is the fallback when the index cannot.
-func locateMessages(ids []string) ([]messageRef, []string, error) {
+func (a *application) locateMessages(ids []string) ([]messageRef, []string, error) {
 	ids = uniqueStrings(trimAll(ids))
 	if len(ids) == 0 {
 		return nil, nil, clierr.Usage("provide at least one message ID")
@@ -119,8 +107,8 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		}
 	}
 
-	if mailboxExplicit() {
-		account, err := requireAccount()
+	if a.mailboxExplicit() {
+		account, err := a.requireAccount()
 		if err != nil {
 			return nil, nil, err
 		}
@@ -128,12 +116,12 @@ func locateMessages(ids []string) ([]messageRef, []string, error) {
 		// the index can still cheaply provide the stable fallback identity used
 		// by verified moves. An unavailable or lagging index never invalidates
 		// the human's explicit account/mailbox address.
-		located, _ := mailClient.LocateMessages(ids)
-		return explicitMessageRefs(ids, account, mailboxInScope(), located), nil, nil
+		located, _ := a.mailClient.LocateMessages(ids)
+		return explicitMessageRefs(ids, account, a.mailboxInScope(), located), nil, nil
 	}
 
-	located, err := mailClient.LocateMessages(ids)
-	return resolveLocatedMessages(ids, located, err)
+	located, err := a.mailClient.LocateMessages(ids)
+	return a.resolveLocatedMessages(ids, located, err)
 }
 
 func explicitMessageRefs(ids []string, account, mailbox string, located map[string]mail.MessageLocation) []messageRef {
@@ -153,10 +141,10 @@ func explicitMessageRefs(ids []string, account, mailbox string, located map[stri
 // lookup is authoritative: an absent ID must not be guessed into a configured
 // scope, because that can mutate an unrelated message. Scope fallback is only
 // safe when the index itself was unavailable.
-func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocation, indexErr error) ([]messageRef, []string, error) {
+func (a *application) resolveLocatedMessages(ids []string, located map[string]mail.MessageLocation, indexErr error) ([]messageRef, []string, error) {
 	var notices []string
 	if indexErr != nil {
-		notices = append(notices, fmt.Sprintf("Envelope Index unavailable (%v); assuming %s", indexErr, describeScope()))
+		notices = append(notices, fmt.Sprintf("Envelope Index unavailable (%v); assuming %s", indexErr, a.describeScope()))
 		located = map[string]mail.MessageLocation{}
 	}
 
@@ -164,8 +152,8 @@ func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocatio
 	var missing []string
 	for _, id := range ids {
 		if location, ok := located[id]; ok {
-			if configured := resolved.Account.Value; configured != "" && !strings.EqualFold(location.Account, configured) {
-				if accountExplicit() {
+			if configured := a.resolved.Account.Value; configured != "" && !strings.EqualFold(location.Account, configured) {
+				if a.accountExplicit() {
 					return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message %s is in account %q, not %q", id, location.Account, configured))
 				}
 				notices = append(notices, fmt.Sprintf("message %s is in account %q, not the configured %q", id, location.Account, configured))
@@ -181,23 +169,23 @@ func resolveLocatedMessages(ids []string, located map[string]mail.MessageLocatio
 			return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message not found in the Envelope Index: %s", strings.Join(missing, ", "))).
 				WithHint("pass --account and --mailbox to address a message the index has not seen yet")
 		}
-		account, accountErr := requireAccount()
+		account, accountErr := a.requireAccount()
 		if accountErr != nil {
 			return nil, nil, accountErr
 		}
 		for _, id := range missing {
-			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: mailboxInScope()})
+			refs = append(refs, messageRef{ID: id, Account: account, Mailbox: a.mailboxInScope()})
 		}
 	}
 	return refs, notices, nil
 }
 
-func describeScope() string {
-	account := strings.TrimSpace(resolved.Account.Value)
+func (a *application) describeScope() string {
+	account := strings.TrimSpace(a.resolved.Account.Value)
 	if account == "" {
 		account = "<account>"
 	}
-	return account + "/" + mailboxInScope()
+	return account + "/" + a.mailboxInScope()
 }
 
 func isNumericID(id string) bool {
