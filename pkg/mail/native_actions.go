@@ -118,8 +118,7 @@ func (n *nativeMail) attachments(ref appleevents.Value) ([]Attachment, []appleev
 		}
 		mime, err := n.stringProperty("attp", attachment)
 		if err != nil {
-			var ae *appleevents.Error
-			if !errors.As(err, &ae) || (ae.Code != -1728 && ae.Code != -1708) {
+			if !nativeOptionalProperty(err) {
 				return nil, nil, err
 			}
 			mime = "unknown"
@@ -177,25 +176,14 @@ func (c *Client) nativeSaveAttachment(account, mailbox, id, name string, index i
 	if index < -1 {
 		return fmt.Errorf("invalid attachment index: %d", index)
 	}
-	if index >= 0 {
-		// Cached listing and saving share one MIME traversal and verify the
-		// expected filename before publishing the exact indexed payload.
-		if _, handled, err := c.saveAttachmentFromDiskSelection(account, mailbox, id, name, index, path); err != nil {
-			if !isEnvelopeIndexUnavailable(err) {
-				return err
-			}
-		} else if handled {
-			return nil
+	// Cached listing and saving share one MIME traversal and verify the
+	// expected filename before publishing the exact selected payload.
+	if _, handled, err := c.saveLocalAttachment(account, mailbox, id, name, index, path); err != nil {
+		if !isEnvelopeIndexUnavailable(err) {
+			return err
 		}
-
-	} else {
-		if _, handled, err := c.saveAttachmentFromDisk(account, mailbox, id, name, path); err != nil {
-			if !isEnvelopeIndexUnavailable(err) {
-				return err
-			}
-		} else if handled {
-			return nil
-		}
+	} else if handled {
+		return nil
 	}
 	return c.withNativeAutomation(defaultAutomationTimeout, func(n *nativeMail) error {
 		ref, err := n.scopedMessage(account, mailbox, id)
