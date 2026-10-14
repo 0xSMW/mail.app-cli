@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
@@ -135,14 +134,9 @@ for (let i = 0; i < accounts.length; i++) {
 
 JSON.stringify(result);
 `
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var accounts []Account
-	if err := json.Unmarshal([]byte(output), &accounts); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "accounts", &accounts); err != nil {
+		return nil, err
 	}
 
 	c.shared.accountsMu.Lock()
