@@ -10,35 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var vipLimit int
-
 type vipMailboxRequest = mail.MailboxListRequest
-
-var messagesVIPCmd = &cobra.Command{
-	Use:   "vip",
-	Short: "List messages from VIP mailboxes when Mail.app exposes them",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		account := strings.TrimSpace(resolved.Account.Value)
-		mailboxes, err := mailClient.GetMailboxesJSON(account)
-		if err != nil {
-			return err
-		}
-		requests := vipMailboxRequests(mailboxes, account, vipLimit)
-		if len(requests) == 0 {
-			return clierr.New(clierr.CodeNotFound, "no VIP mailbox exposed by Mail.app")
-		}
-		messages, err := mailClient.GetMessagesFromMultipleMailboxes(requests)
-		if err != nil {
-			return err
-		}
-		messages = sortAndSliceMessages(messages, 0, vipLimit)
-		return writer.Write(output.Result{
-			Data:    messages,
-			Summary: plural(len(messages), "VIP message"),
-			Plain:   renderMessages(messages, true),
-		})
-	},
-}
 
 // vipMailboxRequests keeps the unscoped view across all accounts while
 // defending an explicitly scoped request from a mailbox response that includes
@@ -78,6 +50,34 @@ func sortAndSliceMessages(messages []mail.Message, offset, limit int) []mail.Mes
 	return messages
 }
 
-func init() {
-	messagesVIPCmd.Flags().IntVarP(&vipLimit, "limit", "l", 25, "Maximum messages")
+func (a *application) buildVIPCommand() {
+	var vipLimit int
+
+	a.messagesVIPCmd = &cobra.Command{
+		Use:   "vip",
+		Short: "List messages from VIP mailboxes when Mail.app exposes them",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			account := strings.TrimSpace(a.resolved.Account.Value)
+			mailboxes, err := a.mailClient.GetMailboxesJSON(account)
+			if err != nil {
+				return err
+			}
+			requests := vipMailboxRequests(mailboxes, account, vipLimit)
+			if len(requests) == 0 {
+				return clierr.New(clierr.CodeNotFound, "no VIP mailbox exposed by Mail.app")
+			}
+			messages, err := a.mailClient.GetMessagesFromMultipleMailboxes(requests)
+			if err != nil {
+				return err
+			}
+			messages = sortAndSliceMessages(messages, 0, vipLimit)
+			return a.writer.Write(output.Result{
+				Data:    messages,
+				Summary: plural(len(messages), "VIP message"),
+				Plain:   renderMessages(messages, true),
+			})
+		},
+	}
+
+	a.messagesVIPCmd.Flags().IntVarP(&vipLimit, "limit", "l", 25, "Maximum messages")
 }
