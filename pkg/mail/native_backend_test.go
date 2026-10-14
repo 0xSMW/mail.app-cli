@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
 	"testing"
 	"time"
@@ -67,5 +68,32 @@ func TestNativeContentRequestMeasurement(t *testing.T) {
 	}
 	if requestsNativeContent(appleevents.Property("raso", appleevents.Null())) || requestsNativeContent(appleevents.String("ctnt")) {
 		t.Fatal("non-rendering source request counted as content")
+	}
+}
+
+func TestNativeReadPropertyListFallbackKeepsNarrowErrorPolicy(t *testing.T) {
+	for _, code := range []int{-1708, -1700, -10000, -1728, -1743} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			failure := &appleevents.Error{Code: code, Message: "property list refused"}
+			calls := 0
+			n := &nativeMail{ctx: context.Background(), sender: func(_ context.Context, event appleevents.Event) (appleevents.Value, appleevents.Stats, error) {
+				calls++
+				if event.Params["----"].Kind == "list" {
+					return appleevents.Value{}, appleevents.Stats{}, failure
+				}
+				return appleevents.String("value"), appleevents.Stats{}, nil
+			}}
+			fields, err := n.getFields(appleevents.Null(), "pnam", "subj")
+			if code == -1708 || code == -1700 {
+				if err != nil || calls != 3 || fields["pnam"].Text != "value" || fields["subj"].Text != "value" {
+					t.Fatalf("supported split failed: fields=%v calls=%d error=%v", fields, calls, err)
+				}
+				if _, err := n.getFields(appleevents.Null(), "pnam"); err != nil || calls != 4 {
+					t.Fatalf("split mode replayed property list: calls=%d error=%v", calls, err)
+				}
+			} else if !errors.Is(err, failure) || calls != 1 || n.splitProperties {
+				t.Fatalf("unsupported fallback broadened: calls=%d split=%v error=%v", calls, n.splitProperties, err)
+			}
+		})
 	}
 }
