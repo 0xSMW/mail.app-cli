@@ -1,12 +1,11 @@
 package mail
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,19 +15,6 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// All object references are returned by Mail or scoped to a known container.
-func outgoingList(v ae.Value, label string) ([]ae.Value, error) {
-	if v.Kind != "list" {
-		return nil, fmt.Errorf("%s unavailable", label)
-	}
-	return v.Items, nil
-}
-func outgoingString(v ae.Value, label string) (string, error) {
-	if v.Kind != "string" {
-		return "", fmt.Errorf("%s unavailable", label)
-	}
-	return v.Text, nil
-}
 func outgoingID(v ae.Value) string {
 	if v.Kind == "int" {
 		return strconv.FormatInt(v.Number, 10)
@@ -40,75 +26,44 @@ func (n *nativeMail) outgoingAccounts() ([]ae.Value, error) {
 	if e != nil {
 		return nil, e
 	}
-	return outgoingList(v, "accounts")
+	return nativeList(v, "accounts")
 }
 
 // Sender guards read only their four required public columns. IDs are read
 // before and after the projection so an account reorder cannot associate an
 // address with a different account. Each guard performs its own fresh read.
 func (n *nativeMail) outgoingSender(input OutgoingInput) (ae.Value, string, string, error) {
-	allRef := ae.All("mact", ae.Null())
-	codes := []string{"ID  ", "pnam", "isac", "emad"}
-	columns := make(map[string][]ae.Value, len(codes))
-	for _, code := range codes {
-		value, e := n.get(ae.Property(code, allRef))
-		if e != nil {
-			return ae.Value{}, "", "", e
-		}
-		items, e := outgoingList(value, "account "+code+" column")
-		if e != nil {
-			return ae.Value{}, "", "", e
-		}
-		columns[code] = items
-	}
-	ids := columns["ID  "]
-	for _, code := range codes {
-		if len(columns[code]) != len(ids) {
-			return ae.Value{}, "", "", fmt.Errorf("account %s column length differs", code)
-		}
-	}
-	final, e := n.get(ae.Property("ID  ", allRef))
+	projection, e := n.projectAccounts(nativeSenderAccounts, "ID  ", "pnam", "isac", "emad")
 	if e != nil {
 		return ae.Value{}, "", "", e
 	}
-	finalIDs, e := outgoingList(final, "final account IDs")
-	if e != nil || len(finalIDs) != len(ids) {
-		return ae.Value{}, "", "", fmt.Errorf("account collection changed during sender resolution")
-	}
-	all := make([]map[string]ae.Value, len(ids))
-	seenIDs := make(map[string]bool, len(ids))
+	return selectOutgoingSender(projection, input)
+}
+
+// Selection and ownership validation operate only on this fresh observation.
+func selectOutgoingSender(projection *nativeAccountProjection, input OutgoingInput) (ae.Value, string, string, error) {
+	all := make([]map[string]ae.Value, len(projection.finalIDs))
+	seen := make(map[string]bool, len(projection.finalIDs))
 	var fields map[string]ae.Value
 	matches := 0
-	for i, value := range ids {
-		id, e := outgoingString(value, "account ID")
-		if e != nil || id == "" {
-			return ae.Value{}, "", "", fmt.Errorf("account ID ownership unavailable")
+	for i := range projection.finalIDs {
+		row, e := projection.row(i, seen)
+		if e != nil {
+			return ae.Value{}, "", "", e
 		}
-		current, e := outgoingString(finalIDs[i], "final account ID")
-		if e != nil || current != id {
-			return ae.Value{}, "", "", fmt.Errorf("account collection changed during sender resolution")
-		}
-		if seenIDs[id] {
-			return ae.Value{}, "", "", fmt.Errorf("account ID must resolve uniquely")
-		}
-		seenIDs[id] = true
-		row := map[string]ae.Value{}
-		for _, code := range codes {
-			row[code] = columns[code][i]
-		}
-		name, e := outgoingString(row["pnam"], "account name")
+		name, e := nativeString(row["pnam"], "account name")
 		if e != nil {
 			return ae.Value{}, "", "", e
 		}
 		if row["isac"].Kind != "bool" {
 			return ae.Value{}, "", "", fmt.Errorf("account enabled state unavailable")
 		}
-		addresses, e := outgoingList(row["emad"], "account sender addresses")
+		addresses, e := nativeList(row["emad"], "account sender addresses")
 		if e != nil {
 			return ae.Value{}, "", "", e
 		}
 		for _, address := range addresses {
-			if _, e = outgoingString(address, "account sender address"); e != nil {
+			if _, e = nativeString(address, "account sender address"); e != nil {
 				return ae.Value{}, "", "", e
 			}
 		}
@@ -136,14 +91,14 @@ func (n *nativeMail) outgoingSender(input OutgoingInput) (ae.Value, string, stri
 	if requested == "" {
 		requested = addresses[0].Text
 	}
-	requested, e = draftSenderAddress(requested)
+	requested, e := draftSenderAddress(requested)
 	if e != nil {
 		return ae.Value{}, "", "", e
 	}
 	chosen := ""
 	count := 0
 	for _, v := range addresses {
-		s, e := outgoingString(v, "sender address")
+		s, e := nativeString(v, "sender address")
 		if e != nil {
 			return ae.Value{}, "", "", e
 		}
@@ -161,13 +116,13 @@ func (n *nativeMail) outgoingSender(input OutgoingInput) (ae.Value, string, stri
 	}
 	owners := 0
 	for _, f := range all {
-		list, e := outgoingList(f["emad"], "account sender ownership")
+		list, e := nativeList(f["emad"], "account sender ownership")
 		if e != nil {
 			return ae.Value{}, "", "", e
 		}
 		owned := false
 		for _, v := range list {
-			s, e := outgoingString(v, "account sender address")
+			s, e := nativeString(v, "account sender address")
 			if e != nil {
 				return ae.Value{}, "", "", e
 			}
@@ -187,26 +142,10 @@ func (n *nativeMail) outgoingSender(input OutgoingInput) (ae.Value, string, stri
 	return selected, id, chosen, nil
 }
 func (n *nativeMail) outgoingRecipients(object ae.Value, class string) ([]string, error) {
-	v, e := n.get(ae.Property("radd", ae.All(class, object)))
-	if e != nil {
-		return nil, e
-	}
-	list, e := outgoingList(v, "recipients")
-	if e != nil {
-		return nil, e
-	}
-	out := make([]string, 0, len(list))
-	for _, item := range list {
-		s, e := outgoingString(item, "recipient address")
-		if e != nil {
-			return nil, e
-		}
-		out = append(out, s)
-	}
-	return out, nil
+	return n.recipientAddresses(object, class, false)
 }
 func outgoingEqual(a, b []string) bool {
-	return len(a) == len(b) && reflect.DeepEqual(append([]string{}, a...), append([]string{}, b...))
+	return slices.Equal(a, b)
 }
 func outgoingBodyMatches(actual, body string) bool {
 	actual = strings.ReplaceAll(actual, "\r\n", "\n")
@@ -249,7 +188,7 @@ func (n *nativeMail) outgoingVerify(object ae.Value, input OutgoingInput, id, se
 	if e != nil {
 		return e
 	}
-	value, e := outgoingString(fields["sndr"], "sender readback")
+	value, e := nativeString(fields["sndr"], "sender readback")
 	if e != nil {
 		return e
 	}
@@ -260,7 +199,7 @@ func (n *nativeMail) outgoingVerify(object ae.Value, input OutgoingInput, id, se
 	if !strings.EqualFold(value, sender) {
 		return fmt.Errorf("Mail sender readback differs from selected sender")
 	}
-	value, e = outgoingString(fields["subj"], "subject readback")
+	value, e = nativeString(fields["subj"], "subject readback")
 	if e != nil {
 		return e
 	}
@@ -268,7 +207,7 @@ func (n *nativeMail) outgoingVerify(object ae.Value, input OutgoingInput, id, se
 		return fmt.Errorf("outgoing subject differs from requested subject")
 	}
 	if checkBody {
-		value, e = outgoingString(fields["ctnt"], "body readback")
+		value, e = nativeString(fields["ctnt"], "body readback")
 		if e != nil {
 			return e
 		}
@@ -347,7 +286,7 @@ func (n *nativeMail) outgoingAttachmentNames(object ae.Value, stored bool) ([]st
 	if !stored && outgoingAttachmentPending(v) {
 		return nil, &outgoingAttachmentPendingError{kind: v.Kind, code: v.Code}
 	}
-	list, e := outgoingList(v, "attachment names")
+	list, e := nativeList(v, "attachment names")
 	if e != nil {
 		return nil, e
 	}
@@ -355,7 +294,7 @@ func (n *nativeMail) outgoingAttachmentNames(object ae.Value, stored bool) ([]st
 	for _, v := range list {
 		var name string
 		if stored {
-			name, e = outgoingString(v, "attachment name")
+			name, e = nativeString(v, "attachment name")
 			name = norm.NFC.String(name)
 		} else {
 			name, e = outgoingAttachmentName(v)
@@ -451,253 +390,54 @@ func (c *Client) composeNativeOutgoing(input OutgoingInput, action string) (*Out
 	return c.composeNativeOutgoingOwned(input, action, nil)
 }
 
-// A factory returns a newly created outgoing descriptor, transferring ownership
-// before field replacement, verification, or cleanup can fail.
-func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, create func(*nativeMail, OutgoingInput, string, string) (ae.Value, error)) (*OutgoingResult, error) {
-	result := &OutgoingResult{Account: input.Account}
-	var owned ae.Value
-	attempted, saved := false, false
-	step := "account_resolution"
-	cleanup := ""
+// A factory transfers the newly created descriptor before replacement can fail.
+func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, create outgoingFactory) (*OutgoingResult, error) {
+	r := &nativeOutgoingRun{input: input, action: action, create: create, result: &OutgoingResult{Account: input.Account}, step: "account_resolution", before: map[string]bool{}}
 	err := c.withNativeAutomation(0, func(n *nativeMail) (err error) {
-		defer func() {
-			if err != nil && (owned.Kind == "object" || owned.Kind == "opaque") && !attempted {
-				ctx, cancel := context.WithTimeout(context.WithoutCancel(n.ctx), 5*time.Second)
-				defer cancel()
-				clean := *n
-				clean.ctx = ctx
-				_, ce := clean.command("core", "clos", map[string]ae.Value{"----": owned, "savo": ae.Enum("no  ")})
-				if ce != nil {
-					cleanup = ce.Error()
-				}
-			}
-		}()
+		r.n = n
+		defer func() { r.cleanupOwned(err) }()
 		var account ae.Value
 		err = n.phase("outgoing_resolve", func() error {
 			var e error
-			account, result.AccountID, result.Sender, e = n.outgoingSender(input)
+			account, r.result.AccountID, r.result.Sender, e = n.outgoingSender(input)
 			return e
 		})
 		if err != nil {
 			return err
 		}
 		if action == "preview" {
-			result.Status = "preview"
+			r.result.Status = "preview"
 			return nil
 		}
-		// Mail's rich-text view adds a space to a final unterminated
-		// paragraph. Supply its terminator explicitly before composition,
-		// then retain exact readback checks without trimming user whitespace.
-		body := input.Body
-		if !strings.HasSuffix(body, "\n") {
-			body += "\n"
+		// Explicitly terminate Mail's final rich-text paragraph without trimming.
+		r.body = input.Body
+		if !strings.HasSuffix(r.body, "\n") {
+			r.body += "\n"
 		}
-		var box ae.Value
-		before := map[string]bool{}
 		if action == "save" {
-			step = "draft_resolution"
-			box, err = n.outgoingDraftMailbox(account)
-			if err != nil {
+			r.step = "draft_resolution"
+			if err = r.draftBaseline(account); err != nil {
 				return err
 			}
-			v, e := n.get(ae.Property("ID  ", ae.All("mssg", box)))
-			if e != nil {
-				return e
-			}
-			ids, e := outgoingList(v, "draft IDs")
-			if e != nil {
-				return e
-			}
-			for _, id := range ids {
-				if id.Kind != "int" || id.Number <= 0 {
-					return fmt.Errorf("draft baseline ID unavailable")
-				}
-				key := outgoingID(id)
-				if before[key] {
-					return fmt.Errorf("draft baseline ID is ambiguous")
-				}
-				before[key] = true
-			}
 		}
-		step = "compose"
-		err = n.phase("outgoing_compose", func() error {
-			var e error
-			if create == nil {
-				owned, e = n.command("core", "crel", map[string]ae.Value{"kocl": ae.TypeCode("bcke"), "prdt": ae.Record(map[string]ae.Value{"subj": ae.String(input.Subject), "ctnt": ae.String(body), "sndr": ae.String(result.Sender), "pvis": ae.Bool(false)})})
-			} else {
-				owned, e = create(n, input, result.Sender, body)
-			}
-			if e != nil {
-				var transport *ae.Error
-				if errors.As(e, &transport) && transport.Attempted && (create == nil || n.phaseName == "threaded_create") && owned.Kind != "object" && owned.Kind != "opaque" {
-					cleanup = "outgoing creation may have completed; owned object descriptor unavailable"
-				}
-				return e
-			}
-			if owned.Kind != "object" && owned.Kind != "opaque" {
-				cleanup = "outgoing creation receipt did not identify an owned object"
-				return fmt.Errorf("Mail did not return an owned outgoing object")
-			}
-			if create != nil {
-				for code, value := range map[string]ae.Value{"subj": ae.String(input.Subject), "ctnt": ae.String(body), "pvis": ae.Bool(false)} {
-					if e = n.set(ae.Property(code, owned), value); e != nil {
-						return e
-					}
-				}
-				for _, class := range []string{"trcp", "crcp", "brcp"} {
-					v, e := n.get(ae.All(class, owned))
-					if e != nil {
-						return e
-					}
-					refs, e := outgoingList(v, "inherited recipients")
-					if e != nil {
-						return e
-					}
-					for _, ref := range refs {
-						if _, e = n.command("core", "delo", map[string]ae.Value{"----": ref}); e != nil {
-							return e
-						}
-					}
-				}
-			}
-			if e = n.set(ae.Property("sndr", owned), ae.String(result.Sender)); e != nil {
-				return e
-			}
-			for i, class := range []string{"trcp", "crcp", "brcp"} {
-				for _, address := range [][]string{input.To, input.Cc, input.Bcc}[i] {
-					_, e = n.command("core", "crel", map[string]ae.Value{"kocl": ae.TypeCode(class), "insh": owned, "prdt": ae.Record(map[string]ae.Value{"radd": ae.String(address)})})
-					if e != nil {
-						return e
-					}
-				}
-			}
-			step = "recipient_verification"
-			if e = n.outgoingVerify(owned, input, result.AccountID, result.Sender, body, true); e != nil {
-				return e
-			}
-			step = "attachments"
-			if e = n.outgoingAttach(owned, input.Attachments); e != nil {
-				return e
-			}
-			if create != nil && len(input.Attachments) == 0 {
-				count, e := n.outgoingAttachmentCount(owned)
-				if e != nil {
-					return e
-				}
-				if count != 0 {
-					return fmt.Errorf("outgoing contains unrequested inherited attachments")
-				}
-			}
-			step = "sender_verification"
-			return n.outgoingVerify(owned, input, result.AccountID, result.Sender, body, len(input.Attachments) == 0)
-		})
-		if err != nil {
+		r.step = "compose"
+		if err = n.phase("outgoing_compose", r.compose); err != nil {
 			return err
 		}
-		step = action
-		if action == "send" {
-			return n.phase("outgoing_send", func() error {
-				if e := n.ctx.Err(); e != nil {
-					return e
-				}
-				attempted = true
-				v, e := n.command("emsg", "send", map[string]ae.Value{"----": owned})
-				if e != nil {
-					return e
-				}
-				if v.Kind != "bool" || !v.Boolean {
-					return fmt.Errorf("Mail did not accept send (expected true)")
-				}
-				result.Submitted = true
-				result.Status = "submitted"
-				return nil
-			})
-		}
-		err = n.phase("outgoing_save", func() error {
-			if e := n.ctx.Err(); e != nil {
-				return e
-			}
-			attempted = true
-			if _, e := n.command("core", "save", map[string]ae.Value{"----": owned}); e != nil {
-				return e
-			}
-			saved = true
-			_, e := n.command("core", "clos", map[string]ae.Value{"----": owned, "savo": ae.Enum("yes ")})
-			return e
-		})
-		if err != nil {
+		r.step = action
+		if err = r.dispatch(); err != nil || action == "send" {
 			return err
 		}
-		step = "save_verification"
-		for i := 0; i < 80; i++ {
-			// Read IDs together so polling never reads every preexisting draft.
-			// Only new account-scoped IDs receive the strict fingerprint read.
-			v, e := n.get(ae.Property("ID  ", ae.All("mssg", box)))
-			if e != nil {
-				return e
-			}
-			ids, e := outgoingList(v, "saved draft IDs")
-			if e != nil {
-				return e
-			}
-			var candidates []*Message
-			seen := map[string]bool{}
-			for _, id := range ids {
-				if id.Kind != "int" || id.Number <= 0 {
-					return fmt.Errorf("saved draft ID unavailable")
-				}
-				key := outgoingID(id)
-				if seen[key] {
-					return fmt.Errorf("saved draft ID is ambiguous")
-				}
-				seen[key] = true
-				if before[key] {
-					continue
-				}
-				ref := ae.ByID("mssg", id, box)
-				m, e := n.outgoingSnapshotMessage(ref, input.Account, box)
-				if e != nil {
-					if nativeMissing(e) {
-						continue
-					}
-					return e
-				}
-				if m.ID != key {
-					return fmt.Errorf("saved draft ID readback mismatch")
-				}
-				names, e := n.outgoingAttachmentNames(ref, true)
-				if e != nil {
-					return e
-				}
-				sender, e := draftSenderAddress(m.Sender)
-				if e != nil {
-					continue
-				}
-				if m.Subject == input.Subject && outgoingBodyMatches(m.Content, body) && strings.EqualFold(sender, result.Sender) && outgoingEqual(m.ToRecipients, input.To) && outgoingEqual(m.CcRecipients, input.Cc) && outgoingEqual(m.BccRecipients, input.Bcc) && outgoingEqual(names, outgoingExpectedNames(input.Attachments)) {
-					candidates = append(candidates, m)
-				}
-			}
-			if len(candidates) > 1 {
-				return fmt.Errorf("saved draft identity is ambiguous")
-			}
-			if len(candidates) == 1 {
-				result.Draft = candidates[0]
-				result.Status = "saved"
-				return nil
-			}
-			if e = n.outgoingPause(); e != nil {
-				return e
-			}
-		}
-		return fmt.Errorf("saved draft could not be verified in target account Drafts")
+		r.step = "save_verification"
+		return r.verifySavedDraft()
 	})
 	if err != nil {
-		return result, &MutationError{Operation: action, Phase: step, Account: input.Account, Sender: result.Sender, Cause: err, Attempted: attempted, Uncertain: attempted && !result.Submitted, Submitted: result.Submitted, Saved: saved, Cleanup: cleanup}
+		return r.result, &MutationError{Operation: action, Phase: r.step, Account: input.Account, Sender: r.result.Sender, Cause: err, Attempted: r.attempted, Uncertain: r.attempted && !r.result.Submitted, Submitted: r.result.Submitted, Saved: r.saved, Cleanup: r.cleanup}
 	}
 	if action == "save" && len(input.Attachments) > 0 {
-		if err := c.verifyDraftAttachments(result.Draft, input.Attachments); err != nil {
-			return result, &MutationError{Operation: action, Phase: "attachment_verification", Account: input.Account, Sender: result.Sender, Cause: err, Attempted: true, Saved: true, Uncertain: true}
+		if err := c.verifyDraftAttachments(r.result.Draft, input.Attachments); err != nil {
+			return r.result, &MutationError{Operation: action, Phase: "attachment_verification", Account: input.Account, Sender: r.result.Sender, Cause: err, Attempted: true, Saved: true, Uncertain: true}
 		}
 	}
-	return result, nil
+	return r.result, nil
 }
