@@ -38,115 +38,8 @@ type savedAttachment struct {
 	Error     string `json:"error,omitempty"`
 }
 
-var (
-	exportFormat  string
-	exportOutput  string
-	exportLimit   int
-	exportOffset  int
-	exportSince   string
-	exportUnread  bool
-	exportFlagged bool
-)
-
-var exportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export messages and attachments",
-}
-
-var exportMessagesCmd = &cobra.Command{
-	Use:   "messages",
-	Short: "Export messages with bodies as JSON",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		account, err := requireAccount()
-		if err != nil {
-			return err
-		}
-		mailbox := mailboxInScope()
-		if exportFormat != "json" {
-			return clierr.Usage("export messages supports --format json only; Mail.app's scripting layer does not expose raw eml/mbox")
-		}
-		messages, err := mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, true, exportSince)
-		if err != nil {
-			return fmt.Errorf("export messages: %w", err)
-		}
-		payload := messageExport{
-			Metadata: exportMetadata{
-				Account: account, Mailbox: mailbox, Format: exportFormat, ExportedAt: time.Now().UTC(),
-				Limit: exportLimit, Offset: exportOffset, Since: exportSince, UnreadOnly: exportUnread, FlaggedOnly: exportFlagged,
-			},
-			Messages: messages,
-		}
-		if exportMessagesWritesFile() {
-			if err := writeJSONFile(exportOutput, payload); err != nil {
-				return err
-			}
-			return writer.Write(output.Result{
-				Data:    map[string]any{"path": exportOutput, "messages": len(messages), "account": account, "mailbox": mailbox},
-				Summary: fmt.Sprintf("Exported %s to %s", plural(len(messages), "message"), exportOutput),
-				Plain:   renderLine("Exported %s to %s", plural(len(messages), "message"), exportOutput),
-			})
-		}
-		return writer.Write(output.Result{
-			Data:    payload,
-			Summary: fmt.Sprintf("Exported %s from %s/%s", plural(len(messages), "message"), account, mailbox),
-			Plain:   renderMessages(messages, false),
-		})
-	},
-}
-
-func exportMessagesWritesFile() bool {
-	return exportOutput != "" && exportOutput != "-"
-}
-
-var exportAttachmentsCmd = &cobra.Command{
-	Use:   "attachments",
-	Short: "Save every attachment from selected messages into a directory",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		account, err := requireAccount()
-		if err != nil {
-			return err
-		}
-		mailbox := mailboxInScope()
-		if exportOutput == "" || exportOutput == "-" {
-			return clierr.Usage("--output directory is required")
-		}
-		if err := os.MkdirAll(exportOutput, 0o755); err != nil {
-			return err
-		}
-		messages, err := mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, false, exportSince)
-		if err != nil {
-			return fmt.Errorf("select messages: %w", err)
-		}
-		saved := []savedAttachment{}
-		failed := 0
-		used := map[string]int{}
-		for _, message := range messages {
-			attachments, err := mailClient.GetAttachmentsJSON(account, mailbox, message.ID)
-			if err != nil {
-				saved = append(saved, savedAttachment{MessageID: message.ID, Status: "failed", Error: err.Error()})
-				failed++
-				continue
-			}
-			for _, attachment := range attachments {
-				name := deterministicAttachmentName(message, attachment.Name, used)
-				path := filepath.Join(exportOutput, name)
-				item := savedAttachment{MessageID: message.ID, Name: attachment.Name, Path: path}
-				if err := mailClient.SaveAttachmentByIndex(account, mailbox, message.ID, attachment.Name, attachment.Index, path); err != nil {
-					item.Status = "failed"
-					item.Error = err.Error()
-					failed++
-				} else {
-					item.Status = "succeeded"
-				}
-				saved = append(saved, item)
-			}
-		}
-		rows := make([][]string, 0, len(saved))
-		for _, item := range saved {
-			rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
-		}
-		return writer.Write(attachmentExportResult(saved, exportOutput, failed, rows))
-	},
+func (a *application) exportMessagesWritesFile() bool {
+	return a.exportOutput != "" && a.exportOutput != "-"
 }
 
 func attachmentExportResult(saved []savedAttachment, exportOutput string, failed int, rows [][]string) output.Result {
@@ -208,15 +101,119 @@ func sanitizeFilename(value string) string {
 	return b.String()
 }
 
-func init() {
-	exportCmd.AddCommand(exportMessagesCmd, exportAttachmentsCmd)
-	for _, cmd := range []*cobra.Command{exportMessagesCmd, exportAttachmentsCmd} {
-		cmd.Flags().StringVar(&exportOutput, "output", "-", "Output file (messages) or directory (attachments)")
+func (a *application) buildExportCommands() {
+	var (
+		exportFormat  string
+		exportLimit   int
+		exportOffset  int
+		exportUnread  bool
+		exportFlagged bool
+		exportSince   string
+	)
+
+	a.exportCmd = &cobra.Command{
+		Use:   "export",
+		Short: "Export messages and attachments",
+	}
+	a.exportMessagesCmd = &cobra.Command{
+		Use:   "messages",
+		Short: "Export messages with bodies as JSON",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			account, err := a.requireAccount()
+			if err != nil {
+				return err
+			}
+			mailbox := a.mailboxInScope()
+			if exportFormat != "json" {
+				return clierr.Usage("export messages supports --format json only; Mail.app's scripting layer does not expose raw eml/mbox")
+			}
+			messages, err := a.mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, true, exportSince)
+			if err != nil {
+				return fmt.Errorf("export messages: %w", err)
+			}
+			payload := messageExport{
+				Metadata: exportMetadata{
+					Account: account, Mailbox: mailbox, Format: exportFormat, ExportedAt: time.Now().UTC(),
+					Limit: exportLimit, Offset: exportOffset, Since: exportSince, UnreadOnly: exportUnread, FlaggedOnly: exportFlagged,
+				},
+				Messages: messages,
+			}
+			if a.exportMessagesWritesFile() {
+				if err := writeJSONFile(a.exportOutput, payload); err != nil {
+					return err
+				}
+				return a.writer.Write(output.Result{
+					Data:    map[string]any{"path": a.exportOutput, "messages": len(messages), "account": account, "mailbox": mailbox},
+					Summary: fmt.Sprintf("Exported %s to %s", plural(len(messages), "message"), a.exportOutput),
+					Plain:   renderLine("Exported %s to %s", plural(len(messages), "message"), a.exportOutput),
+				})
+			}
+			return a.writer.Write(output.Result{
+				Data:    payload,
+				Summary: fmt.Sprintf("Exported %s from %s/%s", plural(len(messages), "message"), account, mailbox),
+				Plain:   renderMessages(messages, false),
+			})
+		},
+	}
+	a.exportAttachmentsCmd = &cobra.Command{
+		Use:   "attachments",
+		Short: "Save every attachment from selected messages into a directory",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			account, err := a.requireAccount()
+			if err != nil {
+				return err
+			}
+			mailbox := a.mailboxInScope()
+			if a.exportOutput == "" || a.exportOutput == "-" {
+				return clierr.Usage("--output directory is required")
+			}
+			if err := os.MkdirAll(a.exportOutput, 0o755); err != nil {
+				return err
+			}
+			messages, err := a.mailClient.GetMessagesJSON(account, mailbox, exportLimit, exportOffset, exportUnread, exportFlagged, false, exportSince)
+			if err != nil {
+				return fmt.Errorf("select messages: %w", err)
+			}
+			saved := []savedAttachment{}
+			failed := 0
+			used := map[string]int{}
+			for _, message := range messages {
+				attachments, err := a.mailClient.GetAttachmentsJSON(account, mailbox, message.ID)
+				if err != nil {
+					saved = append(saved, savedAttachment{MessageID: message.ID, Status: "failed", Error: err.Error()})
+					failed++
+					continue
+				}
+				for _, attachment := range attachments {
+					name := deterministicAttachmentName(message, attachment.Name, used)
+					path := filepath.Join(a.exportOutput, name)
+					item := savedAttachment{MessageID: message.ID, Name: attachment.Name, Path: path}
+					if err := a.mailClient.SaveAttachmentByIndex(account, mailbox, message.ID, attachment.Name, attachment.Index, path); err != nil {
+						item.Status = "failed"
+						item.Error = err.Error()
+						failed++
+					} else {
+						item.Status = "succeeded"
+					}
+					saved = append(saved, item)
+				}
+			}
+			rows := make([][]string, 0, len(saved))
+			for _, item := range saved {
+				rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
+			}
+			return a.writer.Write(attachmentExportResult(saved, a.exportOutput, failed, rows))
+		},
+	}
+
+	a.exportCmd.AddCommand(a.exportMessagesCmd, a.exportAttachmentsCmd)
+	for _, cmd := range []*cobra.Command{a.exportMessagesCmd, a.exportAttachmentsCmd} {
+		cmd.Flags().StringVar(&a.exportOutput, "output", "-", "Output file (messages) or directory (attachments)")
 		cmd.Flags().IntVarP(&exportLimit, "limit", "l", 100, "Maximum messages to export")
 		cmd.Flags().IntVarP(&exportOffset, "offset", "o", 0, "Messages to skip")
 		cmd.Flags().StringVar(&exportSince, "since", "", "Only messages since date")
 		cmd.Flags().BoolVar(&exportUnread, "unread", false, "Only unread messages")
 		cmd.Flags().BoolVar(&exportFlagged, "flagged", false, "Only flagged messages")
 	}
-	exportMessagesCmd.Flags().StringVar(&exportFormat, "format", "json", "Export format: json")
+	a.exportMessagesCmd.Flags().StringVar(&exportFormat, "format", "json", "Export format: json")
 }
