@@ -21,30 +21,28 @@ func (c *Client) GetMessagesJSON(accountName, mailboxName string, limit, offset 
 		return c.enrichMessagesWithContent(accountName, mailboxName, messages), nil
 	}
 
-	if !withContent {
-		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
+	if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
+		return nil, err
+	} else if ok {
+		messages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
+		if err != nil {
+			if isEnvelopeIndexUnavailable(err) {
+				c.warnEnvelopeIndexFallback(err)
+				return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, since)
+			}
 			return nil, err
-		} else if ok {
-			messages, err := c.getMessagesFromIndex(accountName, mbox, limit, offset, unreadOnly, flaggedOnly, since)
-			if err != nil {
-				if isEnvelopeIndexUnavailable(err) {
-					c.warnEnvelopeIndexFallback(err)
-					return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
-				}
-				return nil, err
-			}
-			if len(messages) > 0 || mbox.TotalCount == 0 || unreadOnly || flaggedOnly || strings.TrimSpace(since) != "" {
-				return messages, nil
-			}
+		}
+		if len(messages) > 0 || mbox.TotalCount == 0 || unreadOnly || flaggedOnly || strings.TrimSpace(since) != "" {
+			return messages, nil
 		}
 	}
 
-	return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+	return c.getMessagesJSONFromJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, since)
 }
 
-func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
 	if c.nativeEnabled() {
-		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, false, since)
 	}
 	// Build filter/offset/limit clauses using index-based approach.
 	// Bulk property accessors (mbox.messages.readStatus()) fetch all values in a
@@ -79,12 +77,6 @@ func (c *Client) getMessagesJSONFromJXA(accountName, mailboxName string, limit, 
 		limitClause = fmt.Sprintf("if (indices.length > %d) indices = indices.slice(0, %d);", limit, limit)
 	}
 
-	contentFetch := "const content = '';"
-	contentField := "content: content,"
-	if withContent {
-		contentFetch = "let content = ''; try { content = msg.content() || ''; } catch(e) {}"
-	}
-
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -113,19 +105,8 @@ try {
 		const msg = messages[i];
 		try { if (msg.deletedStatus()) continue; } catch(e) {}
 		try {
-			%s
 			result.push({
-				id: String(msg.id()),
-				subject: msg.subject() || '',
-				sender: msg.sender() || '',
-				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-				dateSent: (msg.dateSent() || new Date()).toISOString(),
-				read: msg.readStatus(),
-				flagged: msg.flaggedStatus(),
-				messageSize: 0,
 				%s
-				mailbox: mboxName,
-				account: accName
 			});
 		} catch (e) {
 			// Skip messages that cause errors
@@ -136,18 +117,13 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, contentFetch, contentField)
-
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), unreadFilter, flaggedFilter, sinceFilter, offsetClause, limitClause, jxaMessageProjection{ID: "String(msg.id())", Size: "0", Mailbox: "mboxName", Account: "accName", Content: "content: '',"}.fields())
 
 	var messages []Message
-	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse messages JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "messages", &messages); err != nil {
+		return nil, err
 	}
-	if len(messages) == 0 && isArchiveAlias(mailboxName) && !withContent {
+	if len(messages) == 0 && isArchiveAlias(mailboxName) {
 		if mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName); err != nil {
 			return nil, err
 		} else if ok {
@@ -163,29 +139,19 @@ JSON.stringify(result);
 		}
 	}
 	if len(messages) == 0 && isArchiveAlias(mailboxName) {
-		return c.getArchiveMessagesWithWhoseJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+		return c.getArchiveMessagesWithWhoseJXA(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, since)
 	}
 
 	return messages, nil
 }
 
-func (c *Client) getArchiveMessagesWithWhoseJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly, withContent bool, since string) ([]Message, error) {
+func (c *Client) getArchiveMessagesWithWhoseJXA(accountName, mailboxName string, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
 	if c.nativeEnabled() {
-		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, withContent, since)
+		return c.nativeMessages(accountName, mailboxName, limit, offset, unreadOnly, flaggedOnly, false, since)
 	}
-	sinceUnix := int64(0)
-	if strings.TrimSpace(since) != "" {
-		parsedSince, _, err := parseSinceUnix(since)
-		if err != nil {
-			return nil, err
-		}
-		sinceUnix = parsedSince
-	}
-
-	contentFetch := "const content = '';"
-	contentField := "content: content,"
-	if withContent {
-		contentFetch = "let content = ''; try { content = msg.content() || ''; } catch(e) {}"
+	sinceUnix, _, err := parseSinceUnix(since)
+	if err != nil {
+		return nil, err
 	}
 
 	script := fmt.Sprintf(`
@@ -226,19 +192,8 @@ try {
 			continue;
 		}
 		try {
-			%s
 			result.push({
-				id: String(msg.id()),
-				subject: msg.subject() || '',
-				sender: msg.sender() || '',
-				dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-				dateSent: (msg.dateSent() || new Date()).toISOString(),
-				read: msg.readStatus(),
-				flagged: msg.flaggedStatus(),
-				messageSize: msg.messageSize(),
 				%s
-				mailbox: mboxName,
-				account: accName
 			});
 		} catch(e) {}
 	}
@@ -247,16 +202,11 @@ try {
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), sinceUnix*1000, offset, limit, unreadOnly, flaggedOnly, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), contentFetch, contentField)
-
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
+`, escapeJSString(mailboxName), sinceUnix*1000, offset, limit, unreadOnly, flaggedOnly, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mboxName", Account: "accName", Content: "content: '',"}.fields())
 
 	var messages []Message
-	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse archive messages JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "archive messages", &messages); err != nil {
+		return nil, err
 	}
 
 	return messages, nil
@@ -389,19 +339,7 @@ try {
 			bcc: recipientAddresses(msg.bccRecipients())
 		}));
 		message = phase('metadata', () => ({
-			id: String(msg.id()),
-			rfcMessageId: rfcMessageId(msg),
-			subject: msg.subject() || '',
-			sender: msg.sender() || '',
-			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-			dateSent: (msg.dateSent() || new Date()).toISOString(),
-			read: msg.readStatus(),
-			flagged: msg.flaggedStatus(),
-			messageSize: msg.messageSize(),
-			content: content,
-			contentError: contentError,
-			mailbox: mbox.name(),
-			account: acc.name(),
+			%s,
 			toRecipients: recipients.to,
 			ccRecipients: recipients.cc,
 			bccRecipients: recipients.bcc
@@ -412,7 +350,7 @@ try {
 }
 
 JSON.stringify({message: message, failure: failure, phases: phaseLog});
-`, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaBool(haveDiskBody), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName))
+`, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaBool(haveDiskBody), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mbox.name()", Account: "acc.name()", RFCMessageID: "rfcMessageId(msg)", Content: "content: content,\ncontentError: contentError,"}.fields())
 
 	output, err := c.runJXAWithTimeout(script, timeout)
 	if err != nil {
@@ -511,36 +449,14 @@ try {
 
 if (msg !== null) {
 	result = {
-		id: String(msg.id()),
-		rfcMessageId: rfcMessageId(msg),
-		subject: msg.subject() || '',
-		sender: msg.sender() || '',
-		dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-		dateSent: (msg.dateSent() || new Date()).toISOString(),
-		read: msg.readStatus(),
-		flagged: msg.flaggedStatus(),
-		messageSize: msg.messageSize(),
-		mailbox: mbox.name(),
-		account: acc.name()
+		%s
 	};
 }
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mbox.name()", Account: "acc.name()", RFCMessageID: "rfcMessageId(msg)"}.fields())
 
-	output, err := c.runJXAWithTimeout(script, identityEnrichmentTimeout)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(output) == "null" {
-		return nil, nil
-	}
-
-	var message Message
-	if err := json.Unmarshal([]byte(output), &message); err != nil {
-		return nil, fmt.Errorf("failed to parse verification message JSON: %w", err)
-	}
-	return &message, nil
+	return c.runJXAMessage(script, identityEnrichmentTimeout, "verification message")
 }
 
 // GetMessageStateForVerificationJSON performs a bounded ID query through
@@ -575,18 +491,7 @@ if (matches.length === 1) {
 }
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(output) == "null" {
-		return nil, nil
-	}
-	var message Message
-	if err := json.Unmarshal([]byte(output), &message); err != nil {
-		return nil, fmt.Errorf("failed to parse verification state JSON: %w", err)
-	}
-	return &message, nil
+	return c.runJXAMessage(script, defaultAutomationTimeout, "verification state")
 }
 
 func (c *Client) parseMessages(_ string) ([]Message, error) {
