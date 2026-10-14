@@ -57,11 +57,11 @@ func TestThreadedOutgoingCLIRejectsLegacyBackend(t *testing.T) {
 }
 
 func TestThreadedOutgoingSelectionKeepsOriginalAndEditedFields(t *testing.T) {
-	previousResolved, previousClient := resolved, mailClient
-	t.Cleanup(func() { resolved, mailClient = previousResolved, previousClient })
-	resolved = config.Resolved{Mailbox: config.Value{Value: "Projects/INBOX", Source: config.SourceFlag}}
-	mailClient = mail.NewClient()
-	if err := mailClient.SetBackend(mail.BackendNative); err != nil {
+	a := newApplication()
+
+	a.resolved = config.Resolved{Mailbox: config.Value{Value: "Projects/INBOX", Source: config.SourceFlag}}
+	a.mailClient = mail.NewClient()
+	if err := a.mailClient.SetBackend(mail.BackendNative); err != nil {
 		t.Fatal(err)
 	}
 	for _, mode := range []mail.ReplyMode{mail.ReplyToSender, mail.ReplyToAll, mail.ForwardMessage} {
@@ -83,7 +83,7 @@ func TestThreadedOutgoingSelectionKeepsOriginalAndEditedFields(t *testing.T) {
 		if err := command.ParseFlags(args); err != nil {
 			t.Fatal(err)
 		}
-		selection, err := flags.selection(command)
+		selection, err := flags.selection(a, command)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -100,7 +100,9 @@ func TestThreadedOutgoingSelectionKeepsOriginalAndEditedFields(t *testing.T) {
 }
 
 func TestThreadedOutgoingFlagsOnlyOnSendAndDraftCreate(t *testing.T) {
-	for _, command := range []*cobra.Command{draftsListCmd, draftsShowCmd, draftsUpdateCmd, draftsSendCmd, draftsDeleteCmd} {
+	a := newApplication()
+
+	for _, command := range []*cobra.Command{a.draftsListCmd, a.draftsShowCmd, a.draftsUpdateCmd, a.draftsSendCmd, a.draftsDeleteCmd} {
 		for _, flag := range []string{"reply-to", "reply-all", "forward-of"} {
 			if command.Flags().Lookup(flag) != nil {
 				t.Fatalf("%s unexpectedly accepts --%s", command.CommandPath(), flag)
