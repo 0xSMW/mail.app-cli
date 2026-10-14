@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newMessagesScanCmd() *cobra.Command {
+func (a *application) newMessagesScanCmd() *cobra.Command {
 	var query, since, cursor, checkpoint string
 	var limit int
 	var unread, restartCheckpoint bool
@@ -20,7 +20,7 @@ func newMessagesScanCmd() *cobra.Command {
 		Args:        cobra.MinimumNArgs(1),
 		Annotations: map[string]string{annotationAgentNotes: "Always live and serial. Returns messages once per account/local ID with matching mailboxes, and coverage for every requested mailbox. Exit 5 and complete:false on a failed or truncated scope. --limit is per mailbox and page; 0 is unlimited. Coverage gives exhausted and remaining per mailbox. While nextCursor is present, repeat the same arguments with --cursor to read older messages; the traversal is finished when nextCursor is absent. Each mailbox page runs newest first from its own saved receipt-time/local-ID position; sequential mailbox reads have no shared snapshot or global arrival cutoff. --since filters receipt time, so it cannot find an older message whose read state or labels changed. An empty query lists messages. With --checkpoint, repeat the same scopes and filters to resume cumulative messages, memberships and coverage; --limit may change. The private checkpoint is saved before output. Its provenance distinguishes current-page timestamps from traversal observation bounds; accumulated messages describe earlier observations as well as the current page. Completed checkpoints require --restart-checkpoint for a fresh traversal. Observations are not an atomic snapshot; rerun after mutations."},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if mailboxExplicit() {
+			if a.mailboxExplicit() {
 				return clierr.Usage("scan takes positional mailboxes; do not also pass --mailbox")
 			}
 			if limit < 0 {
@@ -33,7 +33,7 @@ func newMessagesScanCmd() *cobra.Command {
 			if err := mail.ValidateScanRequest(mail.ScanRequest{Scopes: preflightScopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint}); err != nil {
 				return clierr.Usage(err.Error())
 			}
-			account, err := requireAccount()
+			account, err := a.requireAccount()
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func newMessagesScanCmd() *cobra.Command {
 			for i, mailbox := range args {
 				scopes[i] = mail.SearchMailbox{Account: account, Mailbox: mailbox}
 			}
-			result, err := mailClient.ScanMessages(mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint})
+			result, err := a.mailClient.ScanMessages(mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint})
 			if errors.Is(err, mail.ErrInvalidScanCursor) || errors.Is(err, mail.ErrInvalidScanCheckpoint) {
 				return clierr.Usage(err.Error())
 			}
@@ -55,7 +55,7 @@ func newMessagesScanCmd() *cobra.Command {
 			if failure != nil && checkpoint != "" {
 				failure = clierr.New(clierr.CodePartial, "mailbox scan incomplete; inspect coverage and repeat the same --checkpoint arguments to resume")
 			}
-			return writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("%d messages across %d mailboxes (complete: %v)", len(result.Messages), len(result.Coverage), result.Complete), Err: failure, Plain: func(p *output.Printer) {
+			return a.writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("%d messages across %d mailboxes (complete: %v)", len(result.Messages), len(result.Coverage), result.Complete), Err: failure, Plain: func(p *output.Printer) {
 				for _, coverage := range result.Coverage {
 					p.Line("%s/%s: %d messages (exhausted: %v, remaining: %d)", coverage.Account, coverage.Mailbox, coverage.Count, coverage.Exhausted, coverage.Remaining)
 					if coverage.Error != "" {
@@ -83,5 +83,3 @@ func newMessagesScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&unread, "unread", false, "Only unread messages")
 	return cmd
 }
-
-func init() { messagesCmd.AddCommand(newMessagesScanCmd()) }
