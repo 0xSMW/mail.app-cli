@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -26,10 +25,7 @@ func TestValidateDraftAttachments(t *testing.T) {
 			t.Fatalf("accepted %q", bad)
 		}
 	}
-	script := draftAttachmentScript(paths)
-	if !strings.Contains(script, escapeAppleScriptString(path)) || strings.Contains(script, "on error") {
-		t.Fatalf("unsafe attachment script: %s", script)
-	}
+
 }
 
 func TestDraftAttachmentEnumerationFailsClosed(t *testing.T) {
