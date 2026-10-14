@@ -70,19 +70,10 @@ func (n *nativeMail) accountFields(ref appleevents.Value) (map[string]appleevent
 		}
 		return properties.Fields, nil
 	}
-	var ae *appleevents.Error
-	if !errors.As(err, &ae) || (ae.Code != -1708 && ae.Code != -1700 && ae.Code != -10000) {
+	if !nativeUnsupportedRead(err) {
 		return nil, err
 	}
-	fields := make(map[string]appleevents.Value, 6)
-	for _, code := range []string{"ID  ", "pnam", "emad", "unme", "isac", "atyp"} {
-		value, err := n.get(appleevents.Property(code, ref))
-		if err != nil {
-			return nil, err
-		}
-		fields[code] = value
-	}
-	return fields, nil
+	return n.directFields(ref, "ID  ", "pnam", "emad", "unme", "isac", "atyp")
 }
 
 func nativeAccountFromFields(f map[string]appleevents.Value) (Account, error) {
@@ -106,51 +97,24 @@ func nativeAccountFromFields(f map[string]appleevents.Value) (Account, error) {
 }
 
 func (n *nativeMail) accounts() ([]Account, error) {
-	all := appleevents.All("mact", appleevents.Null())
-	codes := []string{"ID  ", "pnam", "emad", "unme", "isac", "atyp"}
-	columns := make(map[string]appleevents.Value, len(codes))
-	for _, code := range codes {
-		value, err := n.get(appleevents.Property(code, all))
-		if err != nil {
-			return nil, err
-		}
-		if value.Kind != "list" {
-			return nil, fmt.Errorf("Mail returned %s for account %s column; expected list", value.Kind, code)
-		}
-		columns[code] = value
-	}
-	ids := columns["ID  "].Items
-	for _, code := range codes {
-		if len(columns[code].Items) != len(ids) {
-			return nil, fmt.Errorf("Mail returned inconsistent account %s column", code)
-		}
-	}
-	// Verify that collection identity/order stayed stable across column reads.
-	finalIDs, err := n.get(appleevents.Property("ID  ", all))
+	projection, err := n.projectAccounts(nativeDiscoveryAccounts, "ID  ", "pnam", "emad", "unme", "isac", "atyp")
 	if err != nil {
 		return nil, err
 	}
-	if finalIDs.Kind != "list" || len(finalIDs.Items) != len(ids) {
-		return nil, fmt.Errorf("account collection changed during metadata read")
-	}
-	result := make([]Account, 0, len(ids))
-	seen := make(map[string]bool, len(ids))
-	for i, id := range ids {
-		if id.Kind != "string" || finalIDs.Items[i].Kind != "string" || id.Text != finalIDs.Items[i].Text {
-			return nil, fmt.Errorf("account collection changed during metadata read")
-		}
-		row := make(map[string]appleevents.Value, len(codes))
-		for _, code := range codes {
-			row[code] = columns[code].Items[i]
+	result := make([]Account, 0, len(projection.finalIDs))
+	seen := make(map[string]bool, len(projection.finalIDs))
+	for i := range projection.finalIDs {
+		row, err := projection.row(i, seen)
+		if err != nil {
+			return nil, err
 		}
 		account, err := nativeAccountFromFields(row)
 		if err != nil {
 			return nil, err
 		}
-		if seen[account.ID] {
-			return nil, fmt.Errorf("Mail returned duplicate account ID %q", account.ID)
+		if err := projection.claimID(account.ID, seen); err != nil {
+			return nil, err
 		}
-		seen[account.ID] = true
 		result = append(result, account)
 	}
 	return result, nil
@@ -221,14 +185,12 @@ func (c *Client) nativeMailboxes(account string) ([]Mailbox, error) {
 	return result, err
 }
 
-func nativeDate(v appleevents.Value) string { return v.Text }
-
 func nativeMessageFields(f map[string]appleevents.Value, account, mailbox string) *Message {
 	id := f["ID  "].Text
 	if id == "" {
 		id = strconv.FormatInt(f["ID  "].Number, 10)
 	}
-	return &Message{ID: id, RFCMessageID: f["meid"].Text, Subject: f["subj"].Text, Sender: f["sndr"].Text, DateReceived: nativeDate(f["rdrc"]), DateSent: nativeDate(f["drcv"]), Read: f["isrd"].Boolean, Flagged: f["isfl"].Boolean, Deleted: f["isdl"].Boolean, MessageSize: int(f["msze"].Number), Account: account, Mailbox: mailbox}
+	return &Message{ID: id, RFCMessageID: f["meid"].Text, Subject: f["subj"].Text, Sender: f["sndr"].Text, DateReceived: f["rdrc"].Text, DateSent: f["drcv"].Text, Read: f["isrd"].Boolean, Flagged: f["isfl"].Boolean, Deleted: f["isdl"].Boolean, MessageSize: int(f["msze"].Number), Account: account, Mailbox: mailbox}
 }
 
 var nativeMessageCodes = []string{"ID  ", "meid", "subj", "sndr", "rdrc", "drcv", "isrd", "isfl", "isdl", "msze"}
@@ -403,21 +365,7 @@ func (c *Client) nativeMessages(account, mailbox string, limit, offset int, unre
 }
 
 func (n *nativeMail) recipients(ref appleevents.Value, class string) ([]string, error) {
-	v, err := n.get(appleevents.Property("radd", appleevents.All(class, ref)))
-	if err != nil {
-		return nil, err
-	}
-	if v.Kind != "list" {
-		return nil, fmt.Errorf("Mail returned %s for recipient addresses", v.Kind)
-	}
-	result := make([]string, 0, len(v.Items))
-	for _, address := range v.Items {
-		if address.Kind != "string" {
-			return nil, fmt.Errorf("Mail returned %s for recipient address; expected text", address.Kind)
-		}
-		result = append(result, address.Text)
-	}
-	return result, nil
+	return n.recipientAddresses(ref, class, true)
 }
 
 func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.Duration, preferDisk, verification bool) (*Message, *PhaseTrace, error) {
@@ -518,8 +466,7 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 		return n.phase("content", func() error {
 			body, err := n.stringProperty("ctnt", ref)
 			if err != nil {
-				var ae *appleevents.Error
-				if errors.As(err, &ae) && (ae.Code == -1700 || ae.Code == -1728) {
+				if nativeContentUnavailable(err) {
 					message.ContentError = err.Error()
 					message.ContentSource = "mail"
 					return nil
