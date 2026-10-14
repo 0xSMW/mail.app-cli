@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 )
@@ -34,13 +33,9 @@ try {
 }
 JSON.stringify(result);
 `, includeContent)
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
 	var signatures []Signature
-	if err := json.Unmarshal([]byte(output), &signatures); err != nil {
-		return nil, fmt.Errorf("failed to parse signatures JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "signatures", &signatures); err != nil {
+		return nil, err
 	}
 	sort.Slice(signatures, func(i, j int) bool { return signatures[i].Name < signatures[j].Name })
 	return signatures, nil
