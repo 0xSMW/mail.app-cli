@@ -1,9 +1,7 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) ([]Attachment, error) {
@@ -46,14 +44,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var attachments []Attachment
-	if err := json.Unmarshal([]byte(output), &attachments); err != nil {
-		return nil, fmt.Errorf("failed to parse attachments JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "attachments", &attachments); err != nil {
+		return nil, err
 	}
 
 	return attachments, nil
@@ -119,12 +112,5 @@ try {
 }
 `, escapeJSString(mailboxName), index, lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }
