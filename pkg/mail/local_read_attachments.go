@@ -1,15 +1,13 @@
 package mail
 
 import (
-	"bufio"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
-	"mime/quotedprintable"
+	netmail "net/mail"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -24,15 +22,11 @@ func (c *Client) scopedLocalMessageFile(account, mailbox, messageID string) (pat
 	if err != nil || id <= 0 {
 		return "", false, nil
 	}
-	mbox, ok, err := c.resolveIndexMailbox(account, mailbox)
-	if err != nil || !ok {
+	_, membership, err := c.resolveLocalMessageScope(account, mailbox)
+	if err != nil || membership == "" {
 		return "", false, err
 	}
-	acc, err := c.accountByName(account)
-	if err != nil {
-		return "", false, err
-	}
-	query := fmt.Sprintf("select mb.url as URL from messages m join mailboxes mb on mb.ROWID=m.mailbox where m.ROWID=%d and m.deleted=0 and %s and %s limit 1;", id, indexMailboxMembershipCondition(mbox), indexAccountCondition(acc.ID))
+	query := fmt.Sprintf("select mb.url as URL from messages m join mailboxes mb on mb.ROWID=m.mailbox where m.ROWID=%d and m.deleted=0 and %s limit 1;", id, membership)
 	var rows []struct{ URL string }
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return "", false, err
@@ -50,25 +44,33 @@ func (c *Client) scopedLocalMessageFile(account, mailbox, messageID string) (pat
 	return path, false, nil
 }
 
-// getAttachmentsFromDisk handles a complete, scoped MIME file. Attachment
-// sizes count decoded payload bytes. Partial files, broken encodings, and
-// Mail's external-payload placeholders leave the operation to Mail.
-func (c *Client) getAttachmentsFromDisk(account, mailbox, messageID string) ([]Attachment, bool, error) {
+func (c *Client) scopedLocalMIME(account, mailbox, messageID string) (*netmail.Message, bool, error) {
 	path, absent, err := c.scopedLocalMessageFile(account, mailbox, messageID)
-	if err != nil {
-		return nil, false, err
-	}
-	if absent {
-		return []Attachment{}, true, nil
+	if err != nil || absent {
+		return nil, absent, err
 	}
 	if path == "" || strings.HasSuffix(path, ".partial.emlx") {
 		return nil, false, nil
 	}
 	rfc, err := readEMLXMessage(path)
 	if err != nil {
-		if denied := c.nativeDiskAccessError(err); denied != nil {
-			return nil, false, denied
-		}
+		return nil, false, c.nativeDiskAccessError(err)
+	}
+	return rfc, false, nil
+}
+
+// getAttachmentsFromDisk handles a complete, scoped MIME file. Attachment
+// sizes count decoded payload bytes. Partial files, broken encodings, and
+// Mail's external-payload placeholders leave the operation to Mail.
+func (c *Client) getAttachmentsFromDisk(account, mailbox, messageID string) ([]Attachment, bool, error) {
+	rfc, absent, err := c.scopedLocalMIME(account, mailbox, messageID)
+	if err != nil {
+		return nil, false, err
+	}
+	if absent {
+		return []Attachment{}, true, nil
+	}
+	if rfc == nil {
 		return nil, false, nil
 	}
 	attachments := make([]Attachment, 0)
@@ -115,21 +117,14 @@ func (c *Client) saveAttachmentFromDiskSelection(account, mailbox, messageID, na
 }
 
 func (c *Client) saveLocalAttachment(account, mailbox, messageID, name string, selectionIndex int, destination string) (savedPath string, handled bool, saveErr error) {
-	path, absent, err := c.scopedLocalMessageFile(account, mailbox, messageID)
+	rfc, absent, err := c.scopedLocalMIME(account, mailbox, messageID)
 	if err != nil {
 		return "", false, err
 	}
 	if absent {
 		return "", true, notFound("message", messageID)
 	}
-	if path == "" || strings.HasSuffix(path, ".partial.emlx") {
-		return "", false, nil
-	}
-	rfc, err := readEMLXMessage(path)
-	if err != nil {
-		if denied := c.nativeDiskAccessError(err); denied != nil {
-			return "", false, denied
-		}
+	if rfc == nil {
 		return "", false, nil
 	}
 	if selectionIndex < 0 && (name == "" || name == "." || name == ".." || filepath.Base(name) != name || strings.ContainsAny(name, "/\\\x00")) {
@@ -262,14 +257,8 @@ func walkLocalAttachments(ctx context.Context, header func(string) string, body 
 			return fmt.Errorf("parse attachment disposition: %w", err)
 		}
 	}
-	body = localContextReader{ctx, body}
-	switch strings.ToLower(strings.TrimSpace(header("Content-Transfer-Encoding"))) {
-	case "base64":
-		body = base64.NewDecoder(base64.StdEncoding, newlineStripper{bufio.NewReader(body)})
-	case "quoted-printable":
-		body = quotedprintable.NewReader(body)
-	case "", "7bit", "8bit", "binary":
-	default:
+	body, supported := localMIMETransferReader(localContextReader{ctx, body}, header("Content-Transfer-Encoding"))
+	if !supported {
 		return fmt.Errorf("unsupported attachment transfer encoding")
 	}
 	name := dispositionParams["filename"]
