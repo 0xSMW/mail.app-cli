@@ -61,17 +61,7 @@ func (c *Client) composeThreadedOutgoing(input ThreadedOutgoingInput, action str
 		// composition behavior. A native failure never reaches this path.
 		return c.composeOutgoing(input.OutgoingInput, action)
 	}
-	if len(input.To)+len(input.Cc)+len(input.Bcc) == 0 {
-		return nil, fmt.Errorf("at least one recipient is required")
-	}
-	for _, list := range [][]string{input.To, input.Cc, input.Bcc} {
-		for _, address := range list {
-			if strings.TrimSpace(address) == "" {
-				return nil, fmt.Errorf("recipient must not be empty")
-			}
-		}
-	}
-	input.Attachments, err = ValidateDraftAttachments(input.Attachments)
+	input.OutgoingInput, err = prepareOutgoing(input.OutgoingInput)
 	if err != nil {
 		return nil, err
 	}
