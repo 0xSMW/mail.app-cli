@@ -478,7 +478,8 @@ counts. Avoid a universal backend interface or a script-template framework.
   offline scripts, CLI contracts, TUI replay, and both native builds pass.
   Detailed remote evidence is copied to the private local validation directory
   with archive integrity checked. Installed daily-driver binaries are unchanged.
-- Initial PR inspection: open and mergeable, no checks/reviews/findings posted
-  yet. Inspect automated review once more after this documentation update;
-  handle any findings, then finish the accepted design-and-safe-reduction goal.
+- PR inspected after creation and after the documentation push: open and
+  mergeable, no automated reviews, findings, or CI checks posted at either
+  inspection. Review completion is not claimed. The accepted implementation,
+  validation, documentation, cleanup, and PR-delivery goal is complete.
 - No merge, release, tag, or install was performed.
