@@ -182,6 +182,16 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 	})
 }
 
+// envelopeIndexReadError applies the historical read fallback only to eligible
+// failures; native permission and schema errors retain their original cause.
+func (c *Client) envelopeIndexReadError(err error) error {
+	if isEnvelopeIndexUnavailable(err) {
+		c.warnEnvelopeIndexFallback(err)
+		return nil
+	}
+	return err
+}
+
 func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	if os.Getenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX") != "" {
 		return fmt.Errorf("envelope index disabled")
@@ -266,73 +276,22 @@ func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMai
 		return nil, false, err
 	}
 
-	urlPattern := indexMailboxURLPattern(account.ID, mailboxName)
-	query := fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s
-limit 1;
-`, sqlQuote(urlPattern))
-
-	var rows []struct {
-		ID          int
-		URL         string
-		TotalCount  int
-		UnreadCount int
+	exact := indexMailboxExactCondition(account.ID, mailboxName)
+	var rows []indexMailbox
+	if err := c.queryIndexMailboxCandidate(exact, &rows); err != nil {
+		return nil, false, c.envelopeIndexReadError(err)
 	}
-	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if isEnvelopeIndexUnavailable(err) {
-			c.warnEnvelopeIndexFallback(err)
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	// "Archive" is provider-ambiguous. An exact Gmail system mailbox wins,
-	// but a literal Archive must beat the broad nested All Mail fallback so an
-	// iCloud/IMAP account cannot verify against an unrelated mailbox.
 	if len(rows) == 0 && normalizeMailboxAlias(mailboxName) == "archive" {
-		literalURL := "imap://" + account.ID + "/Archive"
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s or url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote(literalURL), sqlQuote("imap://"+account.ID+"/%/Archive"), sqlQuote(literalURL))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
+		literal, nested := indexMailboxArchiveConditions(account.ID)
+		predicate := literal + " or " + nested + "\norder by case when " + literal + " then 0 else 1 end, ROWID"
+		if err := c.queryIndexMailboxCandidate(predicate, &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
 		}
 	}
 	if len(rows) == 0 {
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote("imap://"+account.ID+"/%/"+escapedMailboxLeaf(mailboxName)), sqlQuote(indexMailboxURLPattern(account.ID, mailboxName)))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
+		predicate := indexMailboxBroadCondition(account.ID, mailboxName) + "\norder by case when " + exact + " then 0 else 1 end, ROWID"
+		if err := c.queryIndexMailboxCandidate(predicate, &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
 		}
 	}
 	if len(rows) == 0 {
@@ -347,6 +306,20 @@ limit 1;
 		UnreadCount: rows[0].UnreadCount,
 	}
 	return mbox, true, nil
+}
+
+func (c *Client) queryIndexMailboxCandidate(predicate string, rows *[]indexMailbox) error {
+	query := fmt.Sprintf(`
+select
+	ROWID as ID,
+	url as URL,
+	total_count as TotalCount,
+	unread_count as UnreadCount
+from mailboxes
+where %s
+limit 1;
+`, predicate)
+	return c.runEnvelopeIndexQuery(query, rows)
 }
 
 func escapedMailboxLeaf(mailboxName string) string {
@@ -371,11 +344,7 @@ order by url;
 
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if isEnvelopeIndexUnavailable(err) {
-			c.warnEnvelopeIndexFallback(err)
-			return nil, false, nil
-		}
-		return nil, false, err
+		return nil, false, c.envelopeIndexReadError(err)
 	}
 	if len(rows) == 0 {
 		return nil, false, nil
@@ -397,24 +366,28 @@ order by url;
 	return mailboxes, true, nil
 }
 
+func (row indexMessage) message() Message {
+	return Message{
+		ID:           strconv.FormatInt(row.ID, 10),
+		Subject:      row.Subject,
+		Sender:       row.Sender,
+		DateSent:     row.DateSent,
+		DateReceived: row.DateReceived,
+		Read:         row.Read != 0,
+		Flagged:      row.Flagged != 0,
+		Deleted:      row.Deleted != 0,
+		MessageSize:  row.MessageSize,
+		Content:      row.Content,
+		Snippet:      row.Snippet,
+		Mailbox:      row.Mailbox,
+		Account:      row.Account,
+	}
+}
+
 func indexMessagesToMessages(rows []indexMessage) []Message {
 	messages := make([]Message, 0, len(rows))
 	for _, row := range rows {
-		messages = append(messages, Message{
-			ID:           strconv.FormatInt(row.ID, 10),
-			Subject:      row.Subject,
-			Sender:       row.Sender,
-			DateSent:     row.DateSent,
-			DateReceived: row.DateReceived,
-			Read:         row.Read != 0,
-			Flagged:      row.Flagged != 0,
-			Deleted:      row.Deleted != 0,
-			MessageSize:  row.MessageSize,
-			Content:      row.Content,
-			Snippet:      row.Snippet,
-			Mailbox:      row.Mailbox,
-			Account:      row.Account,
-		})
+		messages = append(messages, row.message())
 	}
 	return messages
 }
@@ -475,25 +448,37 @@ func indexMailboxMembershipCondition(mbox *indexMailbox) string {
 		return "m.mailbox = " + strconv.Itoa(mbox.ID)
 	}
 	mailboxID := strconv.Itoa(mbox.ID)
-	return "(m.mailbox = " + mailboxID + " or exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + mailboxID + "))"
+	return "(m.mailbox = " + mailboxID + " or " + indexLabelMembershipCondition(mailboxID) + ")"
 }
 
-func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+func indexLabelMembershipCondition(mailboxID string) string {
+	return "exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + mailboxID + ")"
+}
+
+func indexMessageFilterConditions(unread, flagged bool, since string) ([]string, error) {
 	sinceUnix, hasSince, err := parseSinceUnix(since)
 	if err != nil {
 		return nil, err
 	}
 	var where []string
-	where = append(where, "m.deleted = 0", indexMailboxMembershipCondition(mbox))
-	if unreadOnly {
+	if unread {
 		where = append(where, "m.read = 0")
 	}
-	if flaggedOnly {
+	if flagged {
 		where = append(where, "m.flagged != 0")
 	}
 	if hasSince {
 		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
 	}
+	return where, nil
+}
+
+func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+	where, err := indexMessageFilterConditions(unreadOnly, flaggedOnly, since)
+	if err != nil {
+		return nil, err
+	}
+	where = append([]string{"m.deleted = 0", indexMailboxMembershipCondition(mbox)}, where...)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + "\nwhere " + strings.Join(where, " and ") + "\norder by m.date_received desc"
 	if limit > 0 {
 		query += "\nlimit " + strconv.Itoa(limit)
@@ -572,41 +557,6 @@ where %s
 	return byID, nil
 }
 
-// getIdentityMatchesForVerification finds the live rows matching each stable
-// identity in one mailbox, keyed by the identity's fallback key. A message
-// regenerated under a new local ID is found by this lookup.
-func (c *Client) getIdentityMatchesForVerification(accountName, mailboxName string, identities []StableIdentity) (map[string][]Message, error) {
-	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s", mailboxName)
-	}
-	conditions, err := indexIdentityConditions(identities)
-	if err != nil {
-		return nil, err
-	}
-	if len(conditions) == 0 {
-		return map[string][]Message{}, nil
-	}
-	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
-where %s
-	and m.deleted = 0
-	and (%s);
-`, indexMailboxMembershipCondition(mbox), strings.Join(conditions, " or "))
-	var rows []indexMessage
-	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		return nil, err
-	}
-	matches := make(map[string][]Message, len(rows))
-	for _, message := range indexMessagesToMessages(rows) {
-		key := StableIdentityFromMessage(message).fallbackKey()
-		matches[key] = append(matches[key], message)
-	}
-	return matches, nil
-}
-
 func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
 	conditions := make([]string, 0, len(identities))
 	seen := make(map[string]bool)
@@ -646,17 +596,11 @@ func indexSearchTermConditions(terms []string) []string {
 // resumes the traversal without an offset, so mail arriving between pages
 // cannot shift a row across a page boundary.
 func (c *Client) scanMessagesFromIndex(accountName string, mbox *indexMailbox, req ScanRequest, limit int, after *ScanPosition) (scanPage, error) {
-	sinceUnix, hasSince, err := parseSinceUnix(req.Since)
+	where, err := indexMessageFilterConditions(req.Unread, false, req.Since)
 	if err != nil {
 		return scanPage{}, err
 	}
-	where := []string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}
-	if req.Unread {
-		where = append(where, "m.read = 0")
-	}
-	if hasSince {
-		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
-	}
+	where = append([]string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}, where...)
 	where = append(where, indexSearchTermConditions(searchTerms(req.Query))...)
 	if after != nil {
 		where = append(where, fmt.Sprintf("(coalesce(m.date_received, 0) < %d or (coalesce(m.date_received, 0) = %d and m.ROWID < %d))", after.ReceivedUnix, after.ReceivedUnix, after.ID))
@@ -701,16 +645,11 @@ func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *in
 	if len(terms) == 0 {
 		return []Message{}, nil
 	}
-	sinceUnix, hasSince, err := parseSinceUnix(since)
+	where, err := indexMessageFilterConditions(false, false, since)
 	if err != nil {
 		return nil, err
 	}
-	membership := indexMailboxMembershipCondition(mbox)
-	var where []string
-	where = append(where, membership, "m.deleted = 0")
-	if hasSince {
-		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
-	}
+	where = append([]string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}, where...)
 	where = append(where, indexSearchTermConditions(terms)...)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
@@ -723,4 +662,42 @@ limit %d;
 		return nil, err
 	}
 	return indexMessagesToMessages(rows), nil
+}
+
+type indexMailboxCandidates struct{ exact, literal, nested, broad string }
+
+// indexMailboxPreference keeps Archive's provider ambiguity explicit. An exact
+// Gmail mailbox wins, then literal/nested Archive, then the broad nested leaf.
+func indexMailboxPreference(accountID, mailbox string) indexMailboxCandidates {
+	preference := indexMailboxCandidates{
+		exact: indexMailboxExactCondition(accountID, mailbox),
+		broad: indexMailboxBroadCondition(accountID, mailbox),
+	}
+	if normalizeMailboxAlias(mailbox) == "archive" {
+		preference.literal, preference.nested = indexMailboxArchiveConditions(accountID)
+	}
+	return preference
+}
+
+func indexMailboxExactCondition(accountID, mailbox string) string {
+	return "url = " + sqlQuote(indexMailboxURLPattern(accountID, mailbox))
+}
+
+func indexMailboxBroadCondition(accountID, mailbox string) string {
+	return "url like " + sqlQuote("imap://"+accountID+"/%/"+escapedMailboxLeaf(mailbox))
+}
+
+func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
+	return "url = " + sqlQuote("imap://"+accountID+"/Archive"), "url like " + sqlQuote("imap://"+accountID+"/%/Archive")
+}
+
+func indexMailboxCandidateSelect(accountID, mailbox, projection string) string {
+	preference := indexMailboxPreference(accountID, mailbox)
+	where := preference.exact + " or " + preference.broad
+	order := "case when " + preference.exact + " then 0 else 3 end"
+	if preference.literal != "" {
+		where += " or " + preference.literal + " or " + preference.nested
+		order = "case when " + preference.exact + " then 0 when " + preference.literal + " then 1 when " + preference.nested + " then 2 else 3 end"
+	}
+	return "select " + projection + " from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
 }
