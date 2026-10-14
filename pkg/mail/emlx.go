@@ -1,15 +1,12 @@
 package mail
 
 import (
-	"bufio"
 	"bytes"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
-	"mime/quotedprintable"
 	"net/mail"
 	"net/url"
 	"os"
@@ -113,14 +110,6 @@ func messageDataDirectory(id int64) string {
 	return dir
 }
 
-// readMessageBodyFromDisk returns the message text without asking Mail.app
-// for it. It fails when the file is missing or when it cannot decode a text
-// body, and the caller then asks Mail.app instead.
-func (c *Client) readMessageBodyFromDisk(messageID string) (string, error) {
-	text, _, err := c.readMessageBodyFromDiskWithDiagnostics(messageID)
-	return text, err
-}
-
 func (c *Client) readMessageBodyFromDiskWithDiagnostics(messageID string) (string, *BodyDiagnostics, error) {
 	path, err := c.messageFilePath(messageID)
 	if err != nil {
@@ -141,9 +130,7 @@ func readEMLXBody(path string) (string, error) {
 func readEMLXBodyWithDiagnostics(path string) (content string, diagnostics *BodyDiagnostics, extractionErr error) {
 	message, err := readEMLXMessage(path)
 	if err != nil {
-		diagnostics = &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx"), ExtractionError: err.Error()}
-		diagnostics.finish()
-		return "", diagnostics, err
+		return "", failedEMLXDiagnostics(path, err), err
 	}
 	return extractEMLXBody(message, path)
 }
@@ -200,12 +187,6 @@ func firstHeader(header map[string][]string, key string) string {
 	return ""
 }
 
-// mimeBodyText returns the readable text of one MIME entity. decoded is true
-// when the reader already removed the transfer encoding.
-func mimeBodyText(header func(string) string, body io.Reader, decoded bool, depth int) (string, error) {
-	return mimeBodyTextWithDiagnostics(header, body, decoded, depth, "1", nil)
-}
-
 func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, decoded bool, depth int, partPath string, diagnostics *BodyDiagnostics) (string, error) {
 	if depth > 8 {
 		return "", fmt.Errorf("message nests MIME parts too deeply")
@@ -234,12 +215,7 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 		return "", nil
 	}
 	if !decoded {
-		switch strings.ToLower(strings.TrimSpace(header("Content-Transfer-Encoding"))) {
-		case "base64":
-			body = base64.NewDecoder(base64.StdEncoding, newlineStripper{bufio.NewReader(body)})
-		case "quoted-printable":
-			body = quotedprintable.NewReader(body)
-		}
+		body, _ = localMIMETransferReader(body, header("Content-Transfer-Encoding"))
 	}
 	switch {
 	case strings.HasPrefix(mediaType, "multipart/"):
@@ -311,10 +287,7 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			return "", err
 		}
 		if mediaType == "text/html" {
-			if diagnostics != nil {
-				diagnostics.inspectHTML(text)
-			}
-			return htmlToText(text), nil
+			return htmlToTextWithDiagnostics(text, diagnostics), nil
 		}
 		return unquotePlainText(text), nil
 	}
@@ -413,6 +386,10 @@ func htmlStyleValue(style, property string) string {
 // does. It breaks lines at block elements, marks list items, and leaves out
 // elements the markup hides.
 func htmlToText(source string) string {
+	return htmlToTextWithDiagnostics(source, nil)
+}
+
+func htmlToTextWithDiagnostics(source string, diagnostics *BodyDiagnostics) string {
 	tokenizer := html.NewTokenizer(strings.NewReader(source))
 	var out strings.Builder
 	// hiddenAt is the depth of the outermost hidden element, or zero.
@@ -426,9 +403,28 @@ func htmlToText(source string) string {
 	// transforms holds the inherited text-transform of each open element.
 	transforms := []string{""}
 	open := func(tag string, selfClosing bool) {
+		// Inventory every opening tag before visibility handling. Hidden markup
+		// remains diagnostic evidence and never contributes replacement text.
+		if diagnostics != nil {
+			if tag == "img" {
+				diagnostics.HTMLImageCount++
+			}
+			switch tag {
+			case "svg", "canvas", "video", "audio", "object", "embed", "iframe":
+				diagnostics.RichContentElements++
+			}
+		}
 		attributes := map[string]string{}
 		for {
 			key, value, more := tokenizer.TagAttr()
+			if diagnostics != nil {
+				if tag == "img" && string(key) == "alt" && strings.TrimSpace(string(value)) != "" {
+					diagnostics.HTMLImageAltTexts = append(diagnostics.HTMLImageAltTexts, string(value))
+				}
+				if string(key) == "style" && htmlStyleValue(string(value), "background-image") != "" && htmlStyleValue(string(value), "background-image") != "none" {
+					diagnostics.RichContentElements++
+				}
+			}
 			if len(key) > 0 {
 				attributes[string(key)] = string(value)
 			}
