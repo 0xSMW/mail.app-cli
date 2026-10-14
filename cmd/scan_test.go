@@ -5,8 +5,10 @@ import (
 )
 
 func TestScanOptionsRejectedBeforeMailAccess(t *testing.T) {
+	a := newApplication()
+
 	for _, flags := range [][]string{{"--since", "nonsense"}, {"--query", "   \"\" "}, {"--limit", "-1"}, {"--restart-checkpoint"}, {"--checkpoint", "/nonexistent/mail-scan-fixture/state.json"}, {"--checkpoint", "fixture.json", "--cursor", "opaque"}} {
-		command := newMessagesScanCmd()
+		command := a.newMessagesScanCmd()
 		if err := command.ParseFlags(flags); err != nil {
 			t.Fatal(err)
 		}
