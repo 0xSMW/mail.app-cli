@@ -46,14 +46,7 @@ try {
 }
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), action)
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }
 
 func (c *Client) FlagMessage(accountName, mailboxName, messageID string, flagged bool) error {
@@ -262,12 +255,5 @@ try {
 }
 `, escapeJSString(sourceMailbox), escapeJSString(targetMailbox), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(sourceMailbox), escapeJSString(messageID), jxaMailboxLookupExpressionFor(targetMailbox, "requestedTargetMailbox"))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }
