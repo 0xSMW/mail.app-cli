@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"errors"
 	"fmt"
 	netmail "net/mail"
 	"strings"
@@ -15,8 +14,7 @@ import (
 func (n *nativeMail) messageHeaders(ref appleevents.Value, message *Message) error {
 	headers, err := n.stringProperty("alhe", ref)
 	if err != nil {
-		var ae *appleevents.Error
-		if errors.As(err, &ae) && (ae.Code == -1728 || ae.Code == -1708) {
+		if nativeOptionalProperty(err) {
 			return nil
 		}
 		return err
