@@ -1,7 +1,6 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
@@ -211,14 +210,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(accountName))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var mailboxes []Mailbox
-	if err := json.Unmarshal([]byte(output), &mailboxes); err != nil {
-		return nil, fmt.Errorf("failed to parse mailboxes JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "mailboxes", &mailboxes); err != nil {
+		return nil, err
 	}
 
 	return mailboxes, nil
