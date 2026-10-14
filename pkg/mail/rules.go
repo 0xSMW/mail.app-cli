@@ -59,13 +59,9 @@ try {
 }
 JSON.stringify(result);
 `
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
 	var rules []Rule
-	if err := json.Unmarshal([]byte(output), &rules); err != nil {
-		return nil, fmt.Errorf("failed to parse rules JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "rules", &rules); err != nil {
+		return nil, err
 	}
 	return rules, nil
 }
@@ -118,18 +114,7 @@ func createRuleScript(input RuleInput) string {
 	if input.MarkRead {
 		markReadProperty = "set mark read to true"
 	}
-	return fmt.Sprintf(`
-on findMailboxByName(mailboxList, targetName)
-	repeat with candidateMailbox in mailboxList
-		try
-			if name of candidateMailbox is targetName then return candidateMailbox
-			set nestedMailbox to my findMailboxByName(mailboxes of candidateMailbox, targetName)
-			if nestedMailbox is not missing value then return nestedMailbox
-		end try
-	end repeat
-	return missing value
-end findMailboxByName
-
+	return archiveMailboxLookupScript + fmt.Sprintf(`
 tell application "Mail"
 	set destinationMailbox to missing value
 	repeat with acc in accounts
@@ -210,28 +195,14 @@ func (c *Client) DeleteRule(name string) error {
 }
 
 func (c *Client) runNamedCollectionBooleanAction(collection, name, property string, value bool) error {
-	script := fmt.Sprintf(`
-const mail = Application('Mail');
-const result = {ok: false};
-try {
-	const items = mail.%s();
-	for (let i = 0; i < items.length; i++) {
-		if (items[i].name() === '%s') {
-			items[i].%s = %s;
-			result.ok = true;
-			break;
-		}
-	}
-} catch (e) {
-	result.error = String(e);
-}
-JSON.stringify(result);
-`, collection, escapeJSString(name), property, jxaBool(value))
-	output, err := c.runJXA(script)
-	return parseMutationResult(output, err, name)
+	return c.runNamedCollectionAction(collection, name, fmt.Sprintf("items[i].%s = %s;", property, jxaBool(value)))
 }
 
 func (c *Client) runNamedCollectionDeleteAction(collection, name string) error {
+	return c.runNamedCollectionAction(collection, name, "items[i].delete();")
+}
+
+func (c *Client) runNamedCollectionAction(collection, name, action string) error {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = {ok: false};
@@ -239,7 +210,7 @@ try {
 	const items = mail.%s();
 	for (let i = 0; i < items.length; i++) {
 		if (items[i].name() === '%s') {
-			items[i].delete();
+			%s
 			result.ok = true;
 			break;
 		}
@@ -248,7 +219,7 @@ try {
 	result.error = String(e);
 }
 JSON.stringify(result);
-`, collection, escapeJSString(name))
+`, collection, escapeJSString(name), action)
 	output, err := c.runJXA(script)
 	return parseMutationResult(output, err, name)
 }
