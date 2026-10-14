@@ -16,7 +16,8 @@ work. Line-count targets never justify weaker guards or denser formatting.
 
 - Baseline commit: `8271f9b869cd2ad2e7b98454607387b4c52e3fc2`.
 - Working branch: `0xSMW/mail-native-v3`, in its existing managed worktree.
-- Delivery: update existing PR #24, with per-file commits and aggregate results.
+- Delivery: open a new regular PR against `master`, with per-file commits and
+  aggregate results. The user selected this after PR #24 closed.
 - Version: retain 3.0.0 and output schema version 1.
 - Production Go baseline: 26,327 formatted physical lines, including embedded
   scripts. `pkg/mail`: 15,640 lines and 518 functions.
@@ -186,3 +187,58 @@ counts. Avoid a universal backend interface or a script-template framework.
   Access. The user has offered to enable testing when requested.
 - Concrete cache-key and legacy parser defects found during analysis need
   separate treatment; they are not hidden behavior changes in this refactor.
+
+### 2026-10-14: implementation in parallel
+
+- Initial plan committed and pushed as `acb0ea4`.
+- Baseline native binary built from the immutable source archive. Detailed
+  source and binary evidence remains outside Git.
+- Six Sol high engineering lanes own disjoint native, local-read/index,
+  composition, legacy scaffolding, mutation, and CLI files. A seventh Sol high
+  lane prepares private metrics/API/performance comparison tooling.
+- GitHub shows #23 merged and #24 closed without merging. The user explicitly
+  chose a new PR against `master`; retain the existing worktree and branch.
+- Native account projection preserves sender's four columns plus final-ID
+  observation. Descriptor and recipient helpers preserve per-caller error text.
+- The combined mailbox resolver query caused an indexed exact lookup to become
+  a scan with temporary ordering in a fixture query plan. Retain the original
+  staged exact/Archive/nested queries and share candidate policy instead.
+- CLI invocation ownership is expected to add some code. Report that cost
+  honestly; aggregate reduction must count the replacement code.
+- Compilation during concurrent edits is transient; final validation begins
+  only after every engineering lane reports stable source.
+
+### 2026-10-14: first integrated validation
+
+- All six initial engineering lanes report stable source. The managing agent
+  inspected shared projections/decoders, composition lifecycle, local hydration,
+  index preference, legacy execution/projections, invocation ownership, and
+  batch/verification sequencing.
+- An independent Sol high review of changed core code and a second pass over
+  mutation/CLI/bulk code found no actionable source-level regression. These
+  reviews do not substitute for runtime or performance validation.
+- The complete native Go suite passes (`pkg/mail` 92.195 seconds); the complete
+  non-cgo suite passes (`pkg/mail` 92.386 seconds); `go vet ./...` passes.
+- The unchanged command surface snapshot passes. A new 48-call concurrent
+  public `Run` regression passes under the race detector, using version/help/
+  error paths and independent writers without live Mail.
+- Source comparison includes every replacement/untracked helper: 26,327 →
+  25,970 physical production Go lines; 23,236 → 22,910 meaningful lines.
+  Credited reduction is **326**, with **zero exported AST contract differences**.
+  This remains an intermediate snapshot before the additional audited cleanup.
+- Coordinator lengths are `RunBatch` 52, `VerifyMutations` 26, and
+  `composeNativeOutgoingOwned` 50. Their extracted helpers are fully counted.
+- The initial 2,000-line forecast was overstated. A second source audit supports
+  roughly 115 additional safe lines, including 41 newly orphaned private helper
+  lines. The numerical acceptance gate is still open; the user has been asked
+  whether to retain it or revise to the design goals plus maximum verified safe
+  reduction. Do not claim this goal complete while that decision is pending.
+- Additional proven cleanup covers private orphans, HTML inventory/rendering,
+  indexed envelope conversion, recent defaults, subject whitespace, checkpoint
+  membership, and equivalent cached attachment routing. Preserve all existing
+  error, formatting, completeness, query, and operation-count contracts.
+- Local baseline `doctor` is healthy after the legacy diagnostic launched Mail.
+  Read-only benchmark manifests are prepared in private evidence.
+- The baseline test CLI is staged on home-server. The user has been asked to
+  enable Terminal Full Disk Access, Accessibility, and Automation to Mail and
+  run read-only legacy/native diagnostics. Remote live acceptance remains pending.
