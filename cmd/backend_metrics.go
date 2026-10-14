@@ -12,7 +12,7 @@ import (
 
 // Optional local measurement output deliberately excludes message and account data.
 // Exclusive creation keeps a benchmark invocation from replacing existing files.
-func writeBackendMetrics(stderr io.Writer) {
+func (a *application) writeBackendMetrics(stderr io.Writer) {
 	path := os.Getenv("MAIL_APP_CLI_METRICS_FILE")
 	if path == "" {
 		return
@@ -27,8 +27,8 @@ func writeBackendMetrics(stderr io.Writer) {
 		Index      mailindex.Stats     `json:"index"`
 		Local      mail.LocalReadStats `json:"local"`
 	}{Automation: mail.BackendStatistics(), Index: mailindex.Statistics(), Local: mail.LocalReadStatistics()}
-	if mailClient != nil {
-		data.Backend = mailClient.Backend()
+	if a.mailClient != nil {
+		data.Backend = a.mailClient.Backend()
 	}
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
