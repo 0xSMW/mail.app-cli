@@ -56,6 +56,10 @@ func TestNormalizeThreadSubject(t *testing.T) {
 		"Fwd: RE:  Invoice": "invoice",
 		"  Project   Plan ": "project plan",
 		"":                  "",
+		"RE:\u2003FW:\u00a0  ΔΟΚΙΜΉ\u0085PLAN":      "δοκιμή plan",
+		"\u1680A\u2003B\u2028C\u202fD\u205fE\u3000": "a b c d e",
+		"Re:\xff A\xfe\tB":                          "� a� b",
+		"Fwd:\xe2\x82\tA":                           "�� a",
 	}
 	for input, want := range tests {
 		if got := NormalizeThreadSubject(input); got != want {
