@@ -16,7 +16,7 @@ func (n *nativeMail) outgoingRuleRefs(name string) ([]ae.Value, error) {
 	if e != nil {
 		return nil, e
 	}
-	refs, e := outgoingList(v, "rules")
+	refs, e := nativeList(v, "rules")
 	if e != nil {
 		return nil, e
 	}
@@ -134,7 +134,7 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 			if e != nil {
 				return e
 			}
-			name, e := outgoingString(f["pnam"], "rule name")
+			name, e := nativeString(f["pnam"], "rule name")
 			if e != nil {
 				return e
 			}
@@ -148,7 +148,7 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 			if e != nil {
 				return fmt.Errorf("read %s conditions: %w", label, e)
 			}
-			conditions, e := outgoingList(v, "rule conditions")
+			conditions, e := nativeList(v, "rule conditions")
 			if e != nil {
 				return e
 			}
@@ -163,7 +163,7 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 						return fmt.Errorf("read %s property %s: expected enumerated value (descriptor kind=%q code=%q)", conditionLabel, code, cf[code].Kind, cf[code].Code)
 					}
 				}
-				expr, e := outgoingString(cf["rexp"], "rule expression")
+				expr, e := nativeString(cf["rexp"], "rule expression")
 				if e != nil {
 					return e
 				}
@@ -181,7 +181,7 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 				if box.Kind == "type" && box.Code == "msng" {
 					rule.Actions = append(rule.Actions, "move to unavailable mailbox")
 				} else {
-					if box.Kind != "object" && box.Kind != "opaque" {
+					if !nativeReference(box) {
 						return fmt.Errorf("read %s move destination property rtme: expected mailbox reference (descriptor kind=%q code=%q)", label, box.Kind, box.Code)
 					}
 					name, e := n.stringProperty("pnam", box)
@@ -285,12 +285,12 @@ func (c *Client) createNativeRule(input RuleInput) (*Rule, error) {
 		owned, e = n.command("core", "crel", map[string]ae.Value{"kocl": ae.TypeCode("rule"), "prdt": ae.Record(map[string]ae.Value{"pnam": ae.String(input.Name), "isac": ae.Bool(false)})})
 		if e != nil {
 			var transport *ae.Error
-			if errors.As(e, &transport) && transport.Attempted && owned.Kind != "object" && owned.Kind != "opaque" {
+			if errors.As(e, &transport) && transport.Attempted && !nativeReference(owned) {
 				cleanup = "rule creation may have completed; owned object descriptor unavailable"
 			}
 			return e
 		}
-		if owned.Kind != "object" && owned.Kind != "opaque" {
+		if !nativeReference(owned) {
 			cleanup = "rule creation receipt did not identify an owned object"
 			return fmt.Errorf("Mail did not return an owned rule")
 		}
@@ -358,7 +358,7 @@ func (c *Client) createNativeRule(input RuleInput) (*Rule, error) {
 		if e != nil {
 			return e
 		}
-		actualConditions, e := outgoingList(conditionValues, "created rule conditions")
+		actualConditions, e := nativeList(conditionValues, "created rule conditions")
 		if e != nil {
 			return e
 		}
@@ -435,7 +435,7 @@ func (c *Client) listNativeSignatures(includeContent bool) ([]Signature, error) 
 		if e != nil {
 			return e
 		}
-		refs, e := outgoingList(v, "signatures")
+		refs, e := nativeList(v, "signatures")
 		if e != nil {
 			return e
 		}
@@ -448,13 +448,13 @@ func (c *Client) listNativeSignatures(includeContent bool) ([]Signature, error) 
 			if e != nil {
 				return e
 			}
-			name, e := outgoingString(f["pnam"], "signature name")
+			name, e := nativeString(f["pnam"], "signature name")
 			if e != nil {
 				return e
 			}
 			signature := Signature{Name: name}
 			if includeContent {
-				signature.Content, e = outgoingString(f["ctnt"], "signature content")
+				signature.Content, e = nativeString(f["ctnt"], "signature content")
 				if e != nil {
 					return e
 				}
