@@ -21,7 +21,7 @@ func (n *nativeMail) outgoingDraftMailbox(account ae.Value) (ae.Value, error) {
 	if e != nil {
 		return ae.Value{}, e
 	}
-	boxes, e := outgoingList(v, "Drafts mailboxes")
+	boxes, e := nativeList(v, "Drafts mailboxes")
 	if e != nil {
 		return ae.Value{}, e
 	}
@@ -100,33 +100,28 @@ func (n *nativeMail) outgoingSnapshotMessage(ref ae.Value, account string, box a
 		return nil, fmt.Errorf("draft account ID readback mismatch")
 	}
 
-	subject, e := outgoingString(f["subj"], "draft subject")
+	subject, e := nativeString(f["subj"], "draft subject")
 	if e != nil {
 		return nil, e
 	}
-	sender, e := outgoingString(f["sndr"], "draft sender")
+	sender, e := nativeString(f["sndr"], "draft sender")
 	if e != nil {
 		return nil, e
 	}
-	content, e := outgoingString(f["ctnt"], "draft content")
+	content, e := nativeString(f["ctnt"], "draft content")
 	if e != nil {
 		return nil, e
 	}
 	m := &Message{ID: id, Account: account, Mailbox: name, Subject: subject, Sender: sender, Content: content}
+	recipients := []*[]string{&m.ToRecipients, &m.CcRecipients, &m.BccRecipients}
 	for i, class := range []string{"trcp", "crcp", "brcp"} {
 		values, e := n.outgoingRecipients(ref, class)
 		if e != nil {
 			return nil, e
 		}
-		switch i {
-		case 0:
-			m.ToRecipients = values
-		case 1:
-			m.CcRecipients = values
-		case 2:
-			m.BccRecipients = values
-		}
+		*recipients[i] = values
 	}
+
 	return m, nil
 }
 func (n *nativeMail) outgoingDraftSnapshot(accountName, draftID string) (*draftSnapshot, ae.Value, error) {
@@ -171,7 +166,7 @@ func (n *nativeMail) outgoingDraftSnapshot(accountName, draftID string) (*draftS
 		if e != nil {
 			return nil, ae.Value{}, e
 		}
-		raw, e := outgoingString(source, "draft raw source")
+		raw, e := nativeString(source, "draft raw source")
 		if e != nil {
 			return nil, ae.Value{}, e
 		}
@@ -233,24 +228,28 @@ func (c *Client) deleteNativeUnchangedDraft(snapshot *draftSnapshot) error {
 		return fmt.Errorf("original draft removal could not be verified after submission")
 	})
 }
+func (n *nativeMail) scopedDraft(accountName, mailboxName, draftID string) (ae.Value, error) {
+	account, e := n.account(accountName)
+	if e != nil {
+		return ae.Value{}, e
+	}
+	box, e := n.outgoingDraftMailbox(account)
+	if e != nil {
+		return ae.Value{}, e
+	}
+	name, e := n.stringProperty("pnam", box)
+	if e != nil {
+		return ae.Value{}, e
+	}
+	if name != mailboxName {
+		return ae.Value{}, fmt.Errorf("draft mailbox identity changed")
+	}
+	return n.message(box, draftID)
+}
+
 func (c *Client) deleteNativeDraft(accountName, mailboxName, draftID string) error {
 	return c.withNativeAutomation(0, func(n *nativeMail) error {
-		account, e := n.account(accountName)
-		if e != nil {
-			return e
-		}
-		box, e := n.outgoingDraftMailbox(account)
-		if e != nil {
-			return e
-		}
-		name, e := n.stringProperty("pnam", box)
-		if e != nil {
-			return e
-		}
-		if name != mailboxName {
-			return fmt.Errorf("draft mailbox identity changed")
-		}
-		ref, e := n.message(box, draftID)
+		ref, e := n.scopedDraft(accountName, mailboxName, draftID)
 		if e != nil {
 			return e
 		}
@@ -261,22 +260,7 @@ func (c *Client) deleteNativeDraft(accountName, mailboxName, draftID string) err
 func (c *Client) nativeDraftAttachments(draft *Message) ([]Attachment, error) {
 	var result []Attachment
 	err := c.withNativeAutomation(0, func(n *nativeMail) error {
-		account, e := n.account(draft.Account)
-		if e != nil {
-			return e
-		}
-		box, e := n.outgoingDraftMailbox(account)
-		if e != nil {
-			return e
-		}
-		name, e := n.stringProperty("pnam", box)
-		if e != nil {
-			return e
-		}
-		if name != draft.Mailbox {
-			return fmt.Errorf("draft mailbox identity changed")
-		}
-		ref, e := n.message(box, draft.ID)
+		ref, e := n.scopedDraft(draft.Account, draft.Mailbox, draft.ID)
 		if e != nil {
 			return e
 		}
@@ -284,7 +268,7 @@ func (c *Client) nativeDraftAttachments(draft *Message) ([]Attachment, error) {
 		if e != nil {
 			return e
 		}
-		items, e := outgoingList(v, "draft attachment list")
+		items, e := nativeList(v, "draft attachment list")
 		if e != nil {
 			return e
 		}
@@ -294,7 +278,7 @@ func (c *Client) nativeDraftAttachments(draft *Message) ([]Attachment, error) {
 			if e != nil {
 				return e
 			}
-			name, e := outgoingString(f["pnam"], "attachment name")
+			name, e := nativeString(f["pnam"], "attachment name")
 			if e != nil {
 				return e
 			}
@@ -324,13 +308,7 @@ func (c *Client) updateNativeDraft(accountName, draftID string, input DraftInput
 	if e != nil {
 		return nil, e
 	}
-	replacement := DraftInput{Account: draft.Account, Sender: sender, Subject: draft.Subject, Body: body, To: draft.ToRecipients, Cc: draft.CcRecipients, Bcc: draft.BccRecipients}
-	if input.SubjectSet {
-		replacement.Subject = input.Subject
-	}
-	if input.BodySet {
-		replacement.Body = input.Body
-	}
+	replacement := draftReplacement(draft.Account, draft, sender, body, input)
 	if replacement.Subject == draft.Subject && replacement.Body == body && len(attachments) == 0 {
 		return draft, nil
 	}
