@@ -423,10 +423,7 @@ function messageById(mbox, messageId) {
 }
 
 func appleScriptBool(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
+	return jxaBool(value)
 }
 
 func appleScriptStringList(values []string) string {
@@ -435,15 +432,4 @@ func appleScriptStringList(values []string) string {
 		escaped = append(escaped, `"`+escapeAppleScriptString(value)+`"`)
 	}
 	return strings.Join(escaped, ", ")
-}
-
-func appleScriptRecipientBlock(kind string, values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(`
-		repeat with addr in {%s}
-			make new %s recipient at end of %s recipients with properties {address:addr}
-		end repeat
-`, appleScriptStringList(values), kind, kind)
 }
