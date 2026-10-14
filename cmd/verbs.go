@@ -3,7 +3,6 @@ package cmd
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v3/internal/config"
@@ -17,72 +16,34 @@ import (
 // resolves their mailbox through the Envelope Index unless --mailbox says
 // otherwise.
 
-var (
-	verbDryRun           bool
-	verbVerify           bool
-	verbMoveTo           string
-	verbLimit            int
-	verbOffset           int
-	verbUnread           bool
-	verbWithContent      bool
-	verbMetadataOnly     bool
-	verbBodySource       string
-	verbBodyAlternatives bool
-	verbSettle           time.Duration
-	verbVerifyBudget     time.Duration
-)
-
-var inboxCmd = &cobra.Command{
-	Use:   "inbox",
-	Short: "List INBOX across accounts, one account with --account, or another mailbox with --mailbox",
-	Annotations: map[string]string{
-		annotationAgentNotes: "Newest first. Without --account this merges every enabled account's INBOX. IDs feed show, seen, flag, archive, delete, and move.",
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		kind := "inbox"
-		if verbUnread {
-			kind = "unread"
-		}
-		return listUnified(kind, verbLimit, verbOffset, verbWithContent)
-	},
-}
-
-var unreadCmd = &cobra.Command{
-	Use:   "unread",
-	Short: "List unread inbox messages",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return listUnified("unread", verbLimit, verbOffset, verbWithContent)
-	},
-}
-
 // listUnified lists an inbox-style view: one account when in scope,
 // otherwise all enabled accounts merged.
-func listUnified(kind string, limit, offset int, withContent bool) error {
+func (a *application) listUnified(kind string, limit, offset int, withContent bool) error {
 	var messages []mail.Message
 	var err error
 	meta := map[string]any{"view": kind}
-	scoped := unifiedListingScoped(resolved)
+	scoped := unifiedListingScoped(a.resolved)
 	if scoped {
-		account, accountErr := requireAccount()
+		account, accountErr := a.requireAccount()
 		if accountErr != nil {
 			return accountErr
 		}
-		mailbox, mailboxErr := unifiedMailboxForAccount(account, kind)
+		mailbox, mailboxErr := a.unifiedMailboxForAccount(account, kind)
 		if mailboxErr != nil {
 			return mailboxErr
 		}
 		unreadOnly, flaggedOnly := scopedUnifiedFilters(kind)
-		messages, err = mailClient.GetMessagesJSON(account, mailbox, limit, offset, unreadOnly, flaggedOnly, withContent, "")
+		messages, err = a.mailClient.GetMessagesJSON(account, mailbox, limit, offset, unreadOnly, flaggedOnly, withContent, "")
 		meta["account"] = account
 		meta["mailbox"] = mailbox
 	} else {
-		messages, err = mailClient.GetUnifiedMessagesJSON(kind, limit, offset, withContent)
+		messages, err = a.mailClient.GetUnifiedMessagesJSON(kind, limit, offset, withContent)
 		meta["account"] = "all"
 	}
 	if err != nil {
 		return fmt.Errorf("list %s: %w", kind, err)
 	}
-	return writer.Write(output.Result{
+	return a.writer.Write(output.Result{
 		Data:    messages,
 		Summary: fmt.Sprintf("%s in %s", plural(len(messages), "message"), kind),
 		Meta:    meta,
@@ -100,14 +61,14 @@ func unifiedListingScoped(scope config.Resolved) bool {
 // unifiedMailboxForAccount respects a configured mailbox. When an account is
 // the only scope, special views use that account's real special mailbox name
 // (for example, "Sent Items") instead of falling back to INBOX.
-func unifiedMailboxForAccount(account, kind string) (string, error) {
-	if resolved.Mailbox.Source != config.SourceDefault {
-		return mailboxInScope(), nil
+func (a *application) unifiedMailboxForAccount(account, kind string) (string, error) {
+	if a.resolved.Mailbox.Source != config.SourceDefault {
+		return a.mailboxInScope(), nil
 	}
 	if _, special := specialMailboxCandidates(kind); !special {
 		return "INBOX", nil
 	}
-	mailboxes, err := mailClient.GetMailboxesJSON(account)
+	mailboxes, err := a.mailClient.GetMailboxesJSON(account)
 	if err != nil {
 		return "", fmt.Errorf("list mailboxes for %s: %w", account, err)
 	}
@@ -148,24 +109,8 @@ func specialMailboxCandidates(kind string) ([]string, bool) {
 	}
 }
 
-var showCmd = &cobra.Command{
-	Use:   "show <message-id>",
-	Short: "Show a message with its body",
-	Args:  cobra.ExactArgs(1),
-	Annotations: map[string]string{
-		annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. The body is read from Mail.app's message file and contentSource says where it came from. --metadata-only skips the body.",
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := mailClient.SetBodySource(verbBodySource); err != nil {
-			return clierr.Usage(`--body-source must be "disk" or "mail"`)
-		}
-		mailClient.SetBodyAlternatives(verbBodyAlternatives)
-		return showMessage(args[0], verbMetadataOnly)
-	},
-}
-
-func showMessage(id string, metadataOnly bool) error {
-	refs, notices, err := locateMessages([]string{id})
+func (a *application) showMessage(id string, metadataOnly bool) error {
+	refs, notices, err := a.locateMessages([]string{id})
 	if err != nil {
 		return err
 	}
@@ -174,7 +119,7 @@ func showMessage(id string, metadataOnly bool) error {
 	if metadataOnly && ref.Envelope != nil {
 		message = ref.Envelope
 	} else {
-		message, err = mailClient.GetMessageDetailsJSON(ref.Account, ref.Mailbox, ref.ID)
+		message, err = a.mailClient.GetMessageDetailsJSON(ref.Account, ref.Mailbox, ref.ID)
 		if err != nil {
 			return fmt.Errorf("get message: %w", err)
 		}
@@ -187,7 +132,7 @@ func showMessage(id string, metadataOnly bool) error {
 		}
 	}
 	_ = mail.RecordRecentMessage(*message, "show")
-	return writer.Write(output.Result{
+	return a.writer.Write(output.Result{
 		Data:    message,
 		Summary: fmt.Sprintf("%s from %s", output.Truncate(message.Subject, 60), displaySender(message.Sender)),
 		Notices: notices,
@@ -196,7 +141,7 @@ func showMessage(id string, metadataOnly bool) error {
 	})
 }
 
-func newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutator)) *cobra.Command {
+func (a *application) newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutator)) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use + " <message-id>...",
 		Short: short,
@@ -204,75 +149,115 @@ func newIDVerb(use, short, action string, build func() (batchOptions, mail.Mutat
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts, mutate := build()
 			opts.Action = action
-			opts.DryRun = verbDryRun
-			opts.Verify = verbVerify
-			opts.Settle, opts.VerifyBudget = verbSettle, verbVerifyBudget
+			opts.DryRun = a.verbDryRun
+			opts.Verify = a.verbVerify
+			opts.Settle, opts.VerifyBudget = a.verbSettle, a.verbVerifyBudget
 			opts.Journal = true
 			if err := mail.ValidateBatchOptions(opts); err != nil {
 				return clierr.Usage(err.Error())
 			}
-			return mutateByIDs(args, opts, mutate)
+			return a.mutateByIDs(args, opts, mutate)
 		},
 	}
-	cmd.Flags().BoolVar(&verbDryRun, "dry-run", false, "Report what would change without touching Mail.app")
-	cmd.Flags().BoolVar(&verbVerify, "verify", false, "Re-read each message after mutation and record the outcome")
-	cmd.Flags().DurationVar(&verbSettle, "settle", 0, "Verification settling window (0 uses the default)")
-	cmd.Flags().DurationVar(&verbVerifyBudget, "verify-budget", mail.DefaultVerifyBudget, "Overall verification and identity capture budget per stage")
+	cmd.Flags().BoolVar(&a.verbDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+	cmd.Flags().BoolVar(&a.verbVerify, "verify", false, "Re-read each message after mutation and record the outcome")
+	cmd.Flags().DurationVar(&a.verbSettle, "settle", 0, "Verification settling window (0 uses the default)")
+	cmd.Flags().DurationVar(&a.verbVerifyBudget, "verify-budget", mail.DefaultVerifyBudget, "Overall verification and identity capture budget per stage")
 	return cmd
 }
 
-var seenCmd = newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mail.Mutator) {
-	return batchOptions{Read: true}, mail.MarkMutator(true)
-})
+const bodySourceUsage = `Where the body comes from: "disk" reads Mail.app's message file and asks Mail.app only when there is none, "mail" always asks Mail.app to render it`
 
-var unseenCmd = newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mail.Mutator) {
-	return batchOptions{Read: false}, mail.MarkMutator(false)
-})
+func (a *application) buildVerbsCommands() {
+	var (
+		verbUnread           bool
+		verbLimit            int
+		verbOffset           int
+		verbWithContent      bool
+		verbBodySource       string
+		verbBodyAlternatives bool
+		verbMetadataOnly     bool
+		verbMoveTo           string
+	)
 
-var flagCmd = newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mail.Mutator) {
-	return batchOptions{Flagged: true}, mail.FlagMutator(true)
-})
+	a.inboxCmd = &cobra.Command{
+		Use:   "inbox",
+		Short: "List INBOX across accounts, one account with --account, or another mailbox with --mailbox",
+		Annotations: map[string]string{
+			annotationAgentNotes: "Newest first. Without --account this merges every enabled account's INBOX. IDs feed show, seen, flag, archive, delete, and move.",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			kind := "inbox"
+			if verbUnread {
+				kind = "unread"
+			}
+			return a.listUnified(kind, verbLimit, verbOffset, verbWithContent)
+		},
+	}
+	a.unreadCmd = &cobra.Command{
+		Use:   "unread",
+		Short: "List unread inbox messages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.listUnified("unread", verbLimit, verbOffset, verbWithContent)
+		},
+	}
+	a.showCmd = &cobra.Command{
+		Use:   "show <message-id>",
+		Short: "Show a message with its body",
+		Args:  cobra.ExactArgs(1),
+		Annotations: map[string]string{
+			annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. The body is read from Mail.app's message file and contentSource says where it came from. --metadata-only skips the body.",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := a.mailClient.SetBodySource(verbBodySource); err != nil {
+				return clierr.Usage(`--body-source must be "disk" or "mail"`)
+			}
+			a.mailClient.SetBodyAlternatives(verbBodyAlternatives)
+			return a.showMessage(args[0], verbMetadataOnly)
+		},
+	}
+	a.seenCmd = a.newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mail.Mutator) {
+		return batchOptions{Read: true}, mail.MarkMutator(true)
+	})
+	a.unseenCmd = a.newIDVerb("unseen", "Mark messages unread", "mark", func() (batchOptions, mail.Mutator) {
+		return batchOptions{Read: false}, mail.MarkMutator(false)
+	})
+	a.flagCmd = a.newIDVerb("flag", "Flag messages", "flag", func() (batchOptions, mail.Mutator) {
+		return batchOptions{Flagged: true}, mail.FlagMutator(true)
+	})
+	a.unflagCmd = a.newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mail.Mutator) {
+		return batchOptions{Flagged: false}, mail.FlagMutator(false)
+	})
+	a.archiveCmd = a.newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mail.Mutator) {
+		return batchOptions{}, mail.ArchiveMutator(true)
+	})
+	a.deleteCmd = a.newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mail.Mutator) {
+		return batchOptions{}, mail.DeleteMutator
+	})
+	a.moveCmd = a.newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mail.Mutator) {
+		return batchOptions{TargetMailbox: verbMoveTo}, mail.MoveMutator(true)
+	})
 
-var unflagCmd = newIDVerb("unflag", "Unflag messages", "flag", func() (batchOptions, mail.Mutator) {
-	return batchOptions{Flagged: false}, mail.FlagMutator(false)
-})
-
-var archiveCmd = newIDVerb("archive", "Archive messages (All Mail on Gmail, Archive elsewhere)", "archive", func() (batchOptions, mail.Mutator) {
-	return batchOptions{}, mail.ArchiveMutator(true)
-})
-
-var deleteCmd = newIDVerb("delete", "Move messages to the trash", "delete", func() (batchOptions, mail.Mutator) {
-	return batchOptions{}, mail.DeleteMutator
-})
-
-var moveCmd = newIDVerb("move", "Move messages to another mailbox", "move", func() (batchOptions, mail.Mutator) {
-	return batchOptions{TargetMailbox: verbMoveTo}, mail.MoveMutator(true)
-})
-
-func init() {
-	for _, cmd := range []*cobra.Command{inboxCmd, unreadCmd} {
-		cmd.Flags().IntVarP(&verbLimit, "limit", "l", 25, "Maximum messages to return")
-		cmd.Flags().IntVarP(&verbOffset, "offset", "o", 0, "Messages to skip (pagination)")
+	for _, cmd := range []*cobra.Command{a.inboxCmd, a.unreadCmd} {
+		registerPagingFlags(cmd, &verbLimit, &verbOffset)
 		cmd.Flags().BoolVar(&verbWithContent, "with-content", false, "Include bodies (slow: one Mail.app call per ten messages)")
 	}
-	inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
-	showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
-	showCmd.Flags().BoolVar(&verbBodyAlternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
-	showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
+	a.inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
+	a.showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
+	a.showCmd.Flags().BoolVar(&verbBodyAlternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
+	a.showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
 
-	moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
-	_ = moveCmd.MarkFlagRequired("to")
-	archiveCmd.Annotations = map[string]string{
+	a.moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
+	_ = a.moveCmd.MarkFlagRequired("to")
+	a.archiveCmd.Annotations = map[string]string{
 		annotationAgentNotes: "Archiving a Gmail INBOX message moves it to All Mail. Archiving something already in All Mail changes nothing and is reported as skipped (\"already in All Mail\") with exit 0. Mail.app assigns a moved message a new ID; find it again with search or recent.",
 	}
-	deleteCmd.Annotations = map[string]string{
+	a.deleteCmd.Annotations = map[string]string{
 		annotationAgentNotes: "delete moves to Trash through Mail.app; it does not purge. Preview with --dry-run. The message gets a new ID in Trash.",
 	}
-	moveCmd.Annotations = map[string]string{
+	a.moveCmd.Annotations = map[string]string{
 		annotationAgentNotes: "--to takes a mailbox name in the same account. Use 'mailboxes list' to see names. Mail.app assigns the moved message a new ID in the target mailbox.",
 	}
-	seenCmd.Annotations = map[string]string{annotationAgentNotes: "Idempotent. Multiple IDs are applied one Mail.app call at a time."}
-	unseenCmd.Annotations = seenCmd.Annotations
+	a.seenCmd.Annotations = map[string]string{annotationAgentNotes: "Idempotent. Multiple IDs are applied one Mail.app call at a time."}
+	a.unseenCmd.Annotations = a.seenCmd.Annotations
 }
-
-const bodySourceUsage = `Where the body comes from: "disk" reads Mail.app's message file and asks Mail.app only when there is none, "mail" always asks Mail.app to render it`
