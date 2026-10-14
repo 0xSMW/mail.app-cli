@@ -149,40 +149,27 @@ func (n *nativeMail) set(object, value appleevents.Value) error {
 func (n *nativeMail) command(class, id string, params map[string]appleevents.Value) (appleevents.Value, error) {
 	return n.event(class, id, params)
 }
-func (n *nativeMail) stringProperty(code string, object appleevents.Value) (string, error) {
+func (n *nativeMail) property(code string, object appleevents.Value, kind, label string) (appleevents.Value, error) {
 	v, err := n.get(appleevents.Property(code, object))
 	if err != nil {
-		return "", err
+		return appleevents.Value{}, err
 	}
-	if v.Kind != "string" {
-		return "", fmt.Errorf("Mail property %s returned %s; expected string", code, v.Kind)
+	if v.Kind != kind {
+		return appleevents.Value{}, fmt.Errorf("Mail property %s returned %s; expected %s", code, v.Kind, label)
 	}
-	return v.Text, nil
+	return v, nil
+}
+func (n *nativeMail) stringProperty(code string, object appleevents.Value) (string, error) {
+	v, err := n.property(code, object, "string", "string")
+	return v.Text, err
 }
 func (n *nativeMail) intProperty(code string, object appleevents.Value) (int64, error) {
-	v, err := n.get(appleevents.Property(code, object))
-	if err != nil {
-		return 0, err
-	}
-	if v.Kind != "int" {
-		return 0, fmt.Errorf("Mail property %s returned %s; expected integer", code, v.Kind)
-	}
-	return v.Number, nil
+	v, err := n.property(code, object, "int", "integer")
+	return v.Number, err
 }
 func (n *nativeMail) boolProperty(code string, object appleevents.Value) (bool, error) {
-	v, err := n.get(appleevents.Property(code, object))
-	if err != nil {
-		return false, err
-	}
-	if v.Kind != "bool" {
-		return false, fmt.Errorf("Mail property %s returned %s; expected boolean", code, v.Kind)
-	}
-	return v.Boolean, nil
-}
-
-func nativeMissing(err error) bool {
-	var e *appleevents.Error
-	return errors.As(err, &e) && e.Code == -1728
+	v, err := n.property(code, object, "bool", "boolean")
+	return v.Boolean, err
 }
 
 // getFields first asks Mail to resolve a list of property specifiers in one
@@ -206,12 +193,15 @@ func (n *nativeMail) getFields(object appleevents.Value, codes ...string) (map[s
 		return out, nil
 	}
 	if err != nil {
-		var ae *appleevents.Error
-		if !errors.As(err, &ae) || (ae.Code != -1708 && ae.Code != -1700) {
+		if !nativeAppleError(err, -1708, -1700) {
 			return nil, err
 		}
 		n.splitProperties = true
 	}
+	return n.directFields(object, codes...)
+}
+
+func (n *nativeMail) directFields(object appleevents.Value, codes ...string) (map[string]appleevents.Value, error) {
 	out := make(map[string]appleevents.Value, len(codes))
 	for _, code := range codes {
 		value, e := n.get(appleevents.Property(code, object))
