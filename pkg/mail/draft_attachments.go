@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"golang.org/x/text/unicode/norm"
 )
@@ -46,22 +45,6 @@ func ValidateDraftAttachments(paths []string) ([]string, error) {
 		resolved = append(resolved, absolute)
 	}
 	return resolved, nil
-}
-
-func draftAttachmentScript(paths []string) string {
-	var script strings.Builder
-	for i, path := range paths {
-		// Do not swallow Mail errors: an incomplete draft is not success.
-		fmt.Fprintf(&script, "\ntell content\nmake new attachment with properties {file name:(POSIX file \"%s\")} at after the last paragraph\nend tell\n", escapeAppleScriptString(path))
-		fmt.Fprintf(&script, `
-repeat 50 times
- if (count attachments of content) >= %d then exit repeat
- delay 0.1
-end repeat
-if (count attachments of content) < %d then error "Attachment did not finish loading"
-`, i+1, i+1)
-	}
-	return script.String()
 }
 
 // Unlike the best-effort public listing, preservation must distinguish an
