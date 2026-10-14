@@ -132,22 +132,24 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check Mail.app access, permissions, and index availability",
-	Annotations: map[string]string{
-		annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		result := diagnose(mailClient, version, os.Executable)
-		summary := "healthy"
-		if !result.Healthy {
-			summary = "not healthy"
-		}
-		var failure *clierr.Error
-		if !result.Healthy {
-			failure = clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
-		}
-		return writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
-	},
+func (a *application) buildDoctorCommands() {
+	a.doctorCmd = &cobra.Command{
+		Use:   "doctor",
+		Short: "Check Mail.app access, permissions, and index availability",
+		Annotations: map[string]string{
+			annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result := diagnose(a.mailClient, version, os.Executable)
+			summary := "healthy"
+			if !result.Healthy {
+				summary = "not healthy"
+			}
+			var failure *clierr.Error
+			if !result.Healthy {
+				failure = clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
+			}
+			return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
+		},
+	}
 }
