@@ -107,49 +107,67 @@ func messageDataDirectory(id int64) string {
 // for it. It fails when the file is missing or when it cannot decode a text
 // body, and the caller then asks Mail.app instead.
 func (c *Client) readMessageBodyFromDisk(messageID string) (string, error) {
+	text, _, err := c.readMessageBodyFromDiskWithDiagnostics(messageID)
+	return text, err
+}
+
+func (c *Client) readMessageBodyFromDiskWithDiagnostics(messageID string) (string, *BodyDiagnostics, error) {
 	path, err := c.messageFilePath(messageID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return readEMLXBody(path)
+	return readEMLXBodyWithDiagnostics(path)
 }
 
 func readEMLXBody(path string) (string, error) {
+	text, _, err := readEMLXBodyWithDiagnostics(path)
+	return text, err
+}
+
+func readEMLXBodyWithDiagnostics(path string) (content string, diagnostics *BodyDiagnostics, extractionErr error) {
+	diagnostics = &BodyDiagnostics{PartialFile: strings.HasSuffix(path, ".partial.emlx")}
+	defer func() {
+		if extractionErr != nil {
+			diagnostics.ExtractionError = extractionErr.Error()
+		}
+		diagnostics.finish()
+	}()
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return "", diagnostics, err
 	}
 	if info.Size() > maxMessageFileSize {
-		return "", fmt.Errorf("message file is larger than %d bytes", maxMessageFileSize)
+		return "", diagnostics, fmt.Errorf("message file is larger than %d bytes", maxMessageFileSize)
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", err
+		return "", diagnostics, err
 	}
 	// The first line is the byte length of the message that follows it. A
 	// property list follows the message.
 	newline := bytes.IndexByte(data, '\n')
 	if newline < 0 {
-		return "", fmt.Errorf("message file has no length line")
+		return "", diagnostics, fmt.Errorf("message file has no length line")
 	}
 	length, err := strconv.Atoi(strings.TrimSpace(string(data[:newline])))
 	if err != nil || length < 0 || newline+1+length > len(data) {
-		return "", fmt.Errorf("message file has an invalid length line")
+		return "", diagnostics, fmt.Errorf("message file has an invalid length line")
 	}
 	message, err := mail.ReadMessage(bytes.NewReader(data[newline+1 : newline+1+length]))
 	if err != nil {
-		return "", fmt.Errorf("parse message file: %w", err)
+		return "", diagnostics, fmt.Errorf("parse message file: %w", err)
 	}
 	header := map[string][]string(message.Header)
-	text, err := mimeBodyText(func(key string) string { return firstHeader(header, key) }, message.Body, false, 0)
+	text, err := mimeBodyTextWithDiagnostics(func(key string) string { return firstHeader(header, key) }, message.Body, false, 0, "1", diagnostics)
 	if err != nil {
-		return "", err
+		return "", diagnostics, err
 	}
 	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
 	if text == "" {
-		return "", fmt.Errorf("message file holds no text body")
+		return "", diagnostics, fmt.Errorf("message file holds no text body")
 	}
-	return text, nil
+	diagnostics.ExtractedCharCount = utf8.RuneCountInString(text)
+	return text, diagnostics, nil
 }
 
 func firstHeader(header map[string][]string, key string) string {
@@ -164,6 +182,10 @@ func firstHeader(header map[string][]string, key string) string {
 // mimeBodyText returns the readable text of one MIME entity. decoded is true
 // when the reader already removed the transfer encoding.
 func mimeBodyText(header func(string) string, body io.Reader, decoded bool, depth int) (string, error) {
+	return mimeBodyTextWithDiagnostics(header, body, decoded, depth, "1", nil)
+}
+
+func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, decoded bool, depth int, partPath string, diagnostics *BodyDiagnostics) (string, error) {
 	if depth > 8 {
 		return "", fmt.Errorf("message nests MIME parts too deeply")
 	}
@@ -175,7 +197,19 @@ func mimeBodyText(header func(string) string, body io.Reader, decoded bool, dept
 	if err != nil {
 		return "", fmt.Errorf("parse content type %q: %w", contentType, err)
 	}
+	if diagnostics != nil {
+		diagnostics.MIMEPartCount++
+		if strings.HasPrefix(mediaType, "image/") {
+			diagnostics.ImagePartCount++
+		}
+		if !strings.HasPrefix(mediaType, "multipart/") && mediaType != "text/plain" && mediaType != "text/html" {
+			diagnostics.NonTextPartCount++
+		}
+	}
 	if disposition, _, err := mime.ParseMediaType(header("Content-Disposition")); err == nil && disposition == "attachment" {
+		if diagnostics != nil {
+			diagnostics.AttachmentPartCount++
+		}
 		return "", nil
 	}
 	if !decoded {
@@ -194,6 +228,8 @@ func mimeBodyText(header func(string) string, body io.Reader, decoded bool, dept
 		}
 		reader := multipart.NewReader(body, boundary)
 		var plain, rich []string
+		var plainAlternatives, richAlternatives []int
+		partNumber := 0
 		for {
 			part, err := reader.NextRawPart()
 			if err == io.EOF {
@@ -203,26 +239,42 @@ func mimeBodyText(header func(string) string, body io.Reader, decoded bool, dept
 				return "", fmt.Errorf("read MIME part: %w", err)
 			}
 			partType, _, _ := mime.ParseMediaType(part.Header.Get("Content-Type"))
-			text, err := mimeBodyText(part.Header.Get, part, false, depth+1)
+			partNumber++
+			childPath := partPath + "." + strconv.Itoa(partNumber)
+			text, err := mimeBodyTextWithDiagnostics(part.Header.Get, part, false, depth+1, childPath, diagnostics)
 			if err != nil {
 				return "", err
+			}
+			alternativeIndex := -1
+			if diagnostics != nil && mediaType == "multipart/alternative" {
+				alternativeIndex = len(diagnostics.Alternatives)
+				normalized := normalizeBodyText(text)
+				alternativeType := partType
+				if alternativeType == "" && part.Header.Get("Content-Type") == "" {
+					alternativeType = "text/plain"
+				}
+				diagnostics.Alternatives = append(diagnostics.Alternatives, BodyAlternative{Group: partPath, Part: childPath, MediaType: alternativeType, Text: normalized, ExtractedCharCount: utf8.RuneCountInString(normalized)})
 			}
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
 			if partType == "text/html" {
 				rich = append(rich, text)
+				richAlternatives = append(richAlternatives, alternativeIndex)
 			} else {
 				plain = append(plain, text)
+				plainAlternatives = append(plainAlternatives, alternativeIndex)
 			}
 		}
 		if mediaType == "multipart/alternative" {
 			// The parts are renderings of one body. Mail.app shows the last
 			// one it can display, which is the HTML part when there is one.
 			if len(rich) > 0 {
+				markSelectedAlternative(diagnostics, richAlternatives[len(richAlternatives)-1])
 				return rich[len(rich)-1], nil
 			}
 			if len(plain) > 0 {
+				markSelectedAlternative(diagnostics, plainAlternatives[len(plainAlternatives)-1])
 				return plain[len(plain)-1], nil
 			}
 			return "", nil
@@ -238,6 +290,9 @@ func mimeBodyText(header func(string) string, body io.Reader, decoded bool, dept
 			return "", err
 		}
 		if mediaType == "text/html" {
+			if diagnostics != nil {
+				diagnostics.inspectHTML(text)
+			}
 			return htmlToText(text), nil
 		}
 		return unquotePlainText(text), nil

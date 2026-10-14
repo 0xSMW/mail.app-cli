@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
@@ -271,6 +272,9 @@ var (
 	batchRead           bool
 	batchFlagged        bool
 	batchMarkReadBefore bool
+	batchMarkReadOnSkip bool
+	batchSettle         time.Duration
+	batchVerifyBudget   time.Duration
 	batchVerify         bool
 	batchProgress       bool
 	batchChunkSize      int
@@ -335,6 +339,9 @@ func batchOptionsFromFlags(action, target string) batchOptions {
 		DryRun:         batchDryRun,
 		Verify:         batchVerify,
 		MarkReadBefore: batchMarkReadBefore,
+		MarkReadOnSkip: batchMarkReadOnSkip,
+		Settle:         batchSettle,
+		VerifyBudget:   batchVerifyBudget,
 		ChunkSize:      batchChunkSize,
 		ReuseBridge:    true,
 		Read:           batchRead,
@@ -348,6 +355,9 @@ func batchOptionsFromFlags(action, target string) batchOptions {
 
 func runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mail.Mutator) error {
 	opts := batchOptionsFromFlags(action, targetMailbox)
+	if err := mail.ValidateBatchOptions(opts); err != nil {
+		return clierr.Usage(err.Error())
+	}
 	bySelector := batchQuery != "" || batchSender != "" || batchSenderDomain != ""
 	if bySelector && (len(argIDs) > 0 || batchStdin) {
 		return clierr.Usage("--query, --sender, and --sender-domain cannot be combined with message IDs or --stdin")
@@ -460,12 +470,15 @@ func init() {
 		cmd.Flags().BoolVar(&batchDryRun, "dry-run", false, "Report what would change without touching Mail.app")
 		cmd.Flags().BoolVar(&batchYes, "yes", false, "Confirm a selector-driven archive, delete, or move")
 		cmd.Flags().BoolVar(&batchMarkReadBefore, "mark-read", false, "Mark each selected message read before archive/delete/move")
+		cmd.Flags().DurationVar(&batchSettle, "settle", 0, "Extend the final verification observation window (up to 5m)")
+		cmd.Flags().DurationVar(&batchVerifyBudget, "verify-budget", 0, "Bound all verification checks (default 30s, up to 10m)")
 		cmd.Flags().BoolVar(&batchVerify, "verify", false, "Re-read each message after mutation and record the outcome")
 		cmd.Flags().BoolVar(&batchProgress, "progress", false, "Print per-chunk and per-message progress to stderr")
 		cmd.Flags().IntVar(&batchChunkSize, "chunk-size", 0, "Process selected messages in chunks of this size")
 		cmd.Flags().StringVar(&batchReportFile, "report-file", "", "Also write the receipt JSON to this path; journal uses .journal.jsonl")
 		cmd.Flags().IntVarP(&batchLimit, "limit", "l", 100, "Maximum selector-selected messages")
 	}
+	messagesBatchArchiveCmd.Flags().BoolVar(&batchMarkReadOnSkip, "mark-read-on-skip", false, "Mark already archived messages read; requires --mark-read")
 	messagesBatchMarkCmd.Flags().BoolVar(&batchRead, "read", true, "Mark messages read; use --read=false for unread")
 	messagesBatchFlagCmd.Flags().BoolVar(&batchFlagged, "flagged", true, "Flag messages; use --flagged=false to unflag")
 }

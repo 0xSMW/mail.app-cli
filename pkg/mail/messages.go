@@ -282,10 +282,12 @@ func (c *Client) getMessageDetailsFromMail(accountName, mailboxName, messageID s
 // request, and that request can stall it for every later caller.
 func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID string, timeout time.Duration, preferDisk bool) (*Message, *PhaseTrace, error) {
 	var diskPhase *AutomationPhase
+	var bodyDiagnostics *BodyDiagnostics
 	diskBody, haveDiskBody := "", false
 	if preferDisk {
 		started := time.Now()
-		body, err := c.readMessageBodyFromDisk(messageID)
+		body, diagnostics, err := c.readMessageBodyFromDiskWithDiagnostics(messageID)
+		bodyDiagnostics = diagnostics
 		diskPhase = &AutomationPhase{Name: "disk_body", ElapsedMs: time.Since(started).Milliseconds()}
 		if err != nil {
 			if ctxErr := c.Done(); ctxErr != nil {
@@ -445,6 +447,12 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
 	}
 	if message := envelope.Message; message != nil {
+		if bodyDiagnostics != nil && !c.shared.bodyAlternatives {
+			for i := range bodyDiagnostics.Alternatives {
+				bodyDiagnostics.Alternatives[i].Text = ""
+			}
+		}
+		message.BodyDiagnostics = bodyDiagnostics
 		message.ContentSource = "mail"
 		if haveDiskBody {
 			message.Content, message.ContentSource = diskBody, "disk"
@@ -489,21 +497,6 @@ try {
 }
 
 if (msg !== null) {
-	const toRecipients = [];
-	const toRecs = msg.toRecipients();
-	for (let t = 0; t < toRecs.length; t++) {
-		toRecipients.push(toRecs[t].address());
-	}
-	const ccRecipients = [];
-	const ccRecs = msg.ccRecipients();
-	for (let c = 0; c < ccRecs.length; c++) {
-		ccRecipients.push(ccRecs[c].address());
-	}
-	const bccRecipients = [];
-	const bccRecs = msg.bccRecipients();
-	for (let b = 0; b < bccRecs.length; b++) {
-		bccRecipients.push(bccRecs[b].address());
-	}
 	result = {
 		id: String(msg.id()),
 		rfcMessageId: rfcMessageId(msg),
@@ -514,19 +507,15 @@ if (msg !== null) {
 		read: msg.readStatus(),
 		flagged: msg.flaggedStatus(),
 		messageSize: msg.messageSize(),
-		content: msg.content() || '',
 		mailbox: mbox.name(),
-		account: acc.name(),
-		toRecipients: toRecipients,
-		ccRecipients: ccRecipients,
-		bccRecipients: bccRecipients
+		account: acc.name()
 	};
 }
 
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), escapeJSString(messageID))
 
-	output, err := c.runJXA(script)
+	output, err := c.runJXAWithTimeout(script, identityEnrichmentTimeout)
 	if err != nil {
 		return nil, err
 	}

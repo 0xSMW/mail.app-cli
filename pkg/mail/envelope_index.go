@@ -129,6 +129,12 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 		return err
 	}
 	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
+	// Combined verification scopes can exceed the OS argument-size limit.
+	// Stream large statements without splitting their database snapshot.
+	if len(query) > 64*1024 {
+		cmd = exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath)
+		cmd.Stdin = strings.NewReader(query)
+	}
 	var out bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
@@ -495,21 +501,9 @@ func (c *Client) getIdentityMatchesForVerification(accountName, mailboxName stri
 	if !ok {
 		return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s", mailboxName)
 	}
-	conditions := make([]string, 0, len(identities))
-	seen := make(map[string]bool)
-	for _, identity := range identities {
-		if !identity.hasFallback() {
-			return nil, fmt.Errorf("stable identity lacks complete indexed metadata")
-		}
-		key := identity.fallbackKey()
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-		conditions = append(conditions, fmt.Sprintf(`(coalesce(s.subject, '') = %s
-		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
-		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
-		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
+	conditions, err := indexIdentityConditions(identities)
+	if err != nil {
+		return nil, err
 	}
 	if len(conditions) == 0 {
 		return map[string][]Message{}, nil
@@ -529,6 +523,26 @@ where %s
 		matches[key] = append(matches[key], message)
 	}
 	return matches, nil
+}
+
+func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
+	conditions := make([]string, 0, len(identities))
+	seen := make(map[string]bool)
+	for _, identity := range identities {
+		if !identity.hasFallback() {
+			return nil, fmt.Errorf("stable identity lacks complete indexed metadata")
+		}
+		key := identity.fallbackKey()
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		conditions = append(conditions, fmt.Sprintf(`(coalesce(s.subject, '') = %s
+		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
+		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
+		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
+	}
+	return conditions, nil
 }
 
 func indexSearchTermConditions(terms []string) []string {

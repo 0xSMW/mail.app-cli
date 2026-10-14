@@ -156,7 +156,10 @@ The existing single-message `show` output is unchanged apart from an optional
 Batch mark, flag, delete, and move reuse a serial bridge in chunks of at most 25
 messages. Receipts remain durable between every message phase. Mark/flag
 verification stops polling each ID when its requested state is observed;
-delete and Gmail archive retain their settling checks. `--mark-read` marks the
+delete and Gmail archive retain their settling checks. Verified Gmail archives
+observe local membership across a 3.85-second default window after an account-scoped
+IMAP synchronization request. Source and destination share one indexed snapshot
+per observation; `--settle 10s` requests a longer window. `--mark-read` marks the
 source before relocation; still check destination read status and visible copies
 when your workflow requires them.
 
@@ -297,6 +300,12 @@ mail-app-cli drafts delete <draft-id> --dry-run
 
 Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. `--dry-run` validates paths and previews the requested files without changing Mail.
 
+`send` and `drafts create` accept `--from <address>` to select an address configured on the account. Without it, they use the first configured address. Both validate the account and read the compose sender back before sending or saving; an unexpected sender or an address shared across accounts stops the operation. Draft updates preserve the original sender. Dry-run receipts include the account ID and selected sender, and validate the configured identity without composing a message. Sender validation does not establish which delivery route Mail will use.
+
+Outgoing commands require Mail to acknowledge the operation. A failure returns a nonzero exit; an uncertain submission must be checked before retrying. `sent` and `submitted` indicate Mail accepted submission, not recipient delivery. Draft creation verifies the saved draft directly through Mail rather than waiting for the search index. It identifies the account’s Drafts folder through Mail’s special mailbox references, including localized and nested folders.
+
+`drafts send` rebuilds supported plain-text drafts and ordinary file attachments as an outgoing message, preserving the sender and To/Cc/Bcc addresses. Standard Mail signature-selection, base-URL, and attachment-preference headers are accepted only with recognized values; content preservation is still verified independently. It rejects rich text, inline content, reply-thread headers, signing/encryption, or other unsupported message semantics before submission; send those drafts in Mail. The original stays until Mail acknowledges submission and is removed only if it is unchanged. A receipt with `submitted: true` and `cleanupPending: true` means the message was submitted but the original draft remains; do not resend it.
+
 ## Search
 
 ```bash
@@ -326,6 +335,15 @@ mail-app-cli messages vip
 mail-app-cli recent search "sample project update"
 mail-app-cli sync --wait
 ```
+
+`sync -a "Example Account"` requests synchronization only for that account.
+IMAP accounts (including iCloud) use Mail's explicit synchronization operation
+followed by a check for new mail; other receiving accounts check for new mail. Without `-a`, enabled accounts
+are requested individually. A completed result means Mail accepted the request.
+`--wait` additionally observes stable local counts, which do not establish that
+individual messages or server-side labels are synchronized. Use
+`messages reconcile receipt.json` to recheck archive or move identities.
+
 
 `messages show|mark|flag|archive|delete|move` are the 1.x spellings and still work; they now return receipts and accept `--dry-run`.
 
@@ -398,3 +416,44 @@ UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot   # after adding or remo
 ---
 
 This project is a hard fork of [intelligrit/mail-app-cli](https://github.com/intelligrit/mail-app-cli).
+
+### Reliable repeated cleanup in 2.4
+
+Verified archive and move capture message identity without asking Mail to render
+a body. `--settle` extends final observation and `--verify-budget` bounds the
+stage. Archive destinations are recorded before the move so an interrupted
+operation retains the scope needed for recovery.
+`messages reconcile receipt.json --settle 10s --verify-budget 30s --json`
+rechecks saved archive/move identities without repeating the operation. Receipts
+report when and where the final source/destination state was observed, and
+whether observation followed a synchronization request. These observations
+cover Mail's local state; they do not certify server-side labels or future state.
+
+Archiving from a Gmail Inbox to All Mail uses Mail's native Archive control.
+Grant Accessibility access to the application running `mail-app-cli` in macOS
+System Settings. The command briefly opens a separate Mail window with its
+preview hidden, selects and checks the individual message, then closes that
+window. If it cannot establish the exact selection or Mail's focus changes,
+the command stops before archiving. Conversation rows that cannot be selected
+as an individual message require archiving in Mail directly. An uncertain
+Archive response stops the batch; reconcile its receipt before taking further
+action. All mailbox changes continue to go through Mail.
+
+`messages batch archive 12345 --mark-read --mark-read-on-skip --verify --dry-run`
+previews the explicit choice to mark an already-archived record read. Without
+`--mark-read-on-skip`, archived records retain their existing state. Requested
+destination read state is part of verification.
+
+`messages read 12345 --body-alternatives --json` exposes independently extracted
+MIME renderings. Bodies carry extraction diagnostics for images, nontext parts,
+partial files and alternative selection; extraction success does not certify
+that every visual or substantive detail is represented. Normal output omits
+alternative texts unless requested. No referenced resources are downloaded.
+
+`messages scan INBOX Archive -a "Example Account" --limit 200 --checkpoint
+/absolute/private/history.json --json` saves cumulative traversal state. Repeat
+the command to resume; use `--restart-checkpoint` after completion for a fresh
+traversal. Filters stay fixed while page size may change. Accumulated observations
+are not a live snapshot or changed-state feed, so keep new-mail discovery and
+held-identity reconciliation separate. Today aggregate counts do not establish
+identity cleanup; use direct source and destination observations.

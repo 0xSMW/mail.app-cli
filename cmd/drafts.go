@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
+	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v2/internal/output"
 	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
 	"github.com/spf13/cobra"
@@ -19,6 +21,7 @@ var (
 	draftAttachments []string
 	draftDryRun      bool
 	draftLimit       int
+	draftFrom        string
 )
 
 var draftsCmd = &cobra.Command{
@@ -69,16 +72,30 @@ var draftsCreateCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		input := mail.DraftInput{Account: account, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments}
+		input := mail.DraftInput{Account: account, Sender: draftFrom, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments}
 		if draftDryRun {
+			identity, err := mailClient.PreviewOutgoing(mail.OutgoingInput{Account: account, Sender: draftFrom, Subject: draftSubject, Body: body, To: draftTo, Cc: draftCc, Bcc: draftBcc, Attachments: attachments})
+			if err != nil {
+				return err
+			}
+			input.Sender = identity.Sender
 			return writer.Write(output.Result{
-				Data:    map[string]any{"dryRun": true, "draft": input},
+				Data:    map[string]any{"dryRun": true, "draft": input, "accountId": identity.AccountID},
 				Summary: "Dry run: would create draft " + input.Subject,
+				Notices: previewNotices(true),
 				Plain:   renderLine("Dry run: would create draft %q for %v", input.Subject, input.To),
 			})
 		}
 		message, err := mailClient.CreateDraft(input)
 		if err != nil {
+			var mutation *mail.MutationError
+			if errors.As(err, &mutation) {
+				return writer.Write(output.Result{
+					Data: map[string]any{"account": account, "sender": mutation.Sender, "draft": message,
+						"saved": mutation.Saved, "uncertain": mutation.Uncertain, "status": "verification_failed", "phase": mutation.Phase},
+					Summary: mutation.Error(), Err: clierr.Classify(err),
+				})
+			}
 			return fmt.Errorf("create draft: %w", err)
 		}
 		return writer.Write(output.Result{
@@ -152,17 +169,26 @@ var draftsSendCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if draftDryRun {
+			identity, err := mailClient.PreviewDraftSend(resolved.Account.Value, args[0])
+			if err != nil {
+				return err
+			}
 			return writer.Write(output.Result{
-				Data:    map[string]any{"dryRun": true, "draftId": args[0], "action": "send"},
+				Data:    map[string]any{"dryRun": true, "draftId": args[0], "action": "send", "account": identity.Account, "accountId": identity.AccountID, "sender": identity.Sender},
 				Summary: "Dry run: would send draft " + args[0],
+				Notices: previewNotices(true),
 				Plain:   renderLine("Dry run: would send draft %s", args[0]),
 			})
 		}
-		if err := mailClient.SendDraft(resolved.Account.Value, args[0]); err != nil {
+		result, err := mailClient.SendDraftResult(resolved.Account.Value, args[0])
+		if err != nil {
+			if result != nil {
+				return writer.Write(output.Result{Data: result, Summary: err.Error(), Err: clierr.Classify(err)})
+			}
 			return fmt.Errorf("send draft: %w", err)
 		}
 		return writer.Write(output.Result{
-			Data:    map[string]any{"draftId": args[0], "sent": true},
+			Data:    result,
 			Summary: "Sent draft " + args[0],
 			Plain:   renderLine("Sent draft %s", args[0]),
 		})
@@ -218,4 +244,5 @@ func init() {
 	draftsCreateCmd.Flags().StringSliceVar(&draftTo, "to", []string{}, "To recipient (repeatable)")
 	draftsCreateCmd.Flags().StringSliceVar(&draftCc, "cc", []string{}, "Cc recipient (repeatable)")
 	draftsCreateCmd.Flags().StringSliceVar(&draftBcc, "bcc", []string{}, "Bcc recipient (repeatable)")
+	draftsCreateCmd.Flags().StringVar(&draftFrom, "from", "", "Sender address configured on the selected account (default: first address)")
 }

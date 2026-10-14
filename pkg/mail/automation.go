@@ -136,10 +136,6 @@ func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string
 }
 
 func runAutomation(parent context.Context, engine string, timeout time.Duration, args ...string) (string, error) {
-	if timeout <= 0 {
-		timeout = defaultAutomationTimeout
-	}
-
 	lockCtx, cancelLockWait := context.WithTimeout(parent, automationLockTimeout)
 	defer cancelLockWait()
 
@@ -153,6 +149,28 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 		return "", automationLockError(engine, parent, err)
 	}
 	defer releaseProcessLock()
+
+	execution, err := runAutomationUnlocked(parent, engine, timeout, args...)
+	if err != nil {
+		return "", err
+	}
+	return execution.Output, nil
+}
+
+type automationExecution struct {
+	Output string
+	Events []phaseEvent
+}
+
+// runAutomationUnlocked executes while its caller holds both automationGate
+// and the automation process lock. It never acquires or releases either lock,
+// allowing a transaction to run bounded cleanup with context.WithoutCancel
+// before releasing ownership. Completed phase records survive execution errors
+// and caller cancellation so the caller can recover resources it created.
+func runAutomationUnlocked(parent context.Context, engine string, timeout time.Duration, args ...string) (automationExecution, error) {
+	if timeout <= 0 {
+		timeout = defaultAutomationTimeout
+	}
 
 	executionCtx, cancelExecution := context.WithTimeout(parent, timeout)
 	defer cancelExecution()
@@ -179,21 +197,22 @@ func runAutomation(parent context.Context, engine string, timeout time.Duration,
 	cmd.Stderr = &stderr
 
 	if err := cmd.Start(); err != nil {
-		return "", fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
+		return automationExecution{}, fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
 	}
 
-	err = cmd.Wait()
-	if parentErr := parent.Err(); parentErr != nil {
-		return "", parentErr
-	}
+	err := cmd.Wait()
 	events, diagnostics := splitPhaseEvents(stderr.String())
+	execution := automationExecution{Output: strings.TrimSpace(out.String()), Events: events}
+	if parentErr := parent.Err(); parentErr != nil {
+		return execution, parentErr
+	}
 	if errors.Is(executionCtx.Err(), context.DeadlineExceeded) {
-		return "", &AutomationTimeoutError{Engine: engine, Timeout: timeout, Trace: buildPhaseTrace(events, time.Now())}
+		return execution, &AutomationTimeoutError{Engine: engine, Timeout: timeout, Trace: buildPhaseTrace(events, time.Now())}
 	}
 	if err != nil {
-		return "", fmt.Errorf("%s error: %v - %s", engine, err, diagnostics)
+		return execution, fmt.Errorf("%s error: %v - %s", engine, err, diagnostics)
 	}
-	return strings.TrimSpace(out.String()), nil
+	return execution, nil
 }
 
 // automationLockError classifies a failure to enter the automation queue.

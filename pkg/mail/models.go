@@ -41,6 +41,8 @@ type Message struct {
 	// ContentSource is "disk" when the body was read from Mail.app's message
 	// file and "mail" when Mail.app rendered it.
 	ContentSource string `json:"contentSource,omitempty"`
+	// BodyDiagnostics inventories local extraction; it does not certify semantic completeness.
+	BodyDiagnostics *BodyDiagnostics `json:"bodyDiagnostics,omitempty"`
 	// Snippet is Mail's indexed summary, present on index-backed listings.
 	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`

@@ -130,7 +130,7 @@ func TestDraftAttachmentRejectsFIFOWithoutOpening(t *testing.T) {
 }
 
 func TestDraftSaveWaitHonorsCancellation(t *testing.T) {
-	writeFakeOsaScript(t, "printf 'ok'\n")
+	writeFakeOsaScript(t, "/bin/sleep 10\n")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	timer := time.AfterFunc(100*time.Millisecond, cancel)

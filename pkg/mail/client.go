@@ -12,11 +12,13 @@ type clientState struct {
 	accountsMu               sync.Mutex
 	accounts                 []Account
 	accountsLoaded           bool
+	nativeArchiveAccounts    map[string]bool
 	indexFallbackWarningOnce sync.Once
 	contentWarningOnce       sync.Once
 	recentCleanupWarningOnce sync.Once
 	warn                     func(string)
 	bodyFromMail             bool
+	bodyAlternatives         bool
 }
 
 // Client talks to Mail.app through osascript and to Mail's Envelope Index
@@ -75,3 +77,7 @@ func (c *Client) SetBodySource(source string) error {
 	}
 	return nil
 }
+
+// SetBodyAlternatives includes independently extracted MIME alternatives in
+// message output. Counts and warnings are retained when their texts are omitted.
+func (c *Client) SetBodyAlternatives(include bool) { c.shared.bodyAlternatives = include }

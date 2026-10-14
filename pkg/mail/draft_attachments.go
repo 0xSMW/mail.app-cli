@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // ValidateDraftAttachments resolves local paths and rejects missing, unreadable,
@@ -67,15 +69,14 @@ if (count attachments of content) < %d then error "Attachment did not finish loa
 func (c *Client) draftAttachments(draft *Message) ([]Attachment, error) {
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
-const requestedMailbox = '%s';
 %s
 %s
 const acc = mail.accounts.byName('%s');
-const mbox = %s;
+const mbox = draftMailboxForAccount(mail, acc, false);
 const msg = messageById(mbox, '%s');
 if (msg === null) throw new Error('Draft not found');
 JSON.stringify(msg.mailAttachments().map((att, index) => ({index, name: att.name(), fileSize: att.fileSize()})));
-`, escapeJSString(draft.Mailbox), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(draft.Account), jxaMailboxLookupExpression(draft.Mailbox), escapeJSString(draft.ID))
+`, jxaDraftMailboxHelper(), jxaDraftMessageByIDHelper(), escapeJSString(draft.Account), escapeJSString(draft.ID))
 	output, err := c.runJXA(script)
 	if err != nil {
 		return nil, err
@@ -108,7 +109,7 @@ func (c *Client) exportDraftAttachments(draft *Message, dir string) ([]string, e
 			return nil, err
 		}
 		path := filepath.Join(folder, name)
-		if err := c.SaveAttachmentByIndex(draft.Account, draft.Mailbox, draft.ID, name, attachment.Index, path); err != nil {
+		if err := c.saveAttachmentByIndex(draft.Account, draft.Mailbox, draft.ID, name, attachment.Index, path, jxaDraftMailboxHelper()+jxaDraftMessageByIDHelper(), "draftMailboxForAccount(mail, acc, false)"); err != nil {
 			return nil, err
 		}
 		info, err := os.Stat(path)
@@ -156,7 +157,7 @@ func compareDraftAttachments(actual, paths []string) error {
 		if _, err := io.Copy(hash, file); err != nil {
 			return identity{}, err
 		}
-		return identity{filepath.Base(path), string(hash.Sum(nil))}, nil
+		return identity{norm.NFC.String(filepath.Base(path)), string(hash.Sum(nil))}, nil
 	}
 	expected := make(map[identity]int)
 	for _, path := range paths {

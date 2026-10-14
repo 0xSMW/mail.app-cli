@@ -64,12 +64,11 @@ func TestArchiveAliasHelpers(t *testing.T) {
 }
 
 func TestArchiveMessageScriptMovesThenVerifiesSourceMailbox(t *testing.T) {
-	script := archiveMessageScript("Work", "INBOX", "12345")
+	script := archiveMessageScript("Work", "INBOX", "12345", "All Mail")
 	for _, want := range []string{
 		"on findMailboxByName(mailboxList, targetName)",
 		"set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, \"INBOX\")",
 		"set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, \"All Mail\")",
-		"set archiveMailbox to my findMailboxByName(mailboxes of targetAccount, \"Archive\")",
 		"set targetId to \"12345\" as integer",
 		"set targetMessage to first message of sourceMailbox whose id is targetId",
 		"move targetMessage to archiveMailbox",
@@ -82,7 +81,7 @@ func TestArchiveMessageScriptMovesThenVerifiesSourceMailbox(t *testing.T) {
 }
 
 func TestArchiveMessageScriptEscapesInputs(t *testing.T) {
-	script := archiveMessageScript(`Bob "Gmail"`, `Inbox "Primary"`, "12345")
+	script := archiveMessageScript(`Bob "Gmail"`, `Inbox "Primary"`, "12345", "All Mail")
 	for _, want := range []string{
 		`set targetAccount to account "Bob \"Gmail\""`,
 		`set sourceMailbox to my findMailboxByName(mailboxes of targetAccount, "Inbox \"Primary\"")`,

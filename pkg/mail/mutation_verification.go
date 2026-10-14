@@ -112,7 +112,6 @@ type verificationLookup func() (verificationPresence, error)
 type verificationPause func(context.Context, time.Duration) error
 
 func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause verificationPause) (string, error) {
-	gmailInboxTransition := isValidGmailInboxTransition(item)
 	for attempt, delay := range verificationBackoff {
 		if attempt > 0 {
 			if err := pause(ctx, delay); err != nil {
@@ -132,18 +131,13 @@ func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup veri
 			}
 			return "applied_destination_unverified", err
 		}
-		// Gmail's All Mail contains messages that still have the INBOX label,
-		// so destination presence alone cannot prove an archive succeeded. Let
-		// the full settling window elapse and decide from the final identity-based
-		// observation in case synchronization regenerates the local Mail row.
-		if presence.Destination && !gmailInboxTransition {
-			return "confirmed_destination", nil
-		}
+		// Always use the final observation: a local source can reappear after
+		// an initially successful destination observation.
 		if attempt == len(verificationBackoff)-1 {
 			if presence.Source {
 				return "present_in_source", fmt.Errorf("message still present in %s", item.SourceMailbox)
 			}
-			if presence.Destination && gmailInboxTransition {
+			if presence.Destination {
 				return "confirmed_destination", nil
 			}
 			return "applied_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
@@ -188,6 +182,20 @@ func waitForVerificationBackoff(ctx context.Context, delay time.Duration) error 
 	}
 }
 
+// Wait against a wall-clock observation horizon rather than adding query time
+// to every polling delay. Every scheduled observation still runs, including
+// the final check; a slow query never causes an early success.
+func waitForVerificationObservation(ctx context.Context, started time.Time, offset time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	remaining := time.Until(started.Add(offset))
+	if remaining <= 0 {
+		return nil
+	}
+	return waitForVerificationBackoff(ctx, remaining)
+}
+
 func isAutomationTimeout(err error) bool {
 	var timeout *AutomationTimeoutError
 	return errors.As(err, &timeout)
@@ -195,4 +203,229 @@ func isAutomationTimeout(err error) bool {
 
 func isValidGmailInboxTransition(item BatchItem) bool {
 	return item.GmailInboxSource && strings.EqualFold(item.SourceMailbox, "INBOX") && IsArchiveAlias(item.TargetMailbox)
+}
+
+const identityEnrichmentTimeout = 5 * time.Second
+const DefaultVerifyBudget = 30 * time.Second
+
+// ValidateBatchOptions runs before source resolution or any mailbox changes.
+func ValidateBatchOptions(opts BatchOptions) error {
+	if opts.MarkReadOnSkip && (!opts.MarkReadBefore || opts.Action != "archive") {
+		return fmt.Errorf("--mark-read-on-skip requires --mark-read and archive")
+	}
+	if opts.Settle < 0 || opts.Settle > 5*time.Minute {
+		return fmt.Errorf("--settle must be between 0 and 5m")
+	}
+	if opts.VerifyBudget < 0 || opts.VerifyBudget > 10*time.Minute {
+		return fmt.Errorf("--verify-budget must be between 0 and 10m")
+	}
+	if opts.Settle >= effectiveVerifyBudget(opts) {
+		return fmt.Errorf("--verify-budget must exceed --settle")
+	}
+	return nil
+}
+
+func effectiveVerifyBudget(opts BatchOptions) time.Duration {
+	if opts.VerifyBudget > 0 {
+		return opts.VerifyBudget
+	}
+	return DefaultVerifyBudget
+}
+
+// DefaultGmailArchiveSettle retains the original 3.85-second local observation
+// horizon. Longer evidence windows require an explicit --settle; neither is a
+// server acknowledgement.
+const DefaultGmailArchiveSettle = 3850 * time.Millisecond
+
+func relocationSettle(opts BatchOptions, items []BatchItem) time.Duration {
+	if opts.Settle != 0 || opts.readOnlyVerification || opts.Action != "archive" {
+		return opts.Settle
+	}
+	for _, item := range items {
+		if item.GmailInboxSource && strings.EqualFold(item.SourceMailbox, "INBOX") && item.Status != "failed" {
+			return DefaultGmailArchiveSettle
+		}
+	}
+	return opts.Settle
+}
+
+// verificationSchedule preserves the existing six observations by default.
+// Longer windows continue observing every two seconds, including identities
+// whose destination was already confirmed in an earlier observation.
+func verificationSchedule(settle time.Duration) []time.Duration {
+	schedule := append([]time.Duration(nil), verificationBackoff...)
+	elapsed := time.Duration(0)
+	for _, delay := range schedule {
+		elapsed += delay
+	}
+	for elapsed < settle {
+		delay := min(2*time.Second, settle-elapsed)
+		schedule = append(schedule, delay)
+		elapsed += delay
+	}
+	return schedule
+}
+
+// canRetainRelocationSource proves the provider membership exception from the
+// actual system mailbox URL. An item flag or a generic All Mail name alone
+// never permits retaining a source. Spam and INBOX must always be removed.
+func (c *Client) canRetainRelocationSource(action string, item BatchItem) bool {
+	if action != "move" || !strings.EqualFold(item.TargetMailbox, "INBOX") || !IsArchiveAlias(item.SourceMailbox) {
+		return false
+	}
+	mbox, ok, err := c.resolveIndexMailbox(item.Account, item.SourceMailbox)
+	if err != nil || !ok {
+		return false
+	}
+	url := strings.ToLower(mbox.URL)
+	return strings.Contains(url, "/%5bgmail%5d/all%20mail") || strings.Contains(url, "/[gmail]/all%20mail")
+}
+
+func captureBatchIdentities(client *Client, opts BatchOptions, items []BatchItem) error {
+	ctx, cancel := context.WithTimeout(client.Context(), effectiveVerifyBudget(opts))
+	defer cancel()
+	reader := client.WithContext(ctx)
+	var session *jxaSession
+	defer func() {
+		if session != nil {
+			session.Close()
+		}
+	}()
+	for i := range items {
+		item := &items[i]
+		if item.Status == "failed" || skipReason(client, opts, *item) != "" {
+			continue
+		}
+		if err := opts.Receipt.Record("identity_capture_started", journalItem(*item)); err != nil {
+			return err
+		}
+		started := time.Now()
+		identity := item.Identity
+		identity.RFCMessageID = validRFCMessageID(identity.RFCMessageID)
+		identity.Sender, identity.Subject, identity.DateSent = strings.TrimSpace(identity.Sender), strings.TrimSpace(identity.Subject), canonicalIdentityDate(identity.DateSent)
+		if !identity.valid() {
+			identity = StableIdentityFromMessage(Message{Sender: item.Sender, Subject: item.Subject, DateSent: item.DateSent, MessageSize: item.MessageSize})
+		}
+		var message *Message
+		err := ctx.Err()
+		if err == nil {
+			// Close after ten requests or an interrupted exchange. The next ID
+			// receives a fresh serial session; the failed read is never retried.
+			if session != nil && (i%10 == 0 || session.closed) {
+				session.Close()
+				session = nil
+				reader.session = nil
+			}
+			if opts.ReuseBridge && len(items) > 1 && session == nil {
+				session, err = newJXASession(ctx)
+				reader.session = session
+			}
+			if err == nil {
+				message, err = reader.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
+			}
+		}
+		if err != nil {
+			item.IdentityEnrichmentError = err.Error()
+			if session != nil {
+				session.Close()
+				session = nil
+				reader.session = nil
+			}
+		}
+		identity, captureErr := completeStableIdentity(identity, message, err)
+		item.IdentityCaptureMillis = time.Since(started).Milliseconds()
+		if captureErr != nil {
+			item.Status, item.Error = "failed", "capture stable identity: "+captureErr.Error()
+		} else {
+			item.Identity = identity
+		}
+		if err := opts.Receipt.Record("identity_capture_result", journalItem(*item)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ReconcileMutations observes a saved receipt again without replaying any
+// mutation. Unknown relocations can be reconciled when a pre-mutation stable
+// identity survived; their original application status remains unchanged.
+func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) (BatchResult, error) {
+	if receipt.Action != "archive" && receipt.Action != "move" {
+		return receipt, fmt.Errorf("reconciliation requires an archive or move receipt")
+	}
+	if receipt.DryRun {
+		return receipt, fmt.Errorf("cannot reconcile a dry-run receipt")
+	}
+	if opts.Action == "" {
+		opts.Action = receipt.Action
+	}
+	if opts.Action != receipt.Action {
+		return receipt, fmt.Errorf("reconciliation action %q does not match receipt action %q", opts.Action, receipt.Action)
+	}
+	eligible := 0
+	for _, item := range receipt.Items {
+		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
+			if strings.TrimSpace(item.Account) == "" || strings.TrimSpace(item.SourceMailbox) == "" || strings.TrimSpace(item.ID) == "" {
+				return receipt, fmt.Errorf("skipped read item lacks account, mailbox or ID")
+			}
+			eligible++
+		}
+		if item.Status != "succeeded" && item.Status != "unknown" {
+			continue
+		}
+		if strings.TrimSpace(item.Account) == "" || strings.TrimSpace(item.SourceMailbox) == "" || strings.TrimSpace(item.TargetMailbox) == "" || !item.Identity.valid() {
+			return receipt, fmt.Errorf("receipt item %q lacks account, source, destination, or pre-mutation stable identity", item.ID)
+		}
+		eligible++
+	}
+	if eligible == 0 {
+		return receipt, fmt.Errorf("receipt contains no applied or uncertain identities to reconcile")
+	}
+	opts.readOnlyVerification = true
+	opts.MarkReadBefore = opts.MarkReadBefore || receipt.MarkReadRequested
+	if err := ValidateBatchOptions(opts); err != nil {
+		return receipt, err
+	}
+	ctx, cancel := context.WithTimeout(client.Context(), effectiveVerifyBudget(opts))
+	defer cancel()
+	client = client.WithContext(ctx)
+	items := append([]BatchItem(nil), receipt.Items...)
+	for i := range items {
+		if items[i].Status == "unknown" && (opts.Action == "move" || opts.Action == "archive") && items[i].Identity.valid() {
+			items[i].Status = "succeeded"
+		}
+		items[i].VerifyStatus, items[i].VerifyError, items[i].Observed = "", "", nil
+	}
+	verified := VerifyMutations(client, opts, items)
+	var skippedMarks []BatchItem
+	var skippedIndices []int
+	for i, item := range items {
+		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
+			item.Status = "succeeded"
+			skippedMarks = append(skippedMarks, item)
+			skippedIndices = append(skippedIndices, i)
+		}
+	}
+	if len(skippedMarks) > 0 {
+		checks := VerifyMutations(client, BatchOptions{Action: "mark", Read: true, VerifyBudget: opts.VerifyBudget, readOnlyVerification: true}, skippedMarks)
+		for i, check := range checks {
+			verified[skippedIndices[i]].VerifyStatus, verified[skippedIndices[i]].VerifyError = check.VerifyStatus, check.VerifyError
+		}
+	}
+	receipt.Unverified = 0
+	for i := range verified {
+		if receipt.Items[i].Status == "unknown" && verified[i].VerifyStatus == "" {
+			verified[i].VerifyStatus, verified[i].VerifyError = "applied_destination_unverified", "unknown mutation has no stable identity for reconciliation"
+		}
+		verified[i].Status = receipt.Items[i].Status
+		if verified[i].VerifyError != "" {
+			receipt.Unverified++
+		}
+	}
+	receipt.Items = verified
+	receipt.EndedAt = time.Now().Format(time.RFC3339Nano)
+	if receipt.Unverified > 0 {
+		return receipt, &BatchFailedError{Action: opts.Action, Unverified: receipt.Unverified, Attempted: receipt.Attempted}
+	}
+	return receipt, nil
 }
