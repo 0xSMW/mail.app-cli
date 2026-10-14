@@ -28,7 +28,7 @@ func (f *threadedOutgoingFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.forwardOf, "forward-of", "", "Forward this message ID in the explicit --mailbox (native backend)")
 }
 
-func (f threadedOutgoingFlags) selection(cmd *cobra.Command) (*threadedSource, error) {
+func (f threadedOutgoingFlags) selection(a *application, cmd *cobra.Command) (*threadedSource, error) {
 	reply := cmd.Flags().Changed("reply-to")
 	forward := cmd.Flags().Changed("forward-of")
 	if !reply && !forward && !f.replyAll {
@@ -51,16 +51,16 @@ func (f threadedOutgoingFlags) selection(cmd *cobra.Command) (*threadedSource, e
 	if err != nil || number <= 0 {
 		return nil, clierr.Usage("--reply-to and --forward-of require a positive message ID")
 	}
-	if !cmd.Flags().Changed("mailbox") || strings.TrimSpace(resolved.Mailbox.Value) == "" {
+	if !cmd.Flags().Changed("mailbox") || strings.TrimSpace(a.resolved.Mailbox.Value) == "" {
 		return nil, clierr.Usage("reply and forward require an explicit --mailbox for the original message")
 	}
 	if !cmd.Flags().Changed("body") && !cmd.Flags().Changed("body-file") {
 		return nil, clierr.Usage("reply and forward require --body or --body-file with the complete outgoing body")
 	}
-	if mailClient.Backend() != mail.BackendNative {
+	if a.mailClient.Backend() != mail.BackendNative {
 		return nil, clierr.Usage("--reply-to and --forward-of require the native backend; use --backend native")
 	}
-	return &threadedSource{Mailbox: resolved.Mailbox.Value, ID: id, Mode: mode}, nil
+	return &threadedSource{Mailbox: a.resolved.Mailbox.Value, ID: id, Mode: mode}, nil
 }
 
 func (s threadedSource) input(outgoing mail.OutgoingInput) mail.ThreadedOutgoingInput {
