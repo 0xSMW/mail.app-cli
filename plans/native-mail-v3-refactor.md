@@ -129,7 +129,7 @@ counts. Avoid a universal backend interface or a script-template framework.
 - [x] Integrate CLI ownership and equivalent presentation-input cleanup.
 - [x] Inspect integrated diff and measure actual meaningful reduction.
 - [x] Resolve scoped independent review findings.
-- [ ] Complete final validation, commit/push owned changes, update PR results,
+- [x] Complete final validation, commit/push owned changes, update PR results,
       and inspect review status.
 
 ## Acceptance and validation
@@ -460,3 +460,25 @@ counts. Avoid a universal backend interface or a script-template framework.
   includes independent invocation behavior; no private Mail evidence is included.
 - Open the new PR against master, attach it to this task, and inspect automated
   review reactions/comments. Do not merge, release, tag, or install.
+
+### 2026-10-14: delivered
+
+- New PR: https://github.com/0xSMW/mail.app-cli/pull/26, targeting master;
+  attached to this task. It contains aggregate source and before/after result
+  tables, repeat confidence intervals, the original diagnostic failure and
+  successful 80-observation retest, live outcomes, and the explicit stored-draft
+  boundary. No raw private Mail evidence is included.
+- User-facing improvements: docs/3.0.0-improvements.md. Final source reduction
+  is 426 meaningful / 459 physical production lines against frozen 3.0, with
+  zero exported AST contract differences. Coordinators are 52/26/50 lines.
+- Local and remote normal-CLI cleanup receipts and complete post-sync scans
+  confirm no active fixture copies. Deleted Messages/Trash retains the copies.
+  The two earlier screenshot fixtures are also retained only in Gmail Trash.
+- Final native full suite, vet, targeted races, non-cgo suite, surface/installer,
+  offline scripts, CLI contracts, TUI replay, and both native builds pass.
+  Detailed remote evidence is copied to the private local validation directory
+  with archive integrity checked. Installed daily-driver binaries are unchanged.
+- Initial PR inspection: open and mergeable, no checks/reviews/findings posted
+  yet. Inspect automated review once more after this documentation update;
+  handle any findings, then finish the accepted design-and-safe-reduction goal.
+- No merge, release, tag, or install was performed.
