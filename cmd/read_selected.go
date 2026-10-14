@@ -10,7 +10,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func newMessagesReadCmd() *cobra.Command {
+func (a *application) newMessagesReadCmd() *cobra.Command {
 	var timeout, budget time.Duration
 	var bodySource string
 	var alternatives bool
@@ -20,11 +20,11 @@ func newMessagesReadCmd() *cobra.Command {
 		Args:        cobra.MinimumNArgs(1),
 		Annotations: map[string]string{annotationAgentNotes: "Fetch only IDs chosen from metadata. Reuses a bounded serial bridge, preserves successful reads when another fails, and exits 5 with complete:false on extraction/transport errors. complete:true does not certify full semantic or visual content coverage. bodyDiagnostics inventories MIME alternatives, images, nontext and partial files; --body-alternatives includes alternate texts. No automatic retry of a failed ID. Bodies are read from Mail.app's message files, so a read does not wait on Mail.app to render; contentSource says where each body came from and --body-source mail restores rendering by Mail.app. Each item carries diagnostics with per-phase timings; after a timeout, diagnostics.pending names the operation Mail.app had not answered. Existing show remains unchanged."},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			mailClient.SetBodyAlternatives(alternatives)
+			a.mailClient.SetBodyAlternatives(alternatives)
 			if timeout <= 0 || budget <= 0 {
 				return clierr.Usage("--timeout and --budget must be positive")
 			}
-			if err := mailClient.SetBodySource(bodySource); err != nil {
+			if err := a.mailClient.SetBodySource(bodySource); err != nil {
 				return clierr.Usage(`--body-source must be "disk" or "mail"`)
 			}
 			ids := uniqueStrings(trimAll(args))
@@ -33,7 +33,7 @@ func newMessagesReadCmd() *cobra.Command {
 					return clierr.Usagef("message ID %q is not numeric", id)
 				}
 			}
-			refs, failed, notices, err := locateSelectedMessages(ids)
+			refs, failed, notices, err := a.locateSelectedMessages(ids)
 			if err != nil {
 				return err
 			}
@@ -41,7 +41,7 @@ func newMessagesReadCmd() *cobra.Command {
 			for i, ref := range refs {
 				requests[i] = mail.MessageRef{AccountName: ref.Account, MailboxName: ref.Mailbox, MessageID: ref.ID}
 			}
-			result := mailClient.ReadSelectedMessages(requests, timeout, budget)
+			result := a.mailClient.ReadSelectedMessages(requests, timeout, budget)
 			if len(failed) > 0 {
 				byID := make(map[string]mail.MessageReadResult)
 				for _, item := range result.Items {
@@ -60,7 +60,7 @@ func newMessagesReadCmd() *cobra.Command {
 			if !result.Complete {
 				failure = clierr.New(clierr.CodePartial, "selected body read incomplete; inspect per-message errors")
 			}
-			return writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("Read %d selected messages (complete: %v)", len(result.Items), result.Complete), Notices: notices, Err: failure, Plain: func(p *output.Printer) {
+			return a.writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("Read %d selected messages (complete: %v)", len(result.Items), result.Complete), Notices: notices, Err: failure, Plain: func(p *output.Printer) {
 				for _, item := range result.Items {
 					if item.Error != "" {
 						p.Line("%s: %s", item.ID, p.Red(item.Error))
@@ -81,17 +81,17 @@ func newMessagesReadCmd() *cobra.Command {
 
 // Resolve the selection once, preserving missing/mismatched IDs as individual
 // failures instead of discarding readable messages in the same request.
-func locateSelectedMessages(ids []string) ([]messageRef, []mail.MessageReadResult, []string, error) {
-	if mailboxExplicit() {
-		refs, notices, err := locateMessages(ids)
+func (a *application) locateSelectedMessages(ids []string) ([]messageRef, []mail.MessageReadResult, []string, error) {
+	if a.mailboxExplicit() {
+		refs, notices, err := a.locateMessages(ids)
 		return refs, nil, notices, err
 	}
-	located, indexErr := mailClient.LocateMessages(ids)
+	located, indexErr := a.mailClient.LocateMessages(ids)
 	var refs []messageRef
 	var failed []mail.MessageReadResult
 	var notices []string
 	for _, id := range ids {
-		found, warnings, err := resolveLocatedMessages([]string{id}, located, indexErr)
+		found, warnings, err := a.resolveLocatedMessages([]string{id}, located, indexErr)
 		if err != nil {
 			failed = append(failed, mail.MessageReadResult{ID: id, Error: err.Error()})
 		} else {
@@ -101,5 +101,3 @@ func locateSelectedMessages(ids []string) ([]messageRef, []mail.MessageReadResul
 	}
 	return refs, failed, uniqueStrings(notices), nil
 }
-
-func init() { messagesCmd.AddCommand(newMessagesReadCmd()) }
