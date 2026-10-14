@@ -646,6 +646,69 @@ func TestNativeReadAttachmentOptionalMIMEAndExclusivePublication(t *testing.T) {
 	}
 }
 
+func TestNativeReadAttachmentRejectedOptionalMIMEListsAndSaves(t *testing.T) {
+	f := newNativeReadFixture()
+	c := fixtureClient(t, f)
+	name := "résumé.txt"
+	f.properties["attc:att"]["pnam"] = appleevents.String(name)
+	f.fail = func(event appleevents.Event) error {
+		if event.ID == "getd" && event.Params["----"].Fields["seld"].Code == "attp" {
+			return &appleevents.Error{Code: -10000, Message: "optional MIME getter rejected"}
+		}
+		return nil
+	}
+	attachments, err := c.GetAttachmentsJSON("Personal", "INBOX", "42")
+	if err != nil || len(attachments) != 1 || attachments[0].Name != name || attachments[0].FileSize != 4 || attachments[0].MimeType != "unknown" {
+		t.Fatalf("attachment metadata %#v %v", attachments, err)
+	}
+	f.events = nil
+	path := filepath.Join(t.TempDir(), name)
+	if err := c.SaveAttachmentByIndex("Personal", "INBOX", "42", name, 0, path); err != nil {
+		t.Fatal(err)
+	}
+	saves := 0
+	for _, event := range f.events {
+		if event.ID == "save" {
+			saves++
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "data" || saves != 1 {
+		t.Fatalf("saved bytes=%q attempts=%d error=%v", data, saves, err)
+	}
+}
+
+func TestNativeReadAttachmentMIMETimeoutAndMalformedTypeRemainFatal(t *testing.T) {
+	for _, kind := range []string{"timeout", "malformed"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newNativeReadFixture()
+			c := fixtureClient(t, f)
+			if kind == "timeout" {
+				f.fail = func(event appleevents.Event) error {
+					if event.ID == "getd" && event.Params["----"].Fields["seld"].Code == "attp" {
+						return context.DeadlineExceeded
+					}
+					return nil
+				}
+			} else {
+				f.properties["attc:att"]["attp"] = appleevents.Int(1)
+			}
+			if _, err := c.GetAttachmentsJSON("Personal", "INBOX", "42"); err == nil {
+				t.Fatal("invalid MIME getter became successful listing")
+			}
+			path := filepath.Join(t.TempDir(), "attachment.txt")
+			if err := c.SaveAttachmentByIndex("Personal", "INBOX", "42", "fixture.txt", 0, path); err == nil {
+				t.Fatal("invalid MIME getter became successful saving")
+			}
+			for _, event := range f.events {
+				if event.ID == "save" {
+					t.Fatal("invalid MIME getter dispatched save")
+				}
+			}
+		})
+	}
+}
+
 func fixtureMessages(f *nativeReadFixture, count int, alternatingRead bool) {
 	template := f.properties["mssg:42"]
 	f.messages["mbxp:inbox"] = nil
