@@ -71,6 +71,13 @@ confirmation time and Mail convergence time remain separate measurements.
 - Targeted race checks, vet, command surface, and whitespace checks pass.
 - On home-server macOS 27.2, the focused adapter/CLI/surface tests and native
   build pass. These remote checks use no live Gmail credentials or mutations.
+- Canonical installation exposed changing ad-hoc signing identities: a canceled
+  Keychain lookup returned status -128 before any production mutation. The
+  correction uses a stable Developer ID signature/identifier, a versioned
+  production credential service, noninteractive operational lookups, and a
+  single Keychain load per address. It does not broaden Keychain access controls
+  or read the experimental credential item. Explicit import creates the
+  production item through the installed signed binary.
 
 ## Remaining delivery observations
 
