@@ -499,9 +499,9 @@ operation after validation. The Daily Mail heartbeat remains untouched.
   archive regression checks, then native/non-cgo suites and vet.
 - [x] Validate live label operations and compare existing read workloads with
   the frozen 3.0 baseline. Keep private messages and credentials outside Git.
-- [ ] Install the verified 3.0.0 candidate on the canonical PATH, retain a
+- [x] Install the verified 3.0.0 candidate on the canonical PATH, retain a
   recoverable prior binary, and verify the resolved binary and native doctor.
-- [ ] Apply the authorized exact-message label removal and verify fresh Gmail
+- [x] Apply the authorized exact-message label removal and verify fresh Gmail
   and Mail membership/read state, then push per-file commits and update PR #26.
 
 Implementation is split among 6.1 Sol high transport/auth, workflow, and CLI
@@ -514,3 +514,11 @@ The aggregate adapter results and timing table are in
 full suites pass; the focused adapter and CLI checks also pass on macOS 27.2.
 Live archive retains Important and a custom label, while explicit label removal
 and idempotent no-ops confirm provider state and eventual Mail convergence.
+
+Delivery complete: PR #26 includes the adapter and aggregate results; canonical
+PATH now resolves the signed native 3.0.0 CLI with a recoverable 2.4.0 backup.
+The authorized production change is confirmed by both provider readback and a
+complete Mail scan, preserving archive/read state and unrelated labels. A
+canceled Keychain prompt stopped a preflight before any production mutation;
+stable signing, versioned credential ownership, one load per address, and
+noninteractive reads remove that repeated-prompt path. The heartbeat is untouched.
