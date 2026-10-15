@@ -128,6 +128,7 @@ for (let i = 0; i < accounts.length; i++) {
 		emailAddress: emailAddresses.length > 0 ? emailAddresses[0] : '',
 		emailAddresses,
 		userName: acc.userName(),
+		accountType: acc.accountType().toLowerCase(),
 		enabled: acc.enabled()
 	});
 }
