@@ -23,10 +23,19 @@ import (
 const ModifyScope = "https://www.googleapis.com/auth/gmail.modify"
 const fullMailScope = "https://mail.google.com/"
 const defaultTokenURL = "https://oauth2.googleapis.com/token"
-const keychainService = "mail-app-cli.gmail"
+
+// Versioned production namespace: preserve experimental credentials untouched.
+const keychainService = "mail-app-cli.gmail.oauth.v1"
 
 var ErrKeychainUnavailable = errors.New("Gmail credential storage requires macOS with cgo and the Security framework")
 var ErrCredentialsNotFound = errors.New("Gmail credentials were not found in macOS Keychain; connect or explicitly import credentials")
+
+func keychainStatusError(operation string, status int) error {
+	if status == -25308 || status == -128 {
+		return fmt.Errorf("Gmail Keychain %s access is unavailable without user interaction (Security status %d); unlock the login Keychain if needed, then explicitly run 'mail-app-cli labels auth import' or 'mail-app-cli labels auth connect' using the installed signed app", operation, status)
+	}
+	return fmt.Errorf("Gmail Keychain %s failed (Security status %d)", operation, status)
+}
 
 // Credentials is the explicit JSON import format. Expiry is RFC3339.
 // Secret fields are persisted only in macOS Keychain, never a plaintext cache.
