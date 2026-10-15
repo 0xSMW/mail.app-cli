@@ -108,6 +108,7 @@ type application struct {
 
 // options contains the values Cobra binds while parsing this invocation.
 type options struct {
+	labelsEmail         string
 	batchQuery          string
 	batchSender         string
 	batchSenderDomain   string
@@ -165,6 +166,7 @@ func newApplication() *application {
 	a.buildVersionCommands()
 	a.messagesCmd.AddCommand(a.newMessagesReadCmd(), a.newMessagesReconcileCmd(), a.newMessagesScanCmd())
 	a.buildRootCommands()
+	a.rootCmd.AddCommand(a.newLabelsCmd())
 	a.markMutations()
 	return a
 }
