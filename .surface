@@ -146,6 +146,31 @@ inbox --limit (-l)
 inbox --offset (-o)
 inbox --unread (-u)
 inbox --with-content
+labels
+labels --email
+labels --help (-h)
+labels add
+labels add --dry-run
+labels add --help (-h)
+labels add --label
+labels auth
+labels auth --help (-h)
+labels auth connect
+labels auth connect --client-secret
+labels auth connect --help (-h)
+labels auth import
+labels auth import --credentials
+labels auth import --help (-h)
+labels list
+labels list --help (-h)
+labels reconcile
+labels reconcile --help (-h)
+labels remove
+labels remove --dry-run
+labels remove --help (-h)
+labels remove --label
+labels show
+labels show --help (-h)
 mailboxes
 mailboxes --help (-h)
 mailboxes list
