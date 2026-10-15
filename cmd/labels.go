@@ -133,18 +133,36 @@ func (a *application) gmailLabelsWorkflow(cmd *cobra.Command, account string) (*
 	if err != nil {
 		return nil, gmailLabelCommandError(err)
 	}
-	email, err := selectGmailLabelEmail(emails, a.labelsEmail, func(email string) error {
-		_, err := gmail.LoadCredentials(email)
+	provider, err := selectGmailLabelProvider(emails, a.labelsEmail, func(email string) (*gmail.Client, error) {
+		return gmail.NewStoredClient(email, nil)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return mail.NewGmailLabelWorkflow(a.mailClient, provider), nil
+}
+
+func selectGmailLabelProvider(emails []string, explicit string, load func(string) (*gmail.Client, error)) (*gmail.Client, error) {
+	providers := make(map[string]*gmail.Client)
+	email, err := selectGmailLabelEmail(emails, explicit, func(email string) error {
+		provider, err := load(email)
+		if err == nil {
+			providers[email] = provider
+		}
 		return err
 	})
 	if err != nil {
 		return nil, err
 	}
-	provider, err := gmail.NewStoredClient(email, nil)
+	if provider, ok := providers[email]; ok {
+		return provider, nil
+	}
+	// Explicit address selection validates membership before reading Keychain.
+	provider, err := load(email)
 	if err != nil {
 		return nil, gmailCredentialsError(err)
 	}
-	return mail.NewGmailLabelWorkflow(a.mailClient, provider), nil
+	return provider, nil
 }
 
 // A nil lookup selects the first address for an explicit authorization flow.
