@@ -483,3 +483,34 @@ counts. Avoid a universal backend interface or a script-template framework.
   inspection. Review completion is not claimed. The accepted implementation,
   validation, documentation, cleanup, and PR-delivery goal is complete.
 - No merge, release, tag, or install was performed.
+
+### 2026-10-15: explicit Gmail labels and daily-driver installation
+
+The user authorized a focused Gmail label adapter, an update to PR #26,
+validation, installation of 3.0.0 on PATH, and an exact Important-removal
+operation after validation. The Daily Mail heartbeat remains untouched.
+
+- [x] Add a narrow Gmail REST adapter with account-bound OAuth credentials in
+  Keychain, metadata identity resolution, and single-message label deltas.
+- [x] Add explicit label list/show/add/remove, dry-run, durable receipts, and
+  read-only reconciliation; distinguish provider confirmation from Mail's local
+  convergence. Preserve existing archive behavior and system-action boundaries.
+- [x] Run focused identity, idempotency, failed-verification, receipt, auth, and
+  archive regression checks, then native/non-cgo suites and vet.
+- [x] Validate live label operations and compare existing read workloads with
+  the frozen 3.0 baseline. Keep private messages and credentials outside Git.
+- [ ] Install the verified 3.0.0 candidate on the canonical PATH, retain a
+  recoverable prior binary, and verify the resolved binary and native doctor.
+- [ ] Apply the authorized exact-message label removal and verify fresh Gmail
+  and Mail membership/read state, then push per-file commits and update PR #26.
+
+Implementation is split among 6.1 Sol high transport/auth, workflow, and CLI
+agents. The managing agent owns integration, live operations, installation,
+final verification, and delivery. The label adapter does not alter Mail's
+archive policy or infer actual Smart Mailbox visibility from label changes.
+
+The aggregate adapter results and timing table are in
+[Gmail label validation](gmail-labels-validation.md). The native and non-cgo
+full suites pass; the focused adapter and CLI checks also pass on macOS 27.2.
+Live archive retains Important and a custom label, while explicit label removal
+and idempotent no-ops confirm provider state and eventual Mail convergence.
