@@ -9,22 +9,28 @@ package gmail
 #include <stdlib.h>
 #include <string.h>
 
-static CFMutableDictionaryRef gmail_query(const char *account) {
+static CFMutableDictionaryRef gmail_query(const char *service, const char *account) {
     CFStringRef value = CFStringCreateWithCString(NULL, account, kCFStringEncodingUTF8);
     if (!value) return NULL;
+    CFStringRef serviceValue = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
+    if (!serviceValue) { CFRelease(value); return NULL; }
     CFMutableDictionaryRef query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-    if (!query) { CFRelease(value); return NULL; }
+    if (!query) { CFRelease(value); CFRelease(serviceValue); return NULL; }
     CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
-    CFDictionarySetValue(query, kSecAttrService, CFSTR("mail-app-cli.gmail"));
+    CFDictionarySetValue(query, kSecAttrService, serviceValue);
     CFDictionarySetValue(query, kSecAttrAccount, value);
     CFRelease(value);
+    CFRelease(serviceValue);
     return query;
 }
-static int gmail_load(const char *account, void **out, long *length) {
-    CFMutableDictionaryRef query = gmail_query(account);
+static int gmail_load(const char *service, const char *account, void **out, long *length) {
+    CFMutableDictionaryRef query = gmail_query(service, account);
     if (!query) return errSecAllocate;
     CFDictionarySetValue(query, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitOne);
+    // Operational reads fail promptly rather than opening a password prompt.
+    // This search-only option must not reach SecItemAdd/Update dictionaries.
+    CFDictionarySetValue(query, kSecUseAuthenticationUI, kSecUseAuthenticationUIFail);
     CFTypeRef result = NULL;
     OSStatus status = SecItemCopyMatching(query, &result);
     CFRelease(query);
@@ -39,8 +45,8 @@ static int gmail_load(const char *account, void **out, long *length) {
     CFRelease(result);
     return errSecSuccess;
 }
-static int gmail_store(const char *account, const void *bytes, long length) {
-    CFMutableDictionaryRef query = gmail_query(account);
+static int gmail_store(const char *service, const char *account, const void *bytes, long length) {
+    CFMutableDictionaryRef query = gmail_query(service, account);
     if (!query) return errSecAllocate;
     CFDataRef data = CFDataCreate(NULL, bytes, length);
     if (!data) { CFRelease(query); return errSecAllocate; }
@@ -67,16 +73,18 @@ import (
 
 func KeychainAvailable() bool { return true }
 func keychainLoad(account string) ([]byte, error) {
+	service := C.CString(keychainService)
+	defer C.free(unsafe.Pointer(service))
 	name := C.CString(account)
 	defer C.free(unsafe.Pointer(name))
 	var data unsafe.Pointer
 	var size C.long
-	status := C.gmail_load(name, &data, &size)
+	status := C.gmail_load(service, name, &data, &size)
 	if status == C.errSecItemNotFound {
 		return nil, ErrCredentialsNotFound
 	}
 	if status != 0 {
-		return nil, fmt.Errorf("Gmail Keychain read failed (Security status %d)", int(status))
+		return nil, keychainStatusError("read", int(status))
 	}
 	defer C.free(data)
 	return C.GoBytes(data, C.int(size)), nil
@@ -85,13 +93,15 @@ func keychainStore(account string, data []byte) error {
 	if len(data) == 0 || len(data) > 65536 {
 		return fmt.Errorf("Gmail Keychain credential size is invalid")
 	}
+	service := C.CString(keychainService)
+	defer C.free(unsafe.Pointer(service))
 	name := C.CString(account)
 	defer C.free(unsafe.Pointer(name))
 	bytes := C.CBytes(data)
 	defer C.free(bytes)
-	status := C.gmail_store(name, bytes, C.long(len(data)))
+	status := C.gmail_store(service, name, bytes, C.long(len(data)))
 	if status != 0 {
-		return fmt.Errorf("Gmail Keychain write failed (Security status %d)", int(status))
+		return keychainStatusError("write", int(status))
 	}
 	return nil
 }
