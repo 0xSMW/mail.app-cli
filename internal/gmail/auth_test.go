@@ -136,6 +136,23 @@ func TestCredentialSecretsAreRedacted(t *testing.T) {
 	}
 }
 
+func TestProductionKeychainNamespaceAndInteractionErrors(t *testing.T) {
+	if keychainService != "mail-app-cli.gmail.oauth.v1" {
+		t.Fatalf("production Keychain namespace changed: %q", keychainService)
+	}
+	for _, status := range []int{-25308, -128} {
+		message := keychainStatusError("read", status).Error()
+		for _, want := range []string{"without user interaction", fmt.Sprint(status), "unlock the login Keychain", "labels auth import", "installed signed app"} {
+			if !strings.Contains(message, want) {
+				t.Errorf("status %d error omitted %q: %s", status, want, message)
+			}
+		}
+	}
+	if message := keychainStatusError("write", -50).Error(); message != "Gmail Keychain write failed (Security status -50)" {
+		t.Fatalf("unexpected generic status error: %s", message)
+	}
+}
+
 func TestCredentialJSONIsExplicitBoundedAndValidated(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "import.json")
