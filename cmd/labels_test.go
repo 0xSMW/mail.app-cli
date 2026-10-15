@@ -265,3 +265,57 @@ func TestLabelsCredentialSelectionFailsClosedOnAmbiguityOrKeychainFailure(t *tes
 		t.Fatalf("missing credentials selected=%q error=%v", selected, err)
 	}
 }
+
+func TestLabelsProviderSelectionLoadsEachCredentialOnce(t *testing.T) {
+	emails := []string{"alias@example.com", "primary@example.com"}
+	for _, explicit := range []string{"", "PRIMARY@example.com"} {
+		t.Run(explicit, func(t *testing.T) {
+			calls := map[string]int{}
+			want := gmail.NewClient(nil, nil)
+			provider, err := selectGmailLabelProvider(emails, explicit, func(email string) (*gmail.Client, error) {
+				calls[email]++
+				if email == emails[0] {
+					return nil, gmail.ErrCredentialsNotFound
+				}
+				return want, nil
+			})
+			if err != nil || provider != want || calls[emails[1]] != 1 {
+				t.Fatalf("provider=%p want=%p calls=%v error=%v", provider, want, calls, err)
+			}
+			wantAliasCalls := 1
+			if explicit != "" {
+				wantAliasCalls = 0
+			}
+			if calls[emails[0]] != wantAliasCalls {
+				t.Fatalf("credential calls=%v", calls)
+			}
+		})
+	}
+}
+
+func TestLabelsProviderSelectionDoesNotChooseAmbiguousOrUnreadableCredentials(t *testing.T) {
+	emails := []string{"alias@example.com", "primary@example.com"}
+	for _, denied := range []bool{false, true} {
+		t.Run(fmt.Sprint(denied), func(t *testing.T) {
+			calls := map[string]int{}
+			denial := errors.New("Keychain interaction unavailable")
+			provider, err := selectGmailLabelProvider(emails, "", func(email string) (*gmail.Client, error) {
+				calls[email]++
+				if denied && email == emails[1] {
+					return nil, denial
+				}
+				return gmail.NewClient(nil, nil), nil
+			})
+			wantCode := clierr.CodeUsage
+			if denied {
+				wantCode = clierr.CodeUnavailable
+			}
+			if provider != nil || err == nil || clierr.Classify(err).Code != wantCode || calls[emails[0]] != 1 || calls[emails[1]] != 1 {
+				t.Fatalf("provider=%p calls=%v error=%v", provider, calls, err)
+			}
+			if denied && !errors.Is(err, denial) {
+				t.Fatalf("Keychain error lost: %v", err)
+			}
+		})
+	}
+}
