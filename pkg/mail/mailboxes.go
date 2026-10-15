@@ -1,11 +1,13 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
 func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON(accountName)
+	}
 	script := fmt.Sprintf(`
 	tell application "Mail"
 		set mailboxList to {}
@@ -30,6 +32,9 @@ func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
 }
 
 func (c *Client) GetAllMailboxes() ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON("")
+	}
 	script := `
 	tell application "Mail"
 		set mailboxList to {}
@@ -163,6 +168,9 @@ func (c *Client) enrichArchiveMailboxes(accountName string, mailboxes []Mailbox)
 }
 
 func (c *Client) getMailboxesForSingleAccount(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.nativeMailboxes(accountName)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -202,14 +210,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(accountName))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var mailboxes []Mailbox
-	if err := json.Unmarshal([]byte(output), &mailboxes); err != nil {
-		return nil, fmt.Errorf("failed to parse mailboxes JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "mailboxes", &mailboxes); err != nil {
+		return nil, err
 	}
 
 	return mailboxes, nil

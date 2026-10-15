@@ -107,7 +107,8 @@ func newJXASession(ctx context.Context) (*jxaSession, error) {
 		s.release()
 		return nil, err
 	}
-	go func() { s.wait <- s.cmd.Wait() }()
+	started := time.Now()
+	go func() { err := s.cmd.Wait(); recordLegacyProcess(time.Since(started)); s.wait <- err }()
 	return s, nil
 }
 

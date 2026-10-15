@@ -39,35 +39,75 @@ func (c *Client) enrichMessagesWithContent(accountName, mailboxName string, mess
 
 	const chunkSize = 10
 	deadline := time.Now().Add(mailContentFetchBudget())
+	complete, diskErr := c.enrichMessagesFromDisk(accountName, mailboxName, messages)
+	if diskErr != nil && (c.Done() != nil || (c.nativeEnabled() && !isEnvelopeIndexUnavailable(diskErr))) {
+		c.warnContentFallback(diskErr)
+		for i := range messages {
+			messages[i].ContentError = diskErr.Error()
+		}
+		return messages
+	}
+	type pendingScope struct {
+		account, mailbox string
+		indices          []int
+	}
+	var groups []pendingScope
+	scopePositions := make(map[string]int)
+	for i := range messages {
+		if complete[i] {
+			continue
+		}
+		a, m := accountName, mailboxName
+		if a == "" {
+			a = messages[i].Account
+		}
+		if m == "" {
+			m = messages[i].Mailbox
+		}
+		key := a + "\x00" + m
+		position, exists := scopePositions[key]
+		if !exists {
+			position = len(groups)
+			scopePositions[key] = position
+			groups = append(groups, pendingScope{account: a, mailbox: m})
+		}
+		groups[position].indices = append(groups[position].indices, i)
+	}
 
-	for start := 0; start < len(messages); start += chunkSize {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			c.warnContentFallback(fmt.Errorf("content fetch budget exhausted"))
-			return messages
-		}
-		chunkTimeout := remaining
-		if chunkTimeout > 10*time.Second {
-			chunkTimeout = 10 * time.Second
-		}
-
-		end := start + chunkSize
-		if end > len(messages) {
-			end = len(messages)
-		}
-
-		ids := make([]string, 0, end-start)
-		for _, message := range messages[start:end] {
-			ids = append(ids, message.ID)
-		}
-		contentByID, err := c.getMessageContentBatch(accountName, mailboxName, ids, chunkTimeout)
-		if err != nil {
-			c.warnContentFallback(err)
-			return messages
-		}
-		for i := start; i < end; i++ {
-			if content, ok := contentByID[messages[i].ID]; ok {
-				messages[i].Content = content
+	for _, group := range groups {
+		pending := group.indices
+		for start := 0; start < len(pending); start += chunkSize {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				c.warnContentFallback(fmt.Errorf("content fetch budget exhausted"))
+				return messages
+			}
+			chunkTimeout := remaining
+			if chunkTimeout > 10*time.Second {
+				chunkTimeout = 10 * time.Second
+			}
+			end := start + chunkSize
+			if end > len(pending) {
+				end = len(pending)
+			}
+			ids := make([]string, 0, end-start)
+			for _, i := range pending[start:end] {
+				ids = append(ids, messages[i].ID)
+			}
+			contentByID, err := c.getMessageContentBatch(group.account, group.mailbox, ids, chunkTimeout)
+			if err != nil {
+				c.warnContentFallback(err)
+				for _, i := range pending[start:end] {
+					messages[i].ContentError = err.Error()
+				}
+				return messages
+			}
+			for _, i := range pending[start:end] {
+				if content, ok := contentByID[messages[i].ID]; ok {
+					messages[i].Content = content
+					messages[i].ContentSource = BodySourceMail
+					messages[i].ContentError = ""
+				}
 			}
 		}
 	}
@@ -76,6 +116,9 @@ func (c *Client) enrichMessagesWithContent(accountName, mailboxName string, mess
 }
 
 func (c *Client) getMessageContentBatch(accountName, mailboxName string, ids []string, timeout time.Duration) (map[string]string, error) {
+	if c.nativeEnabled() {
+		return c.nativeMessageContentBatch(accountName, mailboxName, ids, timeout)
+	}
 	encodedIDs, err := json.Marshal(ids)
 	if err != nil {
 		return nil, err

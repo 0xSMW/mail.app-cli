@@ -52,7 +52,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		membership := `(m.mailbox = box.ID or (
 			lower(box.URL) not glob '*/all%20mail' and lower(box.URL) not glob '*/all mail'
 			and lower(box.URL) not glob '*/archive'
-			and exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = box.ID)))`
+			and ` + indexLabelMembershipCondition("box.ID") + "))"
 		selects = append(selects, fmt.Sprintf(`select %d as VerificationScope,
 		(select ID from %s) as MailboxID,
 		(select URL from %s) as MailboxURL,
@@ -154,14 +154,5 @@ func verificationUnion(selects []string) string {
 // Preserve resolveIndexMailbox's exact/Gmail, literal Archive, nested Archive,
 // then broad nested-leaf preference, resolving it afresh in every snapshot.
 func verificationMailboxSelect(accountID, mailbox string) string {
-	exact := sqlQuote(indexMailboxURLPattern(accountID, mailbox))
-	broad := sqlQuote("imap://" + accountID + "/%/" + escapedMailboxLeaf(mailbox))
-	where, order := "url = "+exact+" or url like "+broad, "case when url = "+exact+" then 0 else 3 end"
-	if normalizeMailboxAlias(mailbox) == "archive" {
-		literal := sqlQuote("imap://" + accountID + "/Archive")
-		nested := sqlQuote("imap://" + accountID + "/%/Archive")
-		where += " or url = " + literal + " or url like " + nested
-		order = "case when url = " + exact + " then 0 when url = " + literal + " then 1 when url like " + nested + " then 2 else 3 end"
-	}
-	return "select ROWID as ID, url as URL from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
+	return indexMailboxCandidateSelect(accountID, mailbox, "ROWID as ID, url as URL")
 }

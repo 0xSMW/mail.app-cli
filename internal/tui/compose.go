@@ -10,7 +10,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 type composeMode int
@@ -50,14 +50,17 @@ type composeBodyLoadedMsg struct {
 // composeModal is the editor for a new message, reply, or forward. Sending
 // happens in a queued write so the screen stays live.
 type composeModal struct {
-	mode    composeMode
-	account string
-	inputs  []textinput.Model
-	body    textarea.Model
-	focus   int
-	sending bool
-	status  string
-	problem bool
+	mode            composeMode
+	account         string
+	originalAccount string
+	originalMailbox string
+	originalID      string
+	inputs          []textinput.Model
+	body            textarea.Model
+	focus           int
+	sending         bool
+	status          string
+	problem         bool
 }
 
 // openCompose opens the editor. Replies and forwards quote the message under
@@ -156,6 +159,7 @@ func newComposeModal(mode composeMode, account string, original *mail.Message, o
 	c.body.MaxHeight = 0
 	c.body.MaxContentHeight = 0
 	if original != nil {
+		c.originalAccount, c.originalMailbox, c.originalID = original.Account, original.Mailbox, original.ID
 		c.prefill(original, ownAddresses)
 	}
 	if mode == composeReply || mode == composeReplyAll {
@@ -398,7 +402,29 @@ func (c *composeModal) submit(m *model, draft bool) tea.Cmd {
 	}
 	client := m.client.WithContext(m.writeCtx)
 	account := c.account
+	threaded := mail.ThreadedOutgoingInput{
+		OutgoingInput:   mail.OutgoingInput{Account: account, Subject: subject, Body: body, To: to, Cc: cc, Bcc: bcc},
+		OriginalAccount: c.originalAccount, OriginalMailbox: c.originalMailbox, OriginalID: c.originalID,
+	}
+	switch c.mode {
+	case composeReply:
+		threaded.Mode = mail.ReplyToSender
+	case composeReplyAll:
+		threaded.Mode = mail.ReplyToAll
+	case composeForward:
+		threaded.Mode = mail.ForwardMessage
+	}
+	useThreaded := c.mode != composeNew && client.Backend() == mail.BackendNative
 	return m.writes.push(func() tea.Msg {
+		if useThreaded {
+			var err error
+			if draft {
+				_, err = client.SaveThreadedOutgoing(threaded)
+				return composeDoneMsg{err: err, label: "Saved draft " + subject}
+			}
+			_, err = client.SendThreadedOutgoing(threaded)
+			return composeDoneMsg{err: err, label: fmt.Sprintf("Sent %q to %s", subject, strings.Join(to, ", "))}
+		}
 		if draft {
 			_, err := client.CreateDraft(mail.DraftInput{Account: account, Subject: subject, Body: body, To: to, Cc: cc, Bcc: bcc})
 			return composeDoneMsg{err: err, label: "Saved draft " + subject}

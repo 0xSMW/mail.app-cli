@@ -68,6 +68,7 @@ func TestOutgoingProductionScript(t *testing.T) {
 		{name: "send false", config: map[string]interface{}{"sendFalse": true}, sent: 1, uncertain: true},
 		{name: "send throw", config: map[string]interface{}{"sendThrows": true}, sent: 1, uncertain: true},
 		{name: "attachment accepted", attachments: []string{"/tmp/report.pdf"}, ok: true, sent: 1},
+		{name: "attachment escaped quote comma and backslash", attachments: []string{`/tmp/quote", comma\file.pdf`}, ok: true, sent: 1},
 		{name: "attachment throws", attachments: []string{"/tmp/report.pdf"}, config: map[string]interface{}{"attachmentThrows": true}, deleted: 1},
 		{name: "attachment wait exhausted", attachments: []string{"/tmp/report.pdf"}, config: map[string]interface{}{"attachNeverReady": true}, deleted: 1},
 		{name: "cleanup failure", config: map[string]interface{}{"readback": "other@example.com", "cleanupThrows": true}, deleted: 1},

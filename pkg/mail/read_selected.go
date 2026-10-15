@@ -39,6 +39,9 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
+		if client.nativeEnabled() {
+			return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout, !c.shared.bodyFromMail)
+		}
 		if i%10 == 0 || (session != nil && session.closed) {
 			if session != nil {
 				session.Close()

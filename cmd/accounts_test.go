@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestAccountsShowUsesLiveInventoryInsteadOfCachedList(t *testing.T) {

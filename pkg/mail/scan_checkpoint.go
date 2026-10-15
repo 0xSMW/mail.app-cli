@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -275,13 +276,7 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 			key := m.Account + "\x00" + m.ID
 			if i, ok := indices[key]; ok {
 				for _, box := range m.Mailboxes {
-					found := false
-					for _, prior := range result.Messages[i].Mailboxes {
-						if prior == box {
-							found = true
-						}
-					}
-					if !found {
+					if !slices.Contains(result.Messages[i].Mailboxes, box) {
 						result.Messages[i].Mailboxes = append(result.Messages[i].Mailboxes, box)
 					}
 				}

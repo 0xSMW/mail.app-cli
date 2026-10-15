@@ -3,8 +3,8 @@ package cmd
 import (
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestUnifiedListingScopedUsesResolvedMailbox(t *testing.T) {

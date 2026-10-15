@@ -3,7 +3,6 @@ package mail
 import (
 	"slices"
 	"strings"
-	"unicode"
 )
 
 // ThreadSummary groups messages that share a normalized subject. Synthetic
@@ -106,18 +105,5 @@ func NormalizeThreadSubject(subject string) string {
 		}
 		subject = trimmed
 	}
-	var b strings.Builder
-	lastSpace := false
-	for _, r := range subject {
-		if unicode.IsSpace(r) {
-			if !lastSpace {
-				b.WriteRune(' ')
-				lastSpace = true
-			}
-			continue
-		}
-		lastSpace = false
-		b.WriteRune(r)
-	}
-	return strings.TrimSpace(b.String())
+	return strings.Join(strings.Fields(subject), " ")
 }

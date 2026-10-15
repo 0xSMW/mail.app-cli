@@ -62,7 +62,7 @@ func (c *Client) PreviewDraftSend(accountName, draftID string) (*OutgoingResult,
 		return nil, err
 	}
 	draft := snapshot.Message
-	return c.PreviewOutgoing(OutgoingInput{Account: draft.Account, Sender: sender, Subject: draft.Subject, Body: body, To: draft.ToRecipients, Cc: draft.CcRecipients, Bcc: draft.BccRecipients})
+	return c.PreviewOutgoing(draftOutgoing(draft, sender, body))
 }
 
 // SendDraftResult supports only drafts whose raw MIME proves that rebuilding
@@ -121,7 +121,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 	if !sameDraftSnapshot(snapshot, current) {
 		return fail("verify_original", fmt.Errorf("draft changed while preparing submission"))
 	}
-	outgoing, err := c.composeOutgoing(OutgoingInput{Account: draft.Account, Sender: sender, Subject: draft.Subject, Body: body, To: draft.ToRecipients, Cc: draft.CcRecipients, Bcc: draft.BccRecipients, Attachments: attachments}, "send")
+	input := draftOutgoing(draft, sender, body)
+	input.Attachments = attachments
+	outgoing, err := c.composeOutgoing(input, "send")
 	if outgoing != nil {
 		result.AccountID, result.Sender, result.Submitted = outgoing.AccountID, outgoing.Sender, outgoing.Submitted
 	}
@@ -155,6 +157,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 // This read bypasses Envelope Index latency and requires one unambiguous exact
 // local ID in the account-owned special Drafts mailbox. Every property read is strict.
 func (c *Client) readDraftSnapshot(accountName, draftID string) (*draftSnapshot, error) {
+	if c.nativeEnabled() {
+		return c.readNativeDraftSnapshot(accountName, draftID)
+	}
 	script := jxaDraftSnapshotScript(accountName, draftID)
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -220,6 +225,9 @@ func sameDraftSnapshot(a, b *draftSnapshot) bool {
 // Compare source and compose properties again inside the deletion bridge, so
 // another edit between submission and cleanup cannot remove the edited draft.
 func (c *Client) deleteUnchangedDraft(snapshot *draftSnapshot) error {
+	if c.nativeEnabled() {
+		return c.deleteNativeUnchangedDraft(snapshot)
+	}
 	script := jxaDraftCleanupScript(snapshot)
 	output, err := c.runJXA(script)
 	if err != nil {

@@ -84,6 +84,9 @@ func searchTerms(query string) []string {
 }
 
 func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchLegacy(query, limit)
+	}
 	limitClause := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if msgCount > %d then set msgCount to %d", limit, limit)
@@ -170,6 +173,22 @@ func (c *Client) SearchMessagesJSONSinceWithOptions(query string, accountName st
 			return SearchResult{}, err
 		}
 		return completeSearchResult(messages, []searchTarget{target}), nil
+	}
+
+	// Reuse one read-only account snapshot for this search's parallel targets.
+	// A named scope must not depend on unrelated account metadata.
+	if c.nativeEnabled() {
+		if accountName != "" {
+			account, err := c.accountByName(accountName)
+			if err != nil {
+				return SearchResult{}, err
+			}
+			searchClient := *c
+			searchClient.readAccountSnapshot = account
+			c = &searchClient
+		} else if _, err := c.GetAccountsJSON(); err != nil {
+			return SearchResult{}, err
+		}
 	}
 
 	targets, err := c.defaultSearchTargets(accountName)
@@ -410,6 +429,9 @@ func accountScopedSearchTargets(mailboxes []Mailbox, accountName string) []searc
 }
 
 func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchMailbox(query, accountName, mailboxName, limit, since, true)
+	}
 	// Use helper for escaping
 	terms := searchTerms(query)
 	if len(terms) == 0 {
@@ -421,13 +443,9 @@ func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxNam
 	}
 	escapedAccount := escapeJSString(accountName)
 	escapedMailbox := escapeJSString(mailboxName)
-	sinceUnix := int64(0)
-	if strings.TrimSpace(since) != "" {
-		parsedSince, _, err := parseSinceUnix(since)
-		if err != nil {
-			return nil, err
-		}
-		sinceUnix = parsedSince
+	sinceUnix, _, err := parseSinceUnix(since)
+	if err != nil {
+		return nil, err
 	}
 	maxToCheck := 500
 	if isArchiveAlias(mailboxName) {
@@ -472,16 +490,7 @@ try {
 
 			if (searchTerms.every(term => haystack.includes(term))) {
 				result.push({
-					id: String(msg.id()),
-					subject: msg.subject() || '',
-					sender: msg.sender() || '',
-					dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-					dateSent: (msg.dateSent() || new Date()).toISOString(),
-					read: msg.readStatus(),
-					flagged: msg.flaggedStatus(),
-					messageSize: msg.messageSize(),
-					mailbox: mboxName,
-					account: accName
+					%s
 				});
 			}
 		} catch (e) {
@@ -493,16 +502,11 @@ try {
 }
 
 JSON.stringify(result);
-`, string(termsJSON), limit, maxToCheck, escapedMailbox, sinceUnix*1000, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName))
-
-	output, err := c.runJXAWithTimeout(script, mailSearchTimeout())
-	if err != nil {
-		return nil, err
-	}
+`, string(termsJSON), limit, maxToCheck, escapedMailbox, sinceUnix*1000, jxaMailboxLookupHelper(), escapedAccount, jxaMailboxLookupExpression(mailboxName), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mboxName", Account: "accName"}.fields())
 
 	var messages []Message
-	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse search results JSON: %w", err)
+	if err := c.runJXAJSON(script, mailSearchTimeout(), "search results", &messages); err != nil {
+		return nil, err
 	}
 
 	if len(messages) == 0 && isArchiveAlias(mailboxName) {
@@ -513,6 +517,9 @@ JSON.stringify(result);
 }
 
 func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchMailbox(query, accountName, mailboxName, limit, since, false)
+	}
 	if limit <= 0 {
 		limit = 50
 	}
@@ -524,13 +531,9 @@ func (c *Client) searchArchiveMailboxWithWhoseJXA(query, accountName, mailboxNam
 	if err != nil {
 		return nil, err
 	}
-	sinceUnix := int64(0)
-	if strings.TrimSpace(since) != "" {
-		parsedSince, _, err := parseSinceUnix(since)
-		if err != nil {
-			return nil, err
-		}
-		sinceUnix = parsedSince
+	sinceUnix, _, err := parseSinceUnix(since)
+	if err != nil {
+		return nil, err
 	}
 
 	script := fmt.Sprintf(`
@@ -557,16 +560,7 @@ function addMessage(msg, accName, mboxName) {
 		if (seen[id]) return;
 		seen[id] = true;
 		result.push({
-			id: id,
-			subject: msg.subject() || '',
-			sender: msg.sender() || '',
-			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-			dateSent: (msg.dateSent() || new Date()).toISOString(),
-			read: msg.readStatus(),
-			flagged: msg.flaggedStatus(),
-			messageSize: msg.messageSize(),
-			mailbox: mboxName,
-			account: accName
+			%s
 		});
 	} catch (e) {}
 }
@@ -596,16 +590,11 @@ try {
 }
 
 JSON.stringify(result.slice(0, maxResults));
-`, string(termsJSON), limit, escapeJSString(mailboxName), sinceUnix*1000, jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
-
-	output, err := c.runJXAWithTimeout(script, mailSearchTimeout())
-	if err != nil {
-		return nil, err
-	}
+`, string(termsJSON), limit, escapeJSString(mailboxName), sinceUnix*1000, jxaMailboxLookupHelper(), jxaMessageProjection{ID: "id", Size: "msg.messageSize()", Mailbox: "mboxName", Account: "accName"}.fields(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 
 	var messages []Message
-	if err := json.Unmarshal([]byte(output), &messages); err != nil {
-		return nil, fmt.Errorf("failed to parse archive search results JSON: %w", err)
+	if err := c.runJXAJSON(script, mailSearchTimeout(), "archive search results", &messages); err != nil {
+		return nil, err
 	}
 
 	return messages, nil

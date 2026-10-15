@@ -56,21 +56,14 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 	if strings.TrimSpace(input.Account) == "" {
 		return nil, fmt.Errorf("account is required")
 	}
-	if len(input.To)+len(input.Cc)+len(input.Bcc) == 0 {
-		return nil, fmt.Errorf("at least one recipient is required")
-	}
-	for _, list := range [][]string{input.To, input.Cc, input.Bcc} {
-		for _, address := range list {
-			if strings.TrimSpace(address) == "" {
-				return nil, fmt.Errorf("recipient must not be empty")
-			}
-		}
-	}
-	attachments, err := ValidateDraftAttachments(input.Attachments)
+	var err error
+	input, err = prepareOutgoing(input)
 	if err != nil {
 		return nil, err
 	}
-	input.Attachments = attachments
+	if c.nativeEnabled() {
+		return c.composeNativeOutgoing(input, action)
+	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
@@ -108,8 +101,8 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 	if result.Account != input.Account || result.AccountID == "" || result.Sender == "" || result.Status != expected || (action == "send" && !result.Submitted) || (action != "send" && result.Submitted) || (action == "save" && (result.Draft == nil || result.Draft.ID == "" || result.Draft.Account != input.Account)) {
 		return result, &MutationError{Operation: action, Phase: "response", Account: input.Account, Sender: result.Sender, Cause: errors.New("Mail returned an incomplete outgoing receipt"), Attempted: action != "preview", Uncertain: action != "preview", Submitted: result.Submitted, Saved: envelope.Saved}
 	}
-	if action == "save" && len(attachments) > 0 {
-		if err := c.verifyDraftAttachments(result.Draft, attachments); err != nil {
+	if action == "save" && len(input.Attachments) > 0 {
+		if err := c.verifyDraftAttachments(result.Draft, input.Attachments); err != nil {
 			return result, &MutationError{Operation: action, Phase: "attachment_verification", Account: input.Account, Sender: result.Sender, Cause: err, Attempted: true, Uncertain: true, Saved: true}
 		}
 	}

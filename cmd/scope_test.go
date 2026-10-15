@@ -7,21 +7,21 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/cache"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/cache"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestResolveLocatedMessagesIndexMissFailsClosed(t *testing.T) {
-	previous := resolved
-	t.Cleanup(func() { resolved = previous })
-	resolved = config.Resolved{
+	a := newApplication()
+
+	a.resolved = config.Resolved{
 		Account: config.Value{Value: "Configured", Source: config.SourceConfig},
 		Mailbox: config.Value{Value: "Archive", Source: config.SourceConfig},
 	}
 
-	refs, notices, err := resolveLocatedMessages([]string{"42"}, map[string]mail.MessageLocation{}, nil)
+	refs, notices, err := a.resolveLocatedMessages([]string{"42"}, map[string]mail.MessageLocation{}, nil)
 	if refs != nil || notices != nil {
 		t.Fatalf("index miss returned refs=%+v notices=%v, want neither", refs, notices)
 	}
@@ -35,14 +35,14 @@ func TestResolveLocatedMessagesIndexMissFailsClosed(t *testing.T) {
 }
 
 func TestResolveLocatedMessagesFallsBackOnlyWhenIndexUnavailable(t *testing.T) {
-	previous := resolved
-	t.Cleanup(func() { resolved = previous })
-	resolved = config.Resolved{
+	a := newApplication()
+
+	a.resolved = config.Resolved{
 		Account: config.Value{Value: "Configured", Source: config.SourceConfig},
 		Mailbox: config.Value{Value: "Archive", Source: config.SourceConfig},
 	}
 
-	refs, notices, err := resolveLocatedMessages([]string{"42"}, nil, errors.New("index unavailable"))
+	refs, notices, err := a.resolveLocatedMessages([]string{"42"}, nil, errors.New("index unavailable"))
 	if err != nil {
 		t.Fatalf("fallback error = %v", err)
 	}
@@ -77,11 +77,7 @@ func TestExplicitMessageRefsKeepExplicitScopeWhenIndexIsMissingOrAnotherAccount(
 }
 
 func TestRequireAccountUsesLiveInventoryInsteadOfCachedAccounts(t *testing.T) {
-	previousResolved, previousClient := resolved, mailClient
-	t.Cleanup(func() {
-		resolved = previousResolved
-		mailClient = previousClient
-	})
+	a := newApplication()
 
 	homeDir := t.TempDir()
 	binDir := t.TempDir()
@@ -102,13 +98,13 @@ printf '%s' '[{"id":"personal","name":"Personal","enabled":true},{"id":"work","n
 		t.Fatalf("seed accounts cache: %v", err)
 	}
 
-	mailClient = mail.NewClient()
-	if _, err := accountsCached(false, false); err != nil {
+	a.mailClient = mail.NewClient()
+	if _, err := a.accountsCached(false, false); err != nil {
 		t.Fatalf("read stale accounts cache: %v", err)
 	}
-	resolved = config.Resolved{}
+	a.resolved = config.Resolved{}
 
-	account, err := requireAccount()
+	account, err := a.requireAccount()
 	if account != "" {
 		t.Fatalf("account = %q, want no implicit selection", account)
 	}

@@ -1,24 +1,47 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
 func (c *Client) accountByName(accountName string) (*Account, error) {
+	if c.readAccountSnapshot != nil && c.readAccountSnapshot.Name == accountName {
+		account := cloneAccounts([]Account{*c.readAccountSnapshot})[0]
+		return &account, nil
+	}
+	if c.nativeEnabled() {
+		c.shared.accountsMu.Lock()
+		loaded := c.shared.accountsLoaded
+		c.shared.accountsMu.Unlock()
+		if !loaded {
+			return c.nativeAccountByName(accountName)
+		}
+	}
+
 	accounts, err := c.GetAccountsJSON()
 	if err != nil {
 		return nil, err
 	}
+	var found *Account
 	for _, account := range accounts {
 		if account.Name == accountName {
-			return &account, nil
+			if found != nil {
+				return nil, fmt.Errorf("account name is ambiguous: %s", accountName)
+			}
+			copy := account
+			found = &copy
 		}
+	}
+	if found != nil {
+		return found, nil
 	}
 	return nil, notFound("account", accountName)
 }
 
 func (c *Client) GetAccounts() ([]Account, error) {
+	if c.nativeEnabled() {
+		return c.GetAccountsJSON()
+	}
 	script := `
 	tell application "Mail"
 		set accountList to {}
@@ -79,6 +102,18 @@ func (c *Client) GetAccountsJSON() ([]Account, error) {
 	}
 	c.shared.accountsMu.Unlock()
 
+	if c.nativeEnabled() {
+		accounts, err := c.nativeAccounts()
+		if err != nil {
+			return nil, err
+		}
+		c.shared.accountsMu.Lock()
+		c.shared.accounts = cloneAccounts(accounts)
+		c.shared.accountsLoaded = true
+		c.shared.accountsMu.Unlock()
+		return cloneAccounts(accounts), nil
+	}
+
 	script := `
 const mail = Application('Mail');
 const accounts = mail.accounts();
@@ -93,20 +128,16 @@ for (let i = 0; i < accounts.length; i++) {
 		emailAddress: emailAddresses.length > 0 ? emailAddresses[0] : '',
 		emailAddresses,
 		userName: acc.userName(),
+		accountType: acc.accountType().toLowerCase(),
 		enabled: acc.enabled()
 	});
 }
 
 JSON.stringify(result);
 `
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var accounts []Account
-	if err := json.Unmarshal([]byte(output), &accounts); err != nil {
-		return nil, fmt.Errorf("failed to parse accounts JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "accounts", &accounts); err != nil {
+		return nil, err
 	}
 
 	c.shared.accountsMu.Lock()
@@ -118,6 +149,17 @@ JSON.stringify(result);
 }
 
 func (c *Client) GetUnreadCount() (int, error) {
+	if c.nativeEnabled() {
+		mailboxes, err := c.GetMailboxesJSON("")
+		if err != nil {
+			return 0, err
+		}
+		total := 0
+		for _, box := range mailboxes {
+			total += box.UnreadCount
+		}
+		return total, nil
+	}
 	script := `
 	tell application "Mail"
 		set totalUnread to 0
