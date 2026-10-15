@@ -8,6 +8,19 @@ Use `--email <address>` on any `labels` command to select the Gmail provider add
 
 ## Connect an account
 
+For a source build, use the same signing identity on every update so macOS
+Keychain recognizes the CLI across builds:
+
+```sh
+MAIL_APP_CLI_SIGN_IDENTITY="Developer ID Application: Your Team (...)" make install
+```
+
+The build uses the stable identifier `ai.smw.mail-app-cli`. `make build` accepts
+the same environment variable. Authorize or import credentials through the
+installed signed binary. Replacing it with an ad-hoc build changes its security
+identity; routine credential reads return an access error rather than opening
+a password dialog. A locked login Keychain must be unlocked explicitly.
+
 Create a desktop OAuth client with the Gmail API enabled and grant `https://www.googleapis.com/auth/gmail.modify`. A full mail scope also works. Connect using the downloaded desktop client JSON:
 
 ```sh
@@ -16,6 +29,8 @@ mail-app-cli labels auth connect -a "Work" --email primary@example.com --client-
 ```
 
 The command opens browser authorization and accepts the response on a temporary loopback listener. Credentials are saved to macOS Keychain only after the Gmail profile matches the selected Mail.app account.
+
+Use a stable signed build for consistent macOS Keychain access across updates. Normal credential reads run without prompting; if access requires interaction, the command returns an actionable error. Reconnect or explicitly import credentials with the installed signed build to establish its access.
 
 If you already have authorized credentials, import a private JSON file:
 
