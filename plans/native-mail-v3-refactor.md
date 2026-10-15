@@ -522,3 +522,19 @@ complete Mail scan, preserving archive/read state and unrelated labels. A
 canceled Keychain prompt stopped a preflight before any production mutation;
 stable signing, versioned credential ownership, one load per address, and
 noninteractive reads remove that repeated-prompt path. The heartbeat is untouched.
+
+### 2026-10-15: legacy Gmail label compatibility
+
+- The legacy account JSON projection omitted `accountType`, so every label
+  operation rejected valid IMAP accounts. Read and normalize Mail's account type
+  in that projection; retain the existing IMAP capability check and archive policy.
+- The production-script regression fails before the correction and passes after
+  it for list, show, add, remove, and read-only receipt reconciliation. POP,
+  Exchange, and unknown accounts remain rejected. Provider and message fixtures
+  keep these tests independent of live Mail, Gmail, and Keychain.
+- The installed pre-fix binary independently reproduces the legacy label-list
+  capability error. Record the final signed installation and post-fix live check
+  in PR #26, alongside the package, non-cgo, race, and vet results.
+- Full Mail/CLI package suites, focused non-cgo label/legacy/account/surface
+  checks, the new regression under the race detector, and Mail/CLI vet pass.
+  Focused independent review has no remaining findings.
