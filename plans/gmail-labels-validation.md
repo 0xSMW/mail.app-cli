@@ -26,7 +26,7 @@ even while a fresh observation correctly reports the current desired state.
 
 ## Existing read efficiency
 
-Compare frozen pre-adapter 3.0.0 against the adapter candidate using randomized
+Compare frozen pre-adapter 3.0.0 against the final signed PATH candidate using randomized
 paired fresh CLI processes. Each workload has one excluded warmup pair and ten
 measured pairs. Mail stays running. Accounts, mailboxes, and message lists bypass
 the CLI cache; detail follows its normal content path. These 80 measured process
@@ -34,10 +34,10 @@ observations are diagnostics, not a high-confidence tail benchmark.
 
 | Workload | Baseline median | Candidate median | Change |
 | --- | ---: | ---: | ---: |
-| Accounts, live | 115.26 ms | 119.77 ms | +3.91% |
-| Mailboxes, live | 84.30 ms | 83.87 ms | -0.51% |
-| List 25, live | 82.76 ms | 84.65 ms | +2.28% |
-| Message detail | 469.71 ms | 469.52 ms | -0.04% |
+| Accounts, live | 112.91 ms | 113.60 ms | +0.61% |
+| Mailboxes, live | 74.90 ms | 75.88 ms | +1.31% |
+| List 25, live | 78.00 ms | 81.56 ms | +4.56% |
+| Message detail | 496.57 ms | 493.19 ms | -0.68% |
 
 All 30 count-bearing pairs have equal returned counts. Detail is not a list.
 A separate 80-observation cache series records median startup increases of
@@ -46,8 +46,8 @@ changes by -2.19 ms. The new command registration has a small startup cost;
 existing reads perform no Gmail HTTP or Keychain work.
 
 Before this adapter, a mailbox move could acknowledge a request while Important
-remained. There was no successful explicit-label baseline. Live fixture label
-changes now complete with fresh provider verification in 5.12-5.97 seconds;
+remained. There was no successful explicit-label baseline. Live label changes
+now complete with fresh provider verification in 4.64-5.97 seconds;
 no-op observations take 3.87-5.51 seconds. Each actual change performs one
 modification and one independent post-modification provider read. Account,
 catalog, identity, and baseline reads are additional preflight work. Provider
@@ -69,6 +69,9 @@ confirmation time and Mail convergence time remain separate measurements.
   different from the index. Feature-local normalization and semantic sender
   guards cover those cases; global stable identity/archive policy is unchanged.
 - Targeted race checks, vet, command surface, and whitespace checks pass.
+- Final credential-access corrections pass focused native/non-cgo auth and CLI
+  checks plus race checks after the complete suites; existing Mail/archive
+  implementation stays unchanged.
 - On home-server macOS 27.2, the focused adapter/CLI/surface tests and native
   build pass. These remote checks use no live Gmail credentials or mutations.
 - Canonical installation exposed changing ad-hoc signing identities: a canceled
@@ -78,13 +81,24 @@ confirmation time and Mail convergence time remain separate measurements.
   single Keychain load per address. It does not broaden Keychain access controls
   or read the experimental credential item. Explicit import creates the
   production item through the installed signed binary.
+- Two independent installed CLI processes load credentials and retrieve the
+  catalog successfully with interaction disabled. Repeated authorization
+  prompts are not part of normal label operations. Multi-entry GOPATH signing
+  is smoke-tested with isolated fake build/sign tools and paths containing spaces.
 
 ## Remaining delivery observations
 
-- [ ] Verify the canonical PATH installation and binary provenance.
-- [ ] Perform the authorized single-message production label removal and fresh
+- [x] Verify the canonical PATH installation and binary provenance.
+- [x] Perform the authorized single-message production label removal and fresh
   provider/Mail observations; keep private identity evidence outside Git.
-- [ ] Update PR #26 and inspect review/check state.
+- [x] Update PR #26 and inspect review/check state.
+
+The installed 3.0.0 build is signed with the stable CLI identifier. The native
+doctor is healthy; the previous PATH binary is retained as a recoverable backup.
+The authorized production acceptance changes only Important. Fresh provider and
+Mail observations agree: the message remains read in All Mail, absent from
+Inbox and Important, with its unrelated provider category preserved. No deletion,
+spam classification, reply, or heartbeat change is involved.
 
 No conclusion about an actual Apple Mail Today view follows from these label
 checks. The CLI's Today count is date-based and can include archived mail.
