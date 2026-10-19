@@ -195,6 +195,8 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 		{name: "truthy ObjC nil wrapper fails closed", config: map[string]any{"snapshotNil": true}, beforeDispatch: true, closes: 1},
 		{name: "required count missing before dispatch", config: map[string]any{"snapshotCountMissing": true}, beforeDispatch: true, closes: 1},
 		{name: "required count missing after ack", config: map[string]any{"snapshotCountMissing": true, "failAfterSend": true}, submitted: true},
+		{name: "owned disappears during full fingerprint", config: map[string]any{"ownedDisappearsDuringFingerprint": true}, submitted: true, ok: true},
+		{name: "owned disappears during close", config: map[string]any{"ownedDisappearsAtClose": true}, submitted: true, closes: 1, ok: true},
 		{name: "unchanged owned composition", submitted: true, closes: 1, ok: true},
 		{name: "unchanged attachments", attachments: []string{"/tmp/report.pdf"}, submitted: true, closes: 1, ok: true},
 		{name: "subject changed", config: map[string]any{"afterSend": map[string]any{"subject": "edited"}}, submitted: true},
@@ -355,6 +357,18 @@ func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
 		{name: "owned body edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"body": "edited"}}},
 		{name: "owned recipient edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"to": []string{"other@example.com"}}}},
 		{name: "owned attachment edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"attachments": []string{"different.pdf"}}}},
+		{name: "null IDs list after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": nil}, sent: 1, submitted: true},
+		{name: "null ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{nil}}, sent: 1, submitted: true},
+		{name: "object ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{map[string]any{}}}, sent: 1, submitted: true},
+		{name: "nonnumeric ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{"bad"}}, sent: 1, submitted: true},
+		{name: "duplicate IDs after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{100, 100}}, sent: 1, submitted: true},
+		{name: "zero ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{0}}, sent: 1, submitted: true},
+		{name: "unsafe ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{9007199254740992}}, sent: 1, submitted: true},
+		{name: "prepared disappears after positive IDs before byId", config: map[string]any{"preparedDisappearsAtById": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared disappears during snapshot", config: map[string]any{"preparedDisappearsDuringSnapshot": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared lingering ID clears after snapshot disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 3}, sent: 1, submitted: true, ok: true},
+		{name: "prepared lingering ID never clears after disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 100}, sent: 1, submitted: true},
+		{name: "nested stored read missing with ID present retains", config: map[string]any{"storedNestedMissing": "source"}, sent: 1, submitted: true},
 		{name: "deletes only prepared stored ID and leaves old draft", config: map[string]any{"preexisting": true}, sent: 1, submitted: true, ok: true, deletes: 1},
 		{name: "stable by-ID reference survives ordinal reorder", config: map[string]any{"preexisting": true, "reorderAfterLookup": true}, sent: 1, submitted: true, ok: true, deletes: 1},
 		{name: "stored already absent after send", config: map[string]any{"storedAbsent": true, "preexisting": true}, sent: 1, submitted: true, ok: true},
@@ -405,9 +419,12 @@ func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
 				}
 			}
 			for _, id := range got.ExactLookups {
-				if id != "900" {
+				if id != "900" && !(tt.name == "ambiguous prepared copy prevents send" && id == "901") {
 					t.Fatalf("read unrelated draft by ID: %s", raw)
 				}
+			}
+			if tt.name == "ambiguous prepared copy prevents send" && (len(got.ExactLookups) != 2 || !strings.Contains(got.Response.Error, "Prepared draft identity is ambiguous")) {
+				t.Fatalf("did not inspect and reject both new matching copies: %s", raw)
 			}
 			if tt.submitted && !tt.ok && (got.Response.Uncertain || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "") {
 				t.Fatalf("lost acknowledged send: %s", raw)
@@ -417,6 +434,9 @@ func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
 			}
 			if strings.Contains(tt.name, "during prepare") && got.Response.Phase != "prepared_compose_verification" {
 				t.Fatalf("missed pre-send composition guard: %s", raw)
+			}
+			if tt.name == "nested stored read missing with ID present retains" && (!strings.Contains(got.Response.Error, "prepared_snapshot failed") || !strings.Contains(got.Response.Error, "-1728") || strings.Contains(got.Response.Error, "stored nested unavailable")) {
+				t.Fatalf("missing sanitized stage/error diagnostic: %s", raw)
 			}
 			if tt.sent == 0 && got.Response.Uncertain {
 				t.Fatalf("pre-send preparation reported send uncertainty: %s", raw)
