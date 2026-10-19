@@ -550,6 +550,7 @@ func TestReadOnlyPreviewsAllowJQ(t *testing.T) {
 printf '%s\n' "$*" >> "$MAIL_APP_CLI_TEST_OSASCRIPT_LOG"
 case "$*" in
   *"const accounts = mail.accounts()"*) printf '%s' '[{"id":"work","name":"Work","enabled":true}]' ;;
+  *"const searchTerms"*) printf '%s' '{"messages":[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}],"truncated":false,"readFailures":0,"scannedMessages":1,"totalMessages":1}' ;;
   *) printf '%s' '[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}]' ;;
 esac
 `), 0o755); err != nil {
