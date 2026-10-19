@@ -194,7 +194,7 @@ func jxaOutgoingHelper() string {
 function composeOutgoing(input, action) {
  input.to = input.to || []; input.cc = input.cc || []; input.bcc = input.bcc || [];
  const mail = Application('Mail');
- let outgoing = null, attempted = false, accepted = false, saved = false;
+ let outgoing = null, attempted = false, accepted = false, saved = false, ownedBodyProof = null;
  let step = 'account_resolution';
  const composeBody=(action === 'save' || action === 'send') && !input.body.endsWith('\n') ? input.body+'\n' : input.body;
  let result = {account: input.account, accountId: '', sender: '', status: '', submitted: false};
@@ -376,7 +376,14 @@ function composeOutgoing(input, action) {
   const expected=composeBody.replace(/\r\n/g,'\n');
   // Mail's persisted rich-text view adds one leading paragraph separator.
   // Do not trim user whitespace or accept arbitrary body differences.
-  return body===input.body.replace(/\r\n/g,'\n') || body===expected || body==='\n'+expected;
+  if(body===input.body.replace(/\r\n/g,'\n') || body===expected || body==='\n'+expected)return true;
+  // Mail can serialize attachment-backed owned text with an extra LF/line
+  // separator prefix. Accept only this exact layout with N trailing owned
+  // object markers proving N requested attachments, preserving all body text.
+  const count=(input.attachments || []).length;
+  return count > 0 && input.body.indexOf('\uFFFC') < 0 && ownedBodyProof !== null && ownedBodyProof.attachmentCount === count &&
+   (ownedBodyProof.files === null || equal(ownedBodyProof.files,expectedNames)) &&
+   ownedBodyProof.body.replace(/\r\n/g,'\n') === expected+'\uFFFC'.repeat(count) && body==='\n\u2028'+expected;
  }
  // Stored Drafts ownership is established before dispatch, never guessed from
  // a Sent message or a post-send subject search.
@@ -521,6 +528,7 @@ function composeOutgoing(input, action) {
   if (action === 'send') {
    step='send_fingerprint';
    const expected=ownedFingerprint();
+   ownedBodyProof=expected;
    step='prepare_send';
    const prepared=prepareSendDraft(target,before);
    guardSender();
@@ -536,7 +544,17 @@ function composeOutgoing(input, action) {
    phase('outgoing_submitted_cleanup',function() { cleanupSubmitted(expected); cleanupPreparedDraft(prepared); });
    return {ok:true,result:result,attempted:true};
   }
-  phase('outgoing_save',function() { attempted=true; mail.save(outgoing); mail.close(outgoing,{saving:'yes'}); saved=true; });
+  step='save_fingerprint';
+  const expected=ownedFingerprint();
+  ownedBodyProof=expected;
+  step='save';
+  phase('outgoing_save',function() {
+   attempted=true;
+   mail.save(outgoing);
+   saved=true;
+   if(!equal(expected,ownedFingerprint(expected.files !== null)))fail('Owned composition changed during save; retained');
+   mail.close(outgoing,{saving:'yes'});
+  });
   step='save_verification';
   for (let i=0;i<80;i++) {
    drafts=draftMailboxForAccount(mail,target.account);
