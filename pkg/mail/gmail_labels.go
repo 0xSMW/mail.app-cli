@@ -3,7 +3,6 @@ package mail
 import (
 	"context"
 	"fmt"
-	"mime"
 	"net/mail"
 	"sort"
 	"strings"
@@ -239,7 +238,7 @@ func verifyGmailIdentity(m gmail.Message, id StableIdentity) error {
 	if err != nil {
 		return err
 	}
-	subject, err = new(mime.WordDecoder).DecodeHeader(subject)
+	subject, err = headerWordDecoder().DecodeHeader(subject)
 	if err != nil {
 		return fmt.Errorf("Gmail Subject encoding is invalid")
 	}
