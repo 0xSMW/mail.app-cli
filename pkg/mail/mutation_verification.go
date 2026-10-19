@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	netmail "net/mail"
 	"regexp"
 	"strconv"
 	"strings"
@@ -83,11 +82,11 @@ func (identity StableIdentity) verificationKey() string {
 // address and validate its addr-spec; malformed sender text never weakens the
 // guard to subject/date matching. Mail treats mailbox addresses case-insensitively.
 func stableSenderAddress(sender string) string {
-	address, err := netmail.ParseAddress(strings.TrimSpace(sender))
-	if err != nil || validRFCMessageID(address.Address) == "" {
+	address, err := draftSenderAddress(sender)
+	if err != nil || validRFCMessageID(address) == "" {
 		return ""
 	}
-	return strings.ToLower(address.Address)
+	return strings.ToLower(address)
 }
 
 func (identity StableIdentity) rfcEnvelopeKey() string {
