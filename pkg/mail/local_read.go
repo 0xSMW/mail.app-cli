@@ -49,9 +49,9 @@ func (c *Client) nativeDiskAccessError(err error) error {
 
 // getMessageDetailsFromDisk returns handled=true only after the requested
 // membership is observed and a complete local MIME file is decoded. A missing
-// member is also a handled nil result. A partial/missing/undecodable file
-// returns handled=false, retaining index metadata and diagnostics for callers
-// that ask Mail for the unavailable content.
+// index member leaves absence to a scoped live lookup because the index may lag.
+// A partial/missing/undecodable file returns handled=false, retaining index
+// metadata and diagnostics for callers that ask Mail for unavailable content.
 func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID string) (*Message, bool, error) {
 	if c.shared.bodyFromMail {
 		return nil, false, nil
@@ -74,7 +74,7 @@ func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID s
 		return nil, false, err
 	}
 	if len(rows) == 0 {
-		return nil, true, nil
+		return nil, false, nil
 	}
 	message := indexMessagesToMessages([]indexMessage{rows[0].indexMessage})[0]
 	path, err := messageFilePathForMailbox(id, rows[0].OwnerURL)
