@@ -176,8 +176,8 @@ func TestDraftCleanupProductionScript(t *testing.T) {
 			prelude := `const scenario = ` + fmt.Sprintf("%q", scenario) + `; const snapshot = ` + string(encoded) + `;
 let deletes=0, reads=0;
 const props=snapshot.message;
-const msg={id:()=>42,subject:()=>props.subject,sender:()=>props.sender,content:()=>props.content,source:()=>scenario==='changed_source' ? 'changed' : snapshot.source,toRecipients:()=>props.toRecipients.map(v=>({address:()=>v})),ccRecipients:()=>props.ccRecipients.map(v=>({address:()=>v})),bccRecipients:()=> (scenario==='changed_bcc' ? ['changed@example.test'] : props.bccRecipients).map(v=>({address:()=>v})),delete:()=>{deletes++}};
-const messages={id:()=>{reads++;if(scenario==='read_failure' && deletes)throw new Error('bridge unavailable');return deletes && scenario!=='still_present' ? [] : [42]},at:()=>msg};
+const msg={id:()=>42,deletedStatus:()=>false,subject:()=>props.subject,sender:()=>props.sender,content:()=>props.content,source:()=>scenario==='changed_source' ? 'changed' : snapshot.source,toRecipients:()=>props.toRecipients.map(v=>({address:()=>v})),ccRecipients:()=>props.ccRecipients.map(v=>({address:()=>v})),bccRecipients:()=> (scenario==='changed_bcc' ? ['changed@example.test'] : props.bccRecipients).map(v=>({address:()=>v})),delete:()=>{deletes++}};
+const messages={id:()=>{reads++;if(scenario==='read_failure' && deletes)throw new Error('bridge unavailable');return deletes && scenario!=='still_present' ? [] : [42]},byId:id=>{if(id!==42)throw new Error('wrong exact ID');return msg},at:()=>{throw new Error('unsafe positional draft reference')}};
 const box={name:()=> 'Drafts',account:()=>acc,messages:messages};
 const boxes=()=>[box]; boxes.name=()=>['Drafts'];boxes.mailboxes={name:()=>[[]]};boxes[0]=box;
 const acc={id:()=> 'work-id',mailboxes:boxes};const Application=()=>({accounts:{byName:()=>acc},draftsMailbox:()=>({mailboxes:()=>[box]})});const delay=()=>{};
@@ -231,7 +231,7 @@ func TestReadDraftSnapshotRejectsUnavailableFields(t *testing.T) {
 
 func TestUpdateDraftPreservesOriginalSenderAlias(t *testing.T) {
 	snapshot := simpleDraftSnapshot(t)
-	messageJSON, _ := json.Marshal(snapshot.Message)
+	messageJSON, _ := json.Marshal(snapshot)
 	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
 	t.Setenv("ORIGINAL_DRAFT", string(messageJSON))
 	log := filepath.Join(t.TempDir(), "scripts.log")
@@ -239,7 +239,8 @@ func TestUpdateDraftPreservesOriginalSenderAlias(t *testing.T) {
 	writeFakeOsaScript(t, `printf '%s\n' "$*" >> "$UPDATE_SCRIPT_LOG"
 case "$*" in
  *'JSON.stringify(composeOutgoing('*) printf '%s' '{"ok":true,"result":{"account":"Work","accountId":"work-id","sender":"alias@example.test","status":"saved","submitted":false,"draft":{"id":"43","account":"Work","mailbox":"Drafts"}}}' ;;
- *'JSON.stringify({message: message,'*) printf '{"message":%s}' "$ORIGINAL_DRAFT" ;;
+ *'const draftSnapshotRead = true;'*) printf '%s' "$ORIGINAL_DRAFT" ;;
+ *'const draftCleanup = true;'*) printf '%s' '{"deleted":true}' ;;
  *'const messageIds ='*) printf '%s' '{"42":"body\r\n"}' ;;
  *'JSON.stringify(msg.mailAttachments()'*) printf '[]' ;;
  *'function addMailbox(mbox,'*) printf '[{"name":"Drafts","account":"Work"}]' ;;
