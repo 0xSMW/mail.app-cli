@@ -306,12 +306,12 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	if err != nil || subject != snapshot.Message.Subject {
 		return "", nil, fmt.Errorf("draft subject does not match its raw source")
 	}
-	from, err := mail.ParseAddress(parsed.Header.Get("From"))
+	from, err := draftSenderAddress(parsed.Header.Get("From"))
 	if err != nil {
 		return "", nil, fmt.Errorf("draft source sender unavailable: %w", err)
 	}
-	sender, err := mail.ParseAddress(snapshot.Message.Sender)
-	if err != nil || !strings.EqualFold(from.Address, sender.Address) {
+	sender, err := draftSenderAddress(snapshot.Message.Sender)
+	if err != nil || !strings.EqualFold(from, sender) {
 		return "", nil, fmt.Errorf("draft sender does not match its raw source")
 	}
 	for _, item := range []struct {
@@ -357,6 +357,10 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 		}
 		return body, nil, err
 	}
+	if kind == "multipart/alternative" {
+		body, err := applePlainAlternativeBody(snapshot, parsed.Body, params)
+		return body, nil, err
+	}
 	if kind != "multipart/mixed" || params["boundary"] == "" || len(params) != 1 {
 		return "", nil, fmt.Errorf("draft MIME %s cannot be reconstructed without losing formatting; send this draft in Mail", kind)
 	}
@@ -391,6 +395,14 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 		}
 		if !haveBody && partKind == "text/plain" && disposition == "" {
 			body, err = plainDraftBody(part.Header, part, partParams)
+			if err != nil {
+				return "", nil, err
+			}
+			haveBody = true
+			continue
+		}
+		if !haveBody && partKind == "multipart/alternative" && disposition == "" {
+			body, err = applePlainAlternativeBody(snapshot, part, partParams)
 			if err != nil {
 				return "", nil, err
 			}
@@ -528,11 +540,26 @@ func compareDraftMIMEAttachments(paths []string, expected []draftMIMEAttachment)
 }
 
 func draftSenderAddress(value string) (string, error) {
-	parsed, err := mail.ParseAddress(value)
-	if err != nil || parsed.Address == "" {
-		return "", fmt.Errorf("draft sender cannot be preserved: %q", value)
+	if !strings.ContainsAny(value, "\r\n") {
+		if parsed, err := mail.ParseAddress(value); err == nil && parsed.Address != "" {
+			return parsed.Address, nil
+		}
+		// Exchange can expose an address as its own unquoted display name.
+		// Accept only that duplicate-mailbox shape, without broadening the
+		// parser to arbitrary malformed display names or multiple senders.
+		trimmed := strings.TrimSpace(value)
+		if strings.Count(trimmed, "<") == 1 && strings.Count(trimmed, ">") == 1 && strings.HasSuffix(trimmed, ">") {
+			open := strings.IndexByte(trimmed, '<')
+			display := strings.TrimSpace(trimmed[:open])
+			mailbox := strings.TrimSpace(trimmed[open+1 : len(trimmed)-1])
+			left, leftErr := mail.ParseAddress(display)
+			right, rightErr := mail.ParseAddress(mailbox)
+			if leftErr == nil && rightErr == nil && left.Name == "" && right.Name == "" && strings.EqualFold(display, left.Address) && strings.EqualFold(mailbox, right.Address) && strings.EqualFold(left.Address, right.Address) {
+				return right.Address, nil
+			}
+		}
 	}
-	return parsed.Address, nil
+	return "", fmt.Errorf("draft sender cannot be preserved: %q", value)
 }
 
 func validateDraftBody(snapshot *draftSnapshot, body string) error {
