@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -464,5 +465,95 @@ exit 1`
 				t.Fatalf("result=%+v error=%+v", result, err)
 			}
 		})
+	}
+}
+
+func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	cases := []struct {
+		name                                           string
+		body                                           string
+		count                                          int
+		markers                                        bool
+		markerCount                                    *int
+		prefix, suffix                                 string
+		extraOwned                                     string
+		unavailableNames, changeDuringSave, userMarker bool
+		ok                                             bool
+	}{
+		{name: "one attachment exact stored layout", count: 1, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "two attachments exact stored layout", count: 2, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "actual compose terminator retained", body: "body without terminator", count: 2, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "unsupported owned filename getter retains count proof", count: 2, markers: true, prefix: "\n\u2028", unavailableNames: true, ok: true},
+		{name: "missing owned object markers", count: 2, prefix: "\n\u2028"},
+		{name: "too few owned object markers", count: 2, markers: true, markerCount: func() *int { v := 1; return &v }(), prefix: "\n\u2028"},
+		{name: "too many owned object markers", count: 2, markers: true, markerCount: func() *int { v := 3; return &v }(), prefix: "\n\u2028"},
+		{name: "no attachment objects cannot authorize separator", prefix: "\n\u2028"},
+		{name: "caller supplied object marker is rejected", count: 2, markers: true, prefix: "\n\u2028", userMarker: true},
+		{name: "extra owned text is rejected", count: 2, markers: true, prefix: "\n\u2028", extraOwned: "different"},
+		{name: "extra stored text is rejected", count: 2, markers: true, prefix: "\n\u2028", suffix: "different"},
+		{name: "extra stored whitespace is rejected", count: 2, markers: true, prefix: "\n\u2028", suffix: " "},
+		{name: "extra stored line separator is rejected", count: 2, markers: true, prefix: "\n\u2028\u2028"},
+		{name: "changed owned body during save is rejected", count: 2, markers: true, prefix: "\n\u2028", changeDuringSave: true},
+		{name: "existing exact body match remains", count: 2, ok: true},
+		{name: "existing leading LF match remains", count: 2, prefix: "\n", ok: true},
+	}
+	for _, action := range []string{"save", "send"} {
+		for _, tt := range cases {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				body := tt.body
+				if body == "" {
+					body = "\nOriginal body\n"
+				}
+				if tt.userMarker {
+					body += "\uFFFC"
+				}
+				compose := body
+				if !strings.HasSuffix(compose, "\n") {
+					compose += "\n"
+				}
+				attachments := make([]string, tt.count)
+				for i := range attachments {
+					attachments[i] = fmt.Sprintf("/tmp/file-%d.txt", i)
+				}
+				config := map[string]any{"ownedAttachmentMarkers": tt.markers, "ownedBodyExtraBeforeMarkers": tt.extraOwned, "filenameUnsupported": tt.unavailableNames, "savedChange": map[string]any{"body": tt.prefix + compose + tt.suffix}}
+				if tt.markerCount != nil {
+					config["ownedMarkerCount"] = *tt.markerCount
+				}
+				if tt.changeDuringSave {
+					config["duringPrepare"] = map[string]any{"body": "edited while saving"}
+				}
+				input := OutgoingInput{Account: "Account", Subject: "Subject", Body: body, To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: attachments}
+				payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": action, "config": config})
+				command := exec.Command(node, "testdata/outgoing_mock.js")
+				command.Stdin = bytes.NewReader(payload)
+				raw, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("production script: %v %s", err, raw)
+				}
+				var got struct {
+					Response     outgoingEnvelope
+					Sent, Closed int
+				}
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.Response.OK != tt.ok || (!tt.ok && got.Sent != 0) || (action == "send" && tt.ok && got.Sent != 1) {
+					t.Fatalf("execution=%s", raw)
+				}
+				if action == "save" && tt.ok && (got.Closed != 1 || got.Response.Result.Draft == nil || got.Response.Result.Draft.Content != tt.prefix+compose+tt.suffix) {
+					t.Fatalf("save did not retain exact stored content: %s", raw)
+				}
+				if tt.changeDuringSave && action == "save" && !got.Response.Saved {
+					t.Fatalf("save acknowledgement lost after fingerprint failure: %s", raw)
+				}
+				if tt.changeDuringSave && got.Closed != 0 {
+					t.Fatalf("changed owned body was closed: %s", raw)
+				}
+			})
+		}
 	}
 }
