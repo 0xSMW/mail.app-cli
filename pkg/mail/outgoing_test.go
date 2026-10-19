@@ -124,7 +124,7 @@ func TestOutgoingProductionScript(t *testing.T) {
 			if got.Sent == 1 && got.ComposedBody != input.Body+"\n" {
 				t.Fatalf("submission changed body: %s", output)
 			}
-			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "stored-900" {
+			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "900" {
 				t.Fatalf("assumed outgoing/stored IDs equal: %s", output)
 			}
 			if tc.name == "cleanup failure" && !strings.Contains(got.Response.Cleanup, "cleanup failed") {
@@ -370,6 +370,19 @@ func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
 		{name: "prepared lingering ID clears after snapshot disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 3}, sent: 1, submitted: true, ok: true},
 		{name: "prepared lingering ID never clears after disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 100}, sent: 1, submitted: true},
 		{name: "nested stored read missing with ID present retains", config: map[string]any{"storedNestedMissing": "source"}, sent: 1, submitted: true},
+		{name: "new prepared tombstone prevents send", config: map[string]any{"preparedInitiallyDeleted": true}},
+		{name: "prepared deleted getter failure prevents send", config: map[string]any{"deletedStatusThrows": true, "deletedStatusBeforeSend": true}},
+		{name: "prepared malformed deleted status prevents send", config: map[string]any{"deletedStatusValue": 1, "deletedStatusBeforeSend": true}},
+		{name: "already deleted prepared copy needs no delete", config: map[string]any{"preparedDeletedAfterSend": true, "tombstoneContentThrows": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared becomes deleted immediately before deletion", config: map[string]any{"preparedDeletedBeforeDelete": true}, sent: 1, submitted: true, ok: true},
+		{name: "delete leaves resolvable tombstone", config: map[string]any{"storedDeleteLeavesTombstone": true, "tombstoneContentThrows": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "false deleted status remains active", config: map[string]any{"deletedStatusValue": false}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "deleted getter failure remains pending", config: map[string]any{"deletedStatusThrows": true}, sent: 1, submitted: true},
+		{name: "null deleted status remains pending", config: map[string]any{"deletedStatusValue": nil}, sent: 1, submitted: true},
+		{name: "numeric true deleted status remains pending", config: map[string]any{"deletedStatusValue": 1}, sent: 1, submitted: true},
+		{name: "numeric false deleted status remains pending", config: map[string]any{"deletedStatusValue": 0}, sent: 1, submitted: true},
+		{name: "string deleted status remains pending", config: map[string]any{"deletedStatusValue": "true"}, sent: 1, submitted: true},
+		{name: "object deleted status remains pending", config: map[string]any{"deletedStatusValue": map[string]any{}}, sent: 1, submitted: true},
 		{name: "deletes only prepared stored ID and leaves old draft", config: map[string]any{"preexisting": true}, sent: 1, submitted: true, ok: true, deletes: 1},
 		{name: "stable by-ID reference survives ordinal reorder", config: map[string]any{"preexisting": true, "reorderAfterLookup": true}, sent: 1, submitted: true, ok: true, deletes: 1},
 		{name: "stored already absent after send", config: map[string]any{"storedAbsent": true, "preexisting": true}, sent: 1, submitted: true, ok: true},
@@ -473,6 +486,7 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 	if err != nil {
 		t.Fatal("Node is required for outgoing production tests")
 	}
+	stored := func(value string) *string { return &value }
 	cases := []struct {
 		name                                           string
 		body                                           string
@@ -480,13 +494,14 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 		markers                                        bool
 		markerCount                                    *int
 		prefix, suffix                                 string
+		exactStored                                    *string
 		extraOwned                                     string
 		unavailableNames, changeDuringSave, userMarker bool
 		ok                                             bool
 	}{
 		{name: "one attachment exact stored layout", count: 1, markers: true, prefix: "\n\u2028", ok: true},
 		{name: "two attachments exact stored layout", count: 2, markers: true, prefix: "\n\u2028", ok: true},
-		{name: "actual compose terminator retained", body: "body without terminator", count: 2, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "actual compose terminator retained", body: "\nbody without terminator", count: 2, markers: true, prefix: "\n\u2028", ok: true},
 		{name: "unsupported owned filename getter retains count proof", count: 2, markers: true, prefix: "\n\u2028", unavailableNames: true, ok: true},
 		{name: "missing owned object markers", count: 2, prefix: "\n\u2028"},
 		{name: "too few owned object markers", count: 2, markers: true, markerCount: func() *int { v := 1; return &v }(), prefix: "\n\u2028"},
@@ -498,6 +513,23 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 		{name: "extra stored whitespace is rejected", count: 2, markers: true, prefix: "\n\u2028", suffix: " "},
 		{name: "extra stored line separator is rejected", count: 2, markers: true, prefix: "\n\u2028\u2028"},
 		{name: "changed owned body during save is rejected", count: 2, markers: true, prefix: "\n\u2028", changeDuringSave: true},
+		{name: "one file interior blank paragraph", body: "first\n\nlast\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "two files interior blank paragraph", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "one file consecutive blank paragraphs", body: "first\n\n\nlast\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n"), ok: true},
+		{name: "two files consecutive blank paragraphs", body: "first\n\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n"), ok: true},
+		{name: "one file trailing blank paragraph", body: "first\n\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\n"), ok: true},
+		{name: "two files trailing blank paragraph", body: "first\n\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n"), ok: true},
+		{name: "leading consecutive blank paragraphs", body: "\n\nfirst\n", count: 2, markers: true, exactStored: stored("\n\u2028\n\u2028\nfirst\n"), ok: true},
+		{name: "all empty paragraphs retained", body: "\n\n", count: 2, markers: true, exactStored: stored("\n\u2028\n\u2028\n"), ok: true},
+		{name: "CRLF normalized only", body: "first\r\n\r\nlast\r\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "authored inline separator retained", body: "first\u2028part\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\u2028part\n\u2028\nlast\n"), ok: true},
+		{name: "changed nonempty paragraph rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nLAST\n")},
+		{name: "changed nonempty whitespace rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst \n\u2028\nlast\n")},
+		{name: "misplaced separator rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\u2028\n\nlast\n")},
+		{name: "extra empty paragraph rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n")},
+		{name: "old invented leading separator rejected", body: "first\n", count: 2, markers: true, exactStored: stored("\n\u2028first\n")},
+		{name: "space paragraph cannot become separator", body: "first\n \nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n")},
+		{name: "interior mapping requires object proof", body: "first\n\nlast\n", count: 2, exactStored: stored("\nfirst\n\u2028\nlast\n")},
 		{name: "existing exact body match remains", count: 2, ok: true},
 		{name: "existing leading LF match remains", count: 2, prefix: "\n", ok: true},
 	}
@@ -519,7 +551,11 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 				for i := range attachments {
 					attachments[i] = fmt.Sprintf("/tmp/file-%d.txt", i)
 				}
-				config := map[string]any{"ownedAttachmentMarkers": tt.markers, "ownedBodyExtraBeforeMarkers": tt.extraOwned, "filenameUnsupported": tt.unavailableNames, "savedChange": map[string]any{"body": tt.prefix + compose + tt.suffix}}
+				storedText := tt.prefix + compose + tt.suffix
+				if tt.exactStored != nil {
+					storedText = *tt.exactStored
+				}
+				config := map[string]any{"ownedAttachmentMarkers": tt.markers, "ownedBodyExtraBeforeMarkers": tt.extraOwned, "filenameUnsupported": tt.unavailableNames, "savedChange": map[string]any{"body": storedText}}
 				if tt.markerCount != nil {
 					config["ownedMarkerCount"] = *tt.markerCount
 				}
@@ -544,7 +580,7 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 				if got.Response.OK != tt.ok || (!tt.ok && got.Sent != 0) || (action == "send" && tt.ok && got.Sent != 1) {
 					t.Fatalf("execution=%s", raw)
 				}
-				if action == "save" && tt.ok && (got.Closed != 1 || got.Response.Result.Draft == nil || got.Response.Result.Draft.Content != tt.prefix+compose+tt.suffix) {
+				if action == "save" && tt.ok && (got.Closed != 1 || got.Response.Result.Draft == nil || got.Response.Result.Draft.Content != storedText) {
 					t.Fatalf("save did not retain exact stored content: %s", raw)
 				}
 				if tt.changeDuringSave && action == "save" && !got.Response.Saved {
@@ -555,5 +591,50 @@ func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestLegacyOutgoingSaveRejectsDeletedCandidates(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	for _, tt := range []struct {
+		name   string
+		config map[string]any
+		ok     bool
+	}{
+		{name: "active Boolean false candidate saves", config: map[string]any{"deletedStatusValue": false, "deletedStatusBeforeSend": true}, ok: true},
+		{name: "deleted candidate cannot return saved", config: map[string]any{"preparedInitiallyDeleted": true}},
+		{name: "deleted getter failure cannot return saved", config: map[string]any{"deletedStatusThrows": true, "deletedStatusBeforeSend": true}},
+		{name: "null deleted status cannot return saved", config: map[string]any{"deletedStatusValue": nil, "deletedStatusBeforeSend": true}},
+		{name: "numeric true deleted status cannot return saved", config: map[string]any{"deletedStatusValue": 1, "deletedStatusBeforeSend": true}},
+		{name: "numeric false deleted status cannot return saved", config: map[string]any{"deletedStatusValue": 0, "deletedStatusBeforeSend": true}},
+		{name: "string deleted status cannot return saved", config: map[string]any{"deletedStatusValue": "true", "deletedStatusBeforeSend": true}},
+		{name: "object deleted status cannot return saved", config: map[string]any{"deletedStatusValue": map[string]any{}, "deletedStatusBeforeSend": true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "save", "config": tt.config})
+			command := exec.Command(node, "testdata/outgoing_mock.js")
+			command.Stdin = bytes.NewReader(payload)
+			raw, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("production script: %v %s", err, raw)
+			}
+			var got struct {
+				Response outgoingEnvelope
+				Sent     int
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Response.OK != tt.ok || got.Sent != 0 || !got.Response.Saved || (!tt.ok && (got.Response.Result.Status == "saved" || got.Response.Result.Draft != nil)) {
+				t.Fatalf("unsafe saved receipt: %s", raw)
+			}
+			if !tt.ok && got.Response.Phase != "save_verification" {
+				t.Fatalf("missed saved candidate state guard: %s", raw)
+			}
+		})
 	}
 }
