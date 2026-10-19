@@ -12,7 +12,7 @@ import (
 )
 
 func TestNativeSavedAttachmentReadinessReconcilesExchangeIDs(t *testing.T) {
-	for _, mode := range []string{"stable", "reassigned", "tombstone", "transient-property", "ambiguous", "late-ambiguous", "wrong-owner", "final-owner-failure", "payload-mismatch", "input-drift", "source-drift", "fingerprint-drift", "malformed", "persistent-missing"} {
+	for _, mode := range []string{"stable", "sender-display-transition", "sender-address-drift", "reassigned", "tombstone", "transient-property", "ambiguous", "late-ambiguous", "wrong-owner", "final-owner-failure", "payload-mismatch", "input-drift", "source-drift", "fingerprint-drift", "malformed", "persistent-missing"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newOutgoingDescriptorFixture()
 			c := fixtureOutgoingClient(f)
@@ -78,6 +78,12 @@ func TestNativeSavedAttachmentReadinessReconcilesExchangeIDs(t *testing.T) {
 							rolled = true
 							return ae.Value{}, &ae.Error{Code: -1728, Message: "old Exchange ID removed"}
 						}
+						if rawReads > 1 && mode == "sender-display-transition" {
+							f.fields["sndr"] = ae.String("Display Name <ALIAS@EXAMPLE.COM>")
+						}
+						if rawReads > 1 && mode == "sender-address-drift" {
+							f.fields["sndr"] = ae.String("Display Name <different@example.com>")
+						}
 						if mode == "source-drift" && rawReads > 1 {
 							return ae.String(f.savedSource + "\n"), nil
 						}
@@ -108,7 +114,7 @@ func TestNativeSavedAttachmentReadinessReconcilesExchangeIDs(t *testing.T) {
 				return f.send(eventCtx, event)
 			}
 			result, err := c.composeOutgoing(input, "save")
-			success := mode == "stable" || mode == "reassigned" || mode == "tombstone" || mode == "transient-property"
+			success := mode == "stable" || mode == "sender-display-transition" || mode == "reassigned" || mode == "tombstone" || mode == "transient-property"
 			if success {
 				wantID := "900"
 				if mode == "reassigned" || mode == "tombstone" {
