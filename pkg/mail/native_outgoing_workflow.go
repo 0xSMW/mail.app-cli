@@ -58,7 +58,16 @@ func (r *nativeOutgoingRun) submittedCleanup(expected map[string]ae.Value) error
 	if err == nil {
 		current, err := clean.ownedComposeSnapshot(r.owned)
 		if err != nil {
-			return err
+			if nativeMissing(err) {
+				_, rootErr := clean.get(ae.Property("subj", r.owned))
+				if nativeMissing(rootErr) {
+					return r.cleanupPreparedDraft(&clean)
+				}
+				if rootErr != nil {
+					return fmt.Errorf("recheck submitted composition root: %w", rootErr)
+				}
+			}
+			return fmt.Errorf("read submitted composition snapshot: %w", err)
 		}
 		if _, available := expected["files"]; !available {
 			delete(current, "files")
@@ -66,8 +75,17 @@ func (r *nativeOutgoingRun) submittedCleanup(expected map[string]ae.Value) error
 		if !reflect.DeepEqual(expected, current) {
 			return fmt.Errorf("submitted composition changed; retained")
 		}
-		if _, err = clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); err != nil && !nativeMissing(err) {
-			return err
+		if _, err = clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); err != nil {
+			if !nativeMissing(err) {
+				return fmt.Errorf("close submitted composition: %w", err)
+			}
+			_, rootErr := clean.get(ae.Property("subj", r.owned))
+			if rootErr == nil {
+				return fmt.Errorf("close submitted composition while root remains present: %w", err)
+			}
+			if !nativeMissing(rootErr) {
+				return fmt.Errorf("recheck submitted composition after close: %w", rootErr)
+			}
 		}
 	}
 	return r.cleanupPreparedDraft(&clean)
