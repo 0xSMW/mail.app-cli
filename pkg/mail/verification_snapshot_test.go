@@ -27,7 +27,7 @@ func snapshotSQLiteFixture(t *testing.T, data string) (*Client, string) {
 	schema := `create table mailboxes (url text);
 create table subjects (subject text);
 create table addresses (address text, comment text);
-create table messages (mailbox integer, subject integer, sender integer, date_sent integer, size integer, read integer, deleted integer);
+create table messages (mailbox integer, subject integer, sender integer, date_sent integer, size integer, read integer, deleted integer, subject_prefix text default '');
 create table labels (message_id integer, mailbox_id integer);
 insert into subjects values ('subject'), ('near subject');
 insert into addresses values ('sender@example.com', ''), ('other@example.com', '');
