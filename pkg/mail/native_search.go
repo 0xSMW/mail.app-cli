@@ -139,17 +139,24 @@ func (c *Client) nativeIdentityCount(account, mailbox string, identity StableIde
 	if !identity.hasFallback() {
 		return 0, fmt.Errorf("stable identity lacks complete metadata; refusing mailbox-wide RFC lookup in %s", mailbox)
 	}
+	if validRFCMessageID(identity.RFCMessageID) != "" && identity.rfcEnvelopeKey() == "" {
+		return 0, fmt.Errorf("RFC stable identity lacks a valid sender address")
+	}
 	sent, ok := ParseMessageTime(identity.DateSent)
 	if !ok {
 		return 0, fmt.Errorf("invalid stable identity sent date")
 	}
-	// Subject narrows candidates inside Mail. Exact trimmed sender, timestamp,
-	// size and optional RFC ID are checked below without fetching any body.
-	predicate := appleevents.Logical("AND ",
+	// Exact envelope fields bound the candidate set. Size may vary after a
+	// server move only when a live RFC header proves the same message.
+	tests := []appleevents.Value{
 		appleevents.Comparison("=   ", appleevents.Property("subj", appleevents.Examined()), appleevents.String(identity.Subject)),
 		appleevents.Comparison("=   ", appleevents.Property("drcv", appleevents.Examined()), appleevents.Date(sent)),
-		appleevents.Comparison("=   ", appleevents.Property("msze", appleevents.Examined()), appleevents.Int(int64(identity.MessageSize))),
-		appleevents.Comparison("=   ", appleevents.Property("isdl", appleevents.Examined()), appleevents.Bool(false)))
+		appleevents.Comparison("=   ", appleevents.Property("isdl", appleevents.Examined()), appleevents.Bool(false)),
+	}
+	if validRFCMessageID(identity.RFCMessageID) == "" {
+		tests = append(tests, appleevents.Comparison("=   ", appleevents.Property("msze", appleevents.Examined()), appleevents.Int(int64(identity.MessageSize))))
+	}
+	predicate := appleevents.Logical("AND ", tests...)
 	matches := 0
 	err := c.withNativeAutomation(identityEnrichmentTimeout, func(n *nativeMail) error {
 		acc, err := n.account(account)
@@ -167,13 +174,18 @@ func (c *Client) nativeIdentityCount(account, mailbox string, identity StableIde
 		if v.Kind != "list" {
 			return fmt.Errorf("Mail returned %s for identity candidates", v.Kind)
 		}
+		if len(v.Items) > maxVerificationIdentityCandidates {
+			return fmt.Errorf("stable identity has too many metadata candidates in %s", mailbox)
+		}
 		for _, ref := range v.Items {
 			m, err := n.messageMetadata(ref, account, mailbox)
 			if err != nil {
 				return err
 			}
-			actual := StableIdentityFromMessage(*m)
-			if m.Deleted || actual.fallbackKey() != identity.fallbackKey() || (identity.RFCMessageID != "" && actual.RFCMessageID != identity.RFCMessageID) {
+			if validRFCMessageID(identity.RFCMessageID) != "" && StableIdentityFromMessage(*m).RFCMessageID == "" {
+				return fmt.Errorf("RFC identity candidate %s lacks a valid live header", m.ID)
+			}
+			if m.Deleted || !identity.matchesEnvelope(*m) {
 				continue
 			}
 			matches++
