@@ -275,6 +275,7 @@ func TestLegacyOutgoingInterruptedAfterAcknowledgement(t *testing.T) {
 		{name: "incomplete success receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","status":"submitted","submitted":true}}'`},
 		{name: "false submitted receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":false}}'`},
 		{name: "wrong account receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Other","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":true}}'`},
+		{name: "contradictory cleanup flags after ack", tail: `printf '%s' '{"ok":false,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted_cleanup_pending","submitted":true},"phase":"submitted_cleanup","error":"retained","cleanup":"pending","attempted":false,"uncertain":true}'`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
