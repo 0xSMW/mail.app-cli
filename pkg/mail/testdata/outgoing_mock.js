@@ -22,6 +22,7 @@ function stored(id, change) {
   if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
  return {id:()=>id,mailbox:()=>box,deletedStatus:()=>{
   if(sent>0)postSendDeletedReads++;
+  if(sent>0 && config.deletedStatusDisappears && !storedRaceTriggered){storedRaceTriggered=true;removed.add(id);lingeringReads=config.preparedLingeringIdReads || 0;const e=new Error('stored root disappeared during deleted status read');e.errorNumber=-1728;throw e;}
   if(config.deletedStatusThrows && (sent>0 || config.deletedStatusBeforeSend)) {const e=new Error('deleted getter unavailable');e.errorNumber=-1728;throw e;}
   if(Object.prototype.hasOwnProperty.call(config,'deletedStatusValue') && (sent>0 || config.deletedStatusBeforeSend))return config.deletedStatusValue;
   return tombstones.has(id) || !!config.preparedInitiallyDeleted || (sent>0 && !!config.preparedDeletedAfterSend) || (sent>0 && !!config.preparedDeletedBeforeDelete && postSendDeletedReads>=2);
