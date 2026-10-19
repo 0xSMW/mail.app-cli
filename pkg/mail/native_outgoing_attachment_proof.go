@@ -246,11 +246,17 @@ func (r *nativeOutgoingRun) cleanupPreparedDraft(n *nativeMail) error {
 	ref := ae.ByID("mssg", ae.Int(number), box)
 	message, err := n.outgoingSnapshotMessage(ref, r.input.Account, box)
 	if err != nil {
-		return err
+		if nativeMissing(err) {
+			return r.reconcilePreparedMissing(n, "read prepared draft snapshot", err)
+		}
+		return fmt.Errorf("read prepared draft snapshot: %w", err)
 	}
 	source, err := n.stringProperty("raso", ref)
 	if err != nil {
-		return err
+		if nativeMissing(err) {
+			return r.reconcilePreparedMissing(n, "read prepared draft source", err)
+		}
+		return fmt.Errorf("read prepared draft source: %w", err)
 	}
 	if !sameDraftSnapshot(r.preparedDraft, &draftSnapshot{Message: message, Source: source}) {
 		return fmt.Errorf("prepared draft changed after submission; retained")
@@ -259,7 +265,10 @@ func (r *nativeOutgoingRun) cleanupPreparedDraft(n *nativeMail) error {
 		return err
 	}
 	if _, err = n.command("core", "delo", map[string]ae.Value{"----": ref}); err != nil {
-		return err
+		if nativeMissing(err) {
+			return r.reconcilePreparedMissing(n, "delete prepared draft", err)
+		}
+		return fmt.Errorf("delete prepared draft: %w", err)
 	}
 	for {
 		box, err = r.preparedDraftBox(n)
@@ -276,6 +285,45 @@ func (r *nativeOutgoingRun) cleanupPreparedDraft(n *nativeMail) error {
 		}
 		if err = n.outgoingPause(); err != nil {
 			return fmt.Errorf("prepared draft removal could not be verified: %w", err)
+		}
+	}
+}
+
+// A nested missing property is not absence. Reconcile only this recorded ID,
+// and poll read-only observations if Mail's ID list lags a missing exact root.
+// The caller's detached cleanup deadline bounds this loop; mutation is never retried.
+func (r *nativeOutgoingRun) reconcilePreparedMissing(n *nativeMail, operation string, cause error) error {
+	id := r.preparedDraft.Message.ID
+	number, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || number <= 0 {
+		return fmt.Errorf("prepared draft ID unavailable")
+	}
+	for {
+		box, err := r.preparedDraftBox(n)
+		if err != nil {
+			return fmt.Errorf("%s identity recheck: %w", operation, err)
+		}
+		present, err := preparedDraftPresent(n, box, id)
+		if err != nil {
+			return fmt.Errorf("%s ID recheck: %w", operation, err)
+		}
+		if !present {
+			_, err = r.preparedDraftBox(n)
+			return err
+		}
+		ref := ae.ByID("mssg", ae.Int(number), box)
+		actual, err := n.intProperty("ID  ", ref)
+		if err == nil {
+			if actual != number {
+				return fmt.Errorf("prepared draft root identity changed; retained")
+			}
+			return fmt.Errorf("%s while prepared draft root remains present: %w", operation, cause)
+		}
+		if !nativeMissing(err) {
+			return fmt.Errorf("%s root recheck: %w", operation, err)
+		}
+		if err = n.outgoingPause(); err != nil {
+			return fmt.Errorf("%s absence could not be verified: %w", operation, err)
 		}
 	}
 }
