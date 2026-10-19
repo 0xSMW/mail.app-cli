@@ -31,6 +31,8 @@ type outgoingDescriptorFixture struct {
 	corrupt                    string
 	sendCalls, closeCalls      int
 	saved                      bool
+	savedSource                string
+	draftDeletes               int
 	closed                     bool
 }
 
@@ -125,7 +127,7 @@ func (f *outgoingDescriptorFixture) get(v ae.Value) (ae.Value, error) {
 				return container.Fields["seld"], nil
 			}
 			if f.saved {
-				return ae.List(ae.Int(15)), nil
+				return ae.List(ae.Int(900)), nil
 			}
 			return ae.List(), nil
 		}
@@ -133,17 +135,7 @@ func (f *outgoingDescriptorFixture) get(v ae.Value) (ae.Value, error) {
 			return ruleFixtureRef("outgoing-fixture-drafts"), nil
 		}
 		if property == "raso" {
-			names := make([]string, len(f.files))
-			payloads := make([][]byte, len(f.files))
-			for i, path := range f.files {
-				names[i] = filepath.Base(path)
-				var err error
-				payloads[i], err = os.ReadFile(path)
-				if err != nil {
-					return ae.Value{}, err
-				}
-			}
-			return ae.String(attachmentProofMIME(names, payloads)), nil
+			return ae.String(f.savedSource), nil
 		}
 	}
 	if descriptorClass(container) == "attc" && property == "pnam" {
@@ -245,7 +237,26 @@ func (f *outgoingDescriptorFixture) send(ctx context.Context, event ae.Event) (a
 		if !reflect.DeepEqual(event.Params["----"], f.outgoing) {
 			return ae.Value{}, stats, fmt.Errorf("saved an unowned composition")
 		}
+		names := make([]string, len(f.files))
+		payloads := make([][]byte, len(f.files))
+		for i, path := range f.files {
+			names[i] = filepath.Base(path)
+			var err error
+			payloads[i], err = os.ReadFile(path)
+			if err != nil {
+				return ae.Value{}, stats, err
+			}
+		}
+		f.savedSource = attachmentProofMIME(names, payloads)
 		f.saved = true
+		return ae.Null(), stats, nil
+	case "coredelo":
+		target := event.Params["----"]
+		if descriptorClass(target) != "mssg" || target.Fields["seld"].Number != 900 || target.Fields["from"].Text != "outgoing-fixture-drafts" {
+			return ae.Value{}, stats, fmt.Errorf("unowned stored draft deletion")
+		}
+		f.draftDeletes++
+		f.saved = false
 		return ae.Null(), stats, nil
 	case "emsgsend":
 		f.sendCalls++
