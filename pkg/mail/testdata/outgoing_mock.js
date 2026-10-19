@@ -86,7 +86,14 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
   const malformed=(!config.malformedAfterSend || sent>0) ? (config.malformedSnapshot || {}) : {};
   const names=attached.map(a=>({descriptorType:typeCode(malformed.name || 'utxt'),stringValue:a.fileName()}));
   if((config.fingerprintFailures || []).includes('attachmentName') && (!config.failAfterSend || sent>0))names.forEach(n=>n.stringValue=null);
-  const filenameMissing = (config.filenameMissing || (config.filenameMissingAfterSend && sent>0));
+  const filenameMissingValue=config.filenameMissingValue || (config.filenameMissingValueAfterSend && sent>0);
+  if(filenameMissingValue && code.includes('repeat with attachmentItem') && !code.includes('if attachmentFile is missing value then return {attachmentCount, {}, false}')){
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1700})};
+  }
+  if(config.filenameMalformed && code.includes('repeat with attachmentItem')){
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1700})};
+  }
+  const filenameMissing = filenameMissingValue || (config.filenameMissing || (config.filenameMissingAfterSend && sent>0));
   if(filenameMissing && code.includes('repeat with attachmentItem') && !code.includes('or errorNumber is -1728 then')){
    error[0]={NSAppleScriptErrorNumber:-1728,NSAppleScriptErrorBriefMessage:'Filename getter unavailable'};
    return {__objcNil:true};
