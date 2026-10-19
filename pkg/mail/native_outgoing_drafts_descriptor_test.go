@@ -199,7 +199,9 @@ type nativePlainDraftSendFixture struct {
 }
 
 func newNativePlainDraftSendFixture() *nativePlainDraftSendFixture {
-	return &nativePlainDraftSendFixture{draft: newNativeDraftDescriptorFixture(), outgoing: newOutgoingDescriptorFixture()}
+	outgoing := newOutgoingDescriptorFixture()
+	outgoing.accountIDs = []string{"account-id"}
+	return &nativePlainDraftSendFixture{draft: newNativeDraftDescriptorFixture(), outgoing: outgoing}
 }
 func (f *nativePlainDraftSendFixture) get(v ae.Value) (ae.Value, error) {
 	if v.Kind == "list" {
@@ -214,6 +216,30 @@ func (f *nativePlainDraftSendFixture) get(v ae.Value) (ae.Value, error) {
 		return ae.List(items...), nil
 	}
 	class, prop, container := descriptorClass(v), descriptorProperty(v), v.Fields["from"]
+	// Original and prepared copy share Drafts, with distinct IDs and MIME.
+	if prop == "ID  " && descriptorClass(container) == "mssg" && container.Fields["seld"].Kind == "ordinal" && container.Fields["from"].Text == "draftbox" {
+		ids := []ae.Value{}
+		if !f.draft.removed {
+			ids = append(ids, ae.Int(15))
+		}
+		if f.outgoing.saved {
+			ids = append(ids, ae.Int(900))
+		}
+		return ae.List(ids...), nil
+	}
+	if descriptorClass(container) == "mssg" && container.Fields["seld"].Number == 900 {
+		if !f.outgoing.saved {
+			return ae.Value{}, &ae.Error{Code: -1728, Message: "prepared draft absent"}
+		}
+		if prop == "mbxp" {
+			return ruleFixtureRef("draftbox"), nil
+		}
+		return f.outgoing.get(v)
+	}
+	if (prop == "radd" || prop == "pnam") && descriptorClass(container.Fields["from"]) == "mssg" && container.Fields["from"].Fields["seld"].Number == 900 {
+		return f.outgoing.get(v)
+	}
+
 	if class == "mact" {
 		return ae.List(ruleFixtureRef("account")), nil
 	}
@@ -269,6 +295,15 @@ func (f *nativePlainDraftSendFixture) send(ctx context.Context, event ae.Event) 
 		return ae.Bool(true), stats, nil
 	case "coredelo":
 		ref := event.Params["----"]
+		if descriptorClass(ref) == "mssg" && ref.Fields["seld"].Number == 900 && ref.Fields["from"].Text == "draftbox" {
+			if !f.outgoing.saved {
+				return ae.Value{}, stats, fmt.Errorf("prepared copy already absent")
+			}
+			f.outgoing.draftDeletes++
+			f.outgoing.saved = false
+			return ae.Null(), stats, nil
+		}
+
 		if descriptorClass(ref) != "mssg" || ref.Fields["seld"].Number != 15 || ref.Fields["from"].Text != "draftbox" {
 			return ae.Value{}, stats, fmt.Errorf("cleanup targeted a different message")
 		}
@@ -327,6 +362,10 @@ func TestNativeDescriptorPlainDraftSendFunctionalChain(t *testing.T) {
 		}
 	}
 
+	if f.outgoing.draftDeletes != 1 {
+		t.Fatalf("prepared draft deletes=%d want1", f.outgoing.draftDeletes)
+	}
+
 }
 func TestNativeDescriptorPlainDraftLostSendReplyNeverReplaysOrDeletesOriginal(t *testing.T) {
 	f := newNativePlainDraftSendFixture()
@@ -342,6 +381,10 @@ func TestNativeDescriptorPlainDraftLostSendReplyNeverReplaysOrDeletesOriginal(t 
 	if f.sendCalls != 1 || f.originalDeletes != 0 || f.draft.removed || f.outgoing.closeCalls != 0 || f.sourceReadsAtSend != 2 {
 		t.Fatalf("lost reply replayed or discarded data: sends=%d deletes=%d removed=%t closes=%d beforeSendReads=%d", f.sendCalls, f.originalDeletes, f.draft.removed, f.outgoing.closeCalls, f.sourceReadsAtSend)
 	}
+	if f.outgoing.draftDeletes != 0 {
+		t.Fatalf("prepared draft deletes=%d want0", f.outgoing.draftDeletes)
+	}
+
 }
 func TestNativeDescriptorPlainDraftChangedAfterSendRetainsOriginalWithoutResending(t *testing.T) {
 	f := newNativePlainDraftSendFixture()
@@ -358,6 +401,10 @@ func TestNativeDescriptorPlainDraftChangedAfterSendRetainsOriginalWithoutResendi
 		if event.ID == "clos" && (!reflect.DeepEqual(event.Params["----"], f.outgoing.outgoing) || event.Params["savo"].Code != "no  ") {
 			t.Fatalf("cleanup escaped owned outgoing composition: %+v", event)
 		}
+	}
+
+	if f.outgoing.draftDeletes != 1 {
+		t.Fatalf("prepared draft deletes=%d want1", f.outgoing.draftDeletes)
 	}
 
 }
