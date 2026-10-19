@@ -133,17 +133,61 @@ func (n *nativeMail) attachments(ref appleevents.Value) ([]Attachment, []appleev
 	return result, refs, nil
 }
 
+// attachmentMessage preserves the explicit mailbox lookup first, then checks
+// the selected account's special Drafts mailbox for a freshly stored exact ID.
+// A differently named mailbox never admits this fallback.
+func (n *nativeMail) attachmentMessage(account, mailbox, id string) (appleevents.Value, error) {
+	ref, err := n.scopedMessage(account, mailbox, id)
+	if err == nil {
+		return ref, nil
+	}
+	var missing *NotFoundError
+	if !errors.As(err, &missing) || (missing.Kind != "message" && missing.Kind != "mailbox") {
+		return appleevents.Value{}, err
+	}
+	acc, lookupErr := n.account(account)
+	if lookupErr != nil {
+		return appleevents.Value{}, lookupErr
+	}
+	box, lookupErr := n.outgoingDraftMailbox(acc)
+	if lookupErr != nil {
+		if IsNotFound(lookupErr) {
+			return appleevents.Value{}, err
+		}
+		return appleevents.Value{}, lookupErr
+	}
+	name, lookupErr := n.stringProperty("pnam", box)
+	if lookupErr != nil {
+		return appleevents.Value{}, lookupErr
+	}
+	if name != mailbox {
+		return appleevents.Value{}, err
+	}
+	return n.message(box, id)
+}
+
 func (c *Client) nativeAttachments(account, mailbox, id string) ([]Attachment, error) {
 	if attachments, handled, err := c.getAttachmentsFromDisk(account, mailbox, id); err != nil {
 		if !isEnvelopeIndexUnavailable(err) {
 			return nil, err
 		}
 	} else if handled {
-		return attachments, nil
+		if len(attachments) > 0 {
+			return attachments, nil
+		}
+		// An empty, completely cached message is authoritative. A missing index
+		// row can lag behind a newly saved Mail draft and must be rechecked.
+		_, absent, scopeErr := c.scopedLocalMessageFile(account, mailbox, id)
+		if scopeErr != nil {
+			return nil, scopeErr
+		}
+		if !absent {
+			return attachments, nil
+		}
 	}
 	var result []Attachment
 	err := c.withNativeAutomation(defaultAutomationTimeout, func(n *nativeMail) error {
-		ref, err := n.scopedMessage(account, mailbox, id)
+		ref, err := n.attachmentMessage(account, mailbox, id)
 		if err != nil {
 			var missing *NotFoundError
 			if errors.As(err, &missing) && missing.Kind == "message" {
@@ -159,6 +203,14 @@ func (c *Client) nativeAttachments(account, mailbox, id string) ([]Attachment, e
 }
 
 func (c *Client) nativeSaveAttachment(account, mailbox, id, name string, index int, path string) error {
+	return c.nativeSaveAttachmentScoped(account, mailbox, id, name, index, path, false)
+}
+
+func (c *Client) nativeDraftSaveAttachment(account, mailbox, id, name string, index int, path string) error {
+	return c.nativeSaveAttachmentScoped(account, mailbox, id, name, index, path, true)
+}
+
+func (c *Client) nativeSaveAttachmentScoped(account, mailbox, id, name string, index int, path string, draft bool) error {
 	if strings.TrimSpace(path) == "" || strings.IndexByte(path, 0) >= 0 {
 		return fmt.Errorf("attachment save path must be non-empty and contain no NUL byte")
 	}
@@ -178,17 +230,28 @@ func (c *Client) nativeSaveAttachment(account, mailbox, id, name string, index i
 	if index < -1 {
 		return fmt.Errorf("invalid attachment index: %d", index)
 	}
-	// Cached listing and saving share one MIME traversal and verify the
-	// expected filename before publishing the exact selected payload.
-	if _, handled, err := c.saveLocalAttachment(account, mailbox, id, name, index, path); err != nil {
-		if !isEnvelopeIndexUnavailable(err) {
-			return err
+	// Preservation always resolves the account-owned special Drafts mailbox;
+	// an ordinary named mailbox or stale cache cannot establish that identity.
+	if !draft {
+		if _, handled, err := c.saveLocalAttachment(account, mailbox, id, name, index, path); err != nil {
+			var missing *NotFoundError
+			staleAbsence := errors.As(err, &missing) && missing.Kind == "message"
+			if !isEnvelopeIndexUnavailable(err) && !staleAbsence {
+				return err
+			}
+		} else if handled {
+			return nil
 		}
-	} else if handled {
-		return nil
 	}
+
 	return c.withNativeAutomation(defaultAutomationTimeout, func(n *nativeMail) error {
-		ref, err := n.scopedMessage(account, mailbox, id)
+		var ref appleevents.Value
+		var err error
+		if draft {
+			ref, err = n.scopedDraft(account, mailbox, id)
+		} else {
+			ref, err = n.attachmentMessage(account, mailbox, id)
+		}
 		if err != nil {
 			return err
 		}
