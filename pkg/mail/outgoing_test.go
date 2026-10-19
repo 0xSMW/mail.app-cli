@@ -187,6 +187,9 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 		ok             bool
 		beforeDispatch bool
 	}{
+		{name: "missing value filename uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingValue": true, "intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "previously readable filename becomes missing value retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingValueAfterSend": true}, submitted: true},
+		{name: "malformed filename is not missing value", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMalformed": true}, beforeDispatch: true, closes: 1},
 		{name: "missing filename getter uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissing": true, "intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
 		{name: "missing previously readable filename retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingAfterSend": true}, submitted: true},
 		{name: "truthy ObjC nil wrapper fails closed", config: map[string]any{"snapshotNil": true}, beforeDispatch: true, closes: 1},
@@ -256,6 +259,9 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 				if !strings.Contains(got.Response.Error, "AppleScript error -1728") {
 					t.Fatalf("lost nil-wrapper error metadata: %s", raw)
 				}
+			}
+			if tt.name == "malformed filename is not missing value" && !strings.Contains(got.Response.Error, "AppleScript error -1700") {
+				t.Fatalf("malformed filename coercion was swallowed: %s", raw)
 			}
 			if tt.beforeDispatch && (got.Response.Uncertain || got.Response.Phase != "send_fingerprint") {
 				t.Fatalf("pre-dispatch count failure not safe: %s", raw)
