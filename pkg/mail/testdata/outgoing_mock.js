@@ -6,7 +6,7 @@ const config = request.config || {};
 const input = request.input;
 const events = [];
 const preparedId=request.action==='send'?'900':'stored-900';
-const storedDeleted=[], exactLookups=[];const removed=new Set();let savedComposition=false;
+const storedDeleted=[], exactLookups=[];const removed=new Set();let savedComposition=false,ownedGone=false,storedRaceTriggered=false,lingeringReads=0;
 let outgoing = null, polls = 0, attached = [], composed = 0, sent = 0, closed = 0, deleted = 0, reads = 0, accountReads = 0;
 function collection(values) { const f=()=>values; f.push=x=>values.push(x); return f; }
 function recipients(values) { return values.map(address=>({address:()=>address})); }
@@ -15,7 +15,10 @@ function stored(id, change) {
  const data=Object.assign({},input,change||{},after);
  const ownerId=after.accountId || (config.accounts || [{id:'id-1'}])[0].id;
  const box={name:()=>data.mailbox || config.physicalDraftName || config.draftName || 'Drafts',account:()=>({id:()=>ownerId})};
- function read(name,value){if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
+ function read(name,value){
+  if(sent>0 && name==='source' && config.preparedDisappearsDuringSnapshot && !storedRaceTriggered){storedRaceTriggered=true;removed.add(id);lingeringReads=config.preparedLingeringIdReads || 0;const e=new Error('stored root disappeared');e.errorNumber=-1728;throw e;}
+  if(sent>0 && config.storedNestedMissing===name){const e=new Error('stored nested unavailable');e.errorNumber=-1728;throw e;}
+  if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
  return {id:()=>id,mailbox:()=>box,source:()=>read('source',data.source===undefined?(config.source || 'raw source'):data.source),messageId:()=>data.rfcMessageId || 'draft-rfc-id',subject:()=>read('subject',data.subject),content:()=>read('body',data.body),sender:()=>data.sender || (config.accounts || [{addresses:['sender@example.com']}])[0].addresses[0],
  toRecipients:()=>recipients(data.to || []),ccRecipients:()=>recipients(data.cc || []),bccRecipients:()=>recipients(data.bcc || []),
  mailAttachments:()=> (data.attachments||[]).map((path,index)=>({id:()=>String(index),name:()=>path.split('/').pop(),mimeType:()=>data.mimeType || 'application/octet-stream',fileSize:()=>data.fileSize || 10,downloaded:()=>true})),
@@ -23,20 +26,22 @@ function stored(id, change) {
 }
 const drafts={name:()=> config.draftName || 'Drafts',account:()=>accounts[0],messages:()=> {
  if(config.snapshotRead) return [stored(String(config.draftId || '42'))];
- if (!(request.action==='send' ? savedComposition : closed)) return config.preexisting ? [stored('old')] : [];
+ if (!(request.action==='send' ? savedComposition : closed)) return config.preexisting ? [stored('100')] : [];
  polls++;
  if(config.transientLookup && polls===1){const e=new Error('object not ready');e.errorNumber=-1728;throw e;}
  if(config.transportLookup){const e=new Error('transport timeout');e.errorNumber=-1712;throw e;}
- if (config.neverSave || polls < (config.saveDelay || 1)) return config.preexisting ? [stored('old')] : [];
+ if (config.neverSave || polls < (config.saveDelay || 1)) return config.preexisting ? [stored('100')] : [];
  const values = [stored(preparedId,config.savedChange)];
- if (config.ambiguousSave) values.push(stored('stored-901'));
- if (config.preexisting) values.push(stored('old'));
+ if (config.ambiguousSave) values.push(stored(request.action==='send'?'901':'stored-901'));
+ if (config.preexisting) values.push(stored('100'));
  return values.filter(m=>!removed.has(m.id()) && !(sent>0 && config.storedAbsent && m.id()===preparedId));
 }};
 drafts.messages=new Proxy(drafts.messages,{get:(target,key)=>{
- if(key==='byId')return id=>{const value=target().find(m=>m.id()===String(id));if(!value){const e=new Error('missing exact draft');e.errorNumber=-1728;throw e;}exactLookups.push(value.id());return value;};
- if(key==='at')return index=>{const value=config.reorderAfterLookup ? stored('old') : target()[index];if(value)exactLookups.push(value.id());return value;};
- if(key==='id')return ()=>target().map(m=>m.id());
+ if(key==='byId')return id=>{
+  if(sent>0 && config.preparedDisappearsAtById && !storedRaceTriggered){storedRaceTriggered=true;removed.add(String(id));lingeringReads=config.preparedLingeringIdReads || 0;const e=new Error('stored root disappeared');e.errorNumber=-1728;throw e;}
+  const value=target().find(m=>m.id()===String(id));if(!value){const e=new Error('missing exact draft');e.errorNumber=-1728;throw e;}exactLookups.push(value.id());return value;};
+ if(key==='at')return index=>{const value=config.reorderAfterLookup ? stored('100') : target()[index];if(value)exactLookups.push(value.id());return value;};
+ if(key==='id')return ()=>{if(storedRaceTriggered && config.preparedIdsAfterRace !== undefined)return config.preparedIdsAfterRace;const ids=target().map(m=>m.id());if(sent>0 && lingeringReads>0){lingeringReads--;ids.push(preparedId);}return ids;};
  if(/^[0-9]+$/.test(String(key)))return target()[Number(key)];
  return target[key];
 }});
@@ -58,6 +63,8 @@ const mail={
  outgoingMessages:{push:message=>{ composed++; outgoing=message; }},
  OutgoingMessage:properties=> {
   function property(name, value) {
+   if(sent>0 && (ownedGone || (config.ownedDisappearsDuringFingerprint && name==='body'))){ownedGone=true;const e=new Error('owned root disappeared');e.errorNumber=-1728;throw e;}
+
    if ((config.fingerprintFailures || []).includes(name) && (!config.failAfterSend || sent > 0)) {const e=new Error(name+' unavailable');e.errorNumber=-1728;throw e;}
    return value;
   }
@@ -78,7 +85,7 @@ const mail={
   if(config.afterSend)changeOutgoing(message,config.afterSend);
   return config.sendFalse ? false : true;},
  save:message=>{if(message!==outgoing)throw new Error('invalid save');savedComposition=true;if(request.action==='send' && config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
- close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
+ close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.ownedDisappearsAtClose){ownedGone=true;const e=new Error('owned root disappeared');e.errorNumber=-1728;throw e;}if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
  delete:message=>{if(message!==outgoing)throw new Error('deleting unrelated object');deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');}
 };
 const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnError:error=>{
