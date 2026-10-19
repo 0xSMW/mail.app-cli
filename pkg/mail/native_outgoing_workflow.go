@@ -26,6 +26,8 @@ type nativeOutgoingRun struct {
 	body, step, cleanup string
 	attempted, saved    bool
 	attachmentProofs    []outgoingAttachmentProof
+	preparedDraft       *draftSnapshot
+	preparedAccountID   string
 }
 
 func (r *nativeOutgoingRun) cleanupOwned(err error) {
@@ -48,32 +50,27 @@ func (r *nativeOutgoingRun) submittedCleanup(expected map[string]ae.Value) error
 	defer cancel()
 	clean := *r.n
 	clean.ctx = ctx
-	// Only a read of the owned object itself may establish absence. A missing
-	// recipient or attachment during snapshot readback is a cleanup failure.
+	// A missing owned backend does not establish absence of its saved copy.
 	_, err := clean.get(ae.Property("subj", r.owned))
-	if nativeMissing(err) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !nativeMissing(err) {
 		return err
 	}
-	current, err := clean.ownedComposeSnapshot(r.owned)
-	if err != nil {
-		return err
+	if err == nil {
+		current, err := clean.ownedComposeSnapshot(r.owned)
+		if err != nil {
+			return err
+		}
+		if _, available := expected["files"]; !available {
+			delete(current, "files")
+		}
+		if !reflect.DeepEqual(expected, current) {
+			return fmt.Errorf("submitted composition changed; retained")
+		}
+		if _, err = clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); err != nil && !nativeMissing(err) {
+			return err
+		}
 	}
-	if _, available := expected["files"]; !available {
-		delete(current, "files")
-	}
-	if !reflect.DeepEqual(expected, current) {
-		return fmt.Errorf("submitted composition changed; retained")
-	}
-	if _, err = clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); err != nil && !nativeMissing(err) {
-		return err
-	}
-	// Mail can retain a readable outgoing descriptor after acknowledging close.
-	// The acknowledgement completes this command; server Drafts synchronization
-	// is a separate observation and cannot be inferred from descriptor liveness.
-	return nil
+	return r.cleanupPreparedDraft(&clean)
 }
 
 func (n *nativeMail) ownedComposeSnapshot(owned ae.Value) (map[string]ae.Value, error) {
