@@ -10,15 +10,14 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
 
-const version = "2.4.0"
+const version = "3.0.0"
 
 const (
 	groupMail   = "mail"
@@ -44,36 +43,6 @@ const (
 	annotationFileOutputMutation = "fileOutputMutation"
 )
 
-var (
-	flagAccount string
-	flagMailbox string
-	outFlags    output.Flags
-
-	// Per-invocation state built in prepare.
-	writer     *output.Writer
-	cfg        config.Config
-	resolved   config.Resolved
-	mailClient *mail.Client
-
-	// Retain a failed config load for fallback error formatting, so a malformed
-	// or inaccessible config file is never read twice in one invocation.
-	loadedConfig        config.Config
-	configLoadAttempted bool
-)
-
-var rootCmd = &cobra.Command{
-	Use:   "mail-app-cli",
-	Short: "Drive macOS Mail.app from the terminal",
-	Long: `mail-app-cli reads and acts on Mail.app accounts, mailboxes, and messages.
-
-Output is a table on a terminal and a JSON envelope when piped. See
-'mail-app-cli help output' for the envelope, 'help exit-codes' for exit
-statuses, and 'help agents' for how to drive it from a script or an agent.`,
-	Version:       version,
-	SilenceUsage:  true,
-	SilenceErrors: true,
-}
-
 // Execute runs the CLI and exits with the documented status.
 func Execute() {
 	os.Exit(Run(os.Args[1:], os.Stdout, os.Stderr))
@@ -81,23 +50,18 @@ func Execute() {
 
 // Run executes args against the root command and returns the exit code.
 func Run(args []string, stdout, stderr io.Writer) int {
-	// Cobra commands and their flags are package globals. Clear the previous
-	// invocation before parsing, and again on every return, so callers that use
-	// Run more than once get the same behavior as separate CLI processes.
-	resetCommandFlags(rootCmd)
-	defer resetCommandFlags(rootCmd)
+	return newApplication().run(args, stdout, stderr)
+}
 
-	writer = nil
-	loadedConfig = config.Config{}
-	configLoadAttempted = false
-	rootCmd.SetArgs(args)
-	rootCmd.SetOut(stdout)
-	rootCmd.SetErr(stderr)
+func (a *application) run(args []string, stdout, stderr io.Writer) int {
+	defer a.writeBackendMetrics(stderr)
+	a.rootCmd.SetArgs(args)
+	a.rootCmd.SetOut(stdout)
+	a.rootCmd.SetErr(stderr)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	setCommandContext(rootCmd, ctx)
-	defer setCommandContext(rootCmd, context.Background())
-	err := rootCmd.ExecuteContext(ctx)
+	setCommandContext(a.rootCmd, ctx)
+	err := a.rootCmd.ExecuteContext(ctx)
 	if err == nil {
 		return 0
 	}
@@ -105,13 +69,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	if cerr.Reported {
 		return clierr.ExitCode(cerr.Code)
 	}
-	w := writer
+	w := a.writer
 	if w == nil {
 		// prepare never ran (for example, Cobra rejected the arguments). Resolve
 		// output independently so that this error follows the same flag > env >
 		// config > auto precedence as a command that reached prepare. A broken
 		// config must not replace the original Cobra error.
-		format := fallbackOutputFormat(args, stdout)
+		format := a.fallbackOutputFormat(args, stdout)
 		w, _ = output.New(format, stdout, stderr, false, "", "", mail.SchemaVersion)
 	}
 	w.Error(cerr)
@@ -125,32 +89,14 @@ func setCommandContext(cmd *cobra.Command, ctx context.Context) {
 	}
 }
 
-// resetCommandFlags restores every registered flag value and Changed bit on a
-// command tree. Cobra otherwise retains both across Execute calls.
-func resetCommandFlags(cmd *cobra.Command) {
-	reset := func(f *pflag.Flag) {
-		if slice, ok := f.Value.(pflag.SliceValue); ok {
-			_ = slice.Replace(nil)
-		} else {
-			_ = f.Value.Set(f.DefValue)
-		}
-		f.Changed = false
-	}
-	cmd.PersistentFlags().VisitAll(reset)
-	cmd.Flags().VisitAll(reset)
-	for _, sub := range cmd.Commands() {
-		resetCommandFlags(sub)
-	}
-}
-
-func fallbackOutputFormat(args []string, stdout io.Writer) output.Format {
+func (a *application) fallbackOutputFormat(args []string, stdout io.Writer) output.Format {
 	// Cobra has not necessarily parsed persistent flags when it reports an
 	// argument error. Read only output selectors here; they are sufficient for
 	// output.Resolve and avoid treating an unknown command or malformed argument
 	// as a second error.
 	flags := outputFlagsFromArgs(args)
-	loaded := loadedConfig
-	if !configLoadAttempted {
+	loaded := a.cfg
+	if !a.configLoadAttempted {
 		var err error
 		loaded, err = config.Load()
 		if err != nil {
@@ -243,48 +189,50 @@ func classifyCommandError(err error) *clierr.Error {
 	return cerr
 }
 
-func prepare(cmd *cobra.Command, args []string) error {
+func (a *application) prepare(cmd *cobra.Command, args []string) error {
 	loaded, err := config.Load()
-	loadedConfig = loaded
-	configLoadAttempted = true
-	if err != nil && !isConfigRecoveryCommand(cmd) {
+	a.cfg = loaded
+	a.configLoadAttempted = true
+	if err != nil && !a.isConfigRecoveryCommand(cmd) {
 		return clierr.Wrap(clierr.CodeUsage, err, err.Error()).WithHint("fix or delete the config file, see 'mail-app-cli config path'")
 	}
-	cfg = loaded
 
 	flags := map[string]string{}
 	if cmd.Flags().Changed("account") {
-		flags[config.KeyAccount] = flagAccount
+		flags[config.KeyAccount] = a.flagAccount
 	}
 	if cmd.Flags().Changed("mailbox") {
-		flags[config.KeyMailbox] = flagMailbox
+		flags[config.KeyMailbox] = a.flagMailbox
 	}
-	resolved = config.Resolve(flags, cfg, os.Getenv)
+	a.resolved = config.Resolve(flags, a.cfg, os.Getenv)
 
 	tty := output.IsTerminal(cmd.OutOrStdout())
-	format, err := output.Resolve(outFlags, resolved.Output.Value, tty)
+	format, err := output.Resolve(a.outFlags, a.resolved.Output.Value, tty)
 	if err != nil {
 		return err
 	}
-	if outFlags.Count && cmd.Annotations[annotationList] != "true" && !isMetaCommand(cmd) {
+	if a.outFlags.Count && cmd.Annotations[annotationList] != "true" && !isMetaCommand(cmd) {
 		return clierr.Usage("--count only applies to commands that return a list").
 			WithHint("use --jq to pick fields from this command's data")
 	}
-	if outFlags.IDsOnly && cmd.Annotations[annotationIDList] != "true" && !isMetaCommand(cmd) {
+	if a.outFlags.IDsOnly && cmd.Annotations[annotationIDList] != "true" && !isMetaCommand(cmd) {
 		return clierr.Usage("--ids-only only applies to lists whose items carry an id").
 			WithHint("use --count to count this list, or --jq to pick fields from its data")
 	}
-	if outFlags.JQ != "" && jqWouldHideMutationReceipt(cmd) {
+	if a.outFlags.JQ != "" && a.jqWouldHideMutationReceipt(cmd) {
 		return clierr.Usage("--jq cannot be combined with a command that changes state").
 			WithHint("run the mutation without --jq so its receipt remains available")
 	}
-	color := output.ColorEnabled(format, tty, outFlags.NoColor, os.Getenv)
-	writer, err = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
+	color := output.ColorEnabled(format, tty, a.outFlags.NoColor, os.Getenv)
+	a.writer, err = output.New(format, cmd.OutOrStdout(), cmd.ErrOrStderr(), color, a.outFlags.JQ, commandPath(cmd), mail.SchemaVersion)
 	if err != nil {
 		return err
 	}
-	mailClient = mail.NewClient().WithContext(cmd.Context())
-	mailClient.SetWarn(writer.AddNotice)
+	a.mailClient = mail.NewClient().WithContext(cmd.Context())
+	if err := a.mailClient.SetBackend(a.flagBackend); err != nil {
+		return clierr.Usage(err.Error())
+	}
+	a.mailClient.SetWarn(a.writer.AddNotice)
 	return nil
 }
 
@@ -292,20 +240,20 @@ func prepare(cmd *cobra.Command, args []string) error {
 // before the writer evaluates --jq. Exporting messages to stdout is read-only;
 // selecting a file makes it a local mutation and therefore needs the same
 // preflight protection as other receipt-bearing commands.
-func jqWouldHideMutationReceipt(cmd *cobra.Command) bool {
+func (a *application) jqWouldHideMutationReceipt(cmd *cobra.Command) bool {
 	if cmd.Annotations[annotationMutation] == "true" {
 		return true
 	}
-	return cmd.Annotations[annotationFileOutputMutation] == "true" && exportMessagesWritesFile()
+	return cmd.Annotations[annotationFileOutputMutation] == "true" && a.exportMessagesWritesFile()
 }
 
 // isConfigRecoveryCommand reports commands that can identify the broken
 // configuration without consuming any of its values.
-func isConfigRecoveryCommand(cmd *cobra.Command) bool {
+func (a *application) isConfigRecoveryCommand(cmd *cobra.Command) bool {
 	if isMetaCommand(cmd) {
 		return true
 	}
-	return cmd == configPathCmd
+	return cmd == a.configPathCmd
 }
 
 // isMetaCommand reports cobra's own help and completion commands, which
@@ -322,56 +270,43 @@ func isMetaCommand(cmd *cobra.Command) bool {
 
 // markList tags commands whose data is a list and therefore accepts --count.
 func markList(cmds ...*cobra.Command) {
-	for _, cmd := range cmds {
-		if cmd.Annotations == nil {
-			cmd.Annotations = map[string]string{}
-		}
-		cmd.Annotations[annotationList] = "true"
-	}
+	markCommands(annotationList, cmds...)
 }
 
-// markIDList tags list commands whose items carry an id and therefore also
-// accept --ids-only.
+// markIDList tags list commands whose items carry an id.
 func markIDList(cmds ...*cobra.Command) {
 	markList(cmds...)
-	for _, cmd := range cmds {
-		cmd.Annotations[annotationIDList] = "true"
-	}
+	markCommands(annotationIDList, cmds...)
 }
 
-// markMutation tags commands that can make a state change. prepare uses the
-// annotation before RunE so an otherwise-valid jq expression cannot fail only
-// after a receipt-bearing action has succeeded.
+// markMutation protects state-changing receipts from a post-action jq failure.
 func markMutation(cmds ...*cobra.Command) {
-	for _, cmd := range cmds {
-		if cmd.Annotations == nil {
-			cmd.Annotations = map[string]string{}
-		}
-		cmd.Annotations[annotationMutation] = "true"
-	}
+	markCommands(annotationMutation, cmds...)
 }
 
-// markFileOutputMutation tags commands whose output target determines whether
-// they change local state. The command's predicate is evaluated in prepare
-// after Cobra has parsed its flags.
+// markFileOutputMutation protects receipts when the output target is a file.
 func markFileOutputMutation(cmds ...*cobra.Command) {
+	markCommands(annotationFileOutputMutation, cmds...)
+}
+
+func markCommands(key string, cmds ...*cobra.Command) {
 	for _, cmd := range cmds {
 		if cmd.Annotations == nil {
 			cmd.Annotations = map[string]string{}
 		}
-		cmd.Annotations[annotationFileOutputMutation] = "true"
+		cmd.Annotations[key] = "true"
 	}
 }
 
 // helpCommand replaces cobra's default so an unknown topic is a usage error
 // instead of the root help with exit 0.
-func helpCommand() *cobra.Command {
+func (a *application) helpCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "help [command or topic]",
 		Short: "Help about any command or topic",
 		RunE: func(c *cobra.Command, args []string) error {
-			target, _, err := rootCmd.Find(args)
-			if err != nil || (len(args) > 0 && target == rootCmd) {
+			target, _, err := a.rootCmd.Find(args)
+			if err != nil || (len(args) > 0 && target == a.rootCmd) {
 				return clierr.Usagef("unknown help topic %q", strings.Join(args, " ")).
 					WithHint("topics: output, exit-codes, environment, agents; or a command name")
 			}
@@ -385,9 +320,9 @@ func commandPath(cmd *cobra.Command) string {
 }
 
 // agentAwareHelp prints JSON help when --agent is set, otherwise cobra's.
-func agentAwareHelp(defaultHelp func(*cobra.Command, []string)) func(*cobra.Command, []string) {
+func (a *application) agentAwareHelp(defaultHelp func(*cobra.Command, []string)) func(*cobra.Command, []string) {
 	return func(cmd *cobra.Command, args []string) {
-		if !outFlags.Agent {
+		if !a.outFlags.Agent {
 			defaultHelp(cmd, args)
 			return
 		}
@@ -401,63 +336,78 @@ func agentAwareHelp(defaultHelp func(*cobra.Command, []string)) func(*cobra.Comm
 	}
 }
 
-func init() {
-	cobra.EnableCommandSorting = false
-	rootCmd.PersistentPreRunE = prepare
-	rootCmd.SetVersionTemplate("mail-app-cli {{.Version}}\n")
-	rootCmd.SetHelpFunc(agentAwareHelp(rootCmd.HelpFunc()))
+func (a *application) buildRootCommands() {
+	a.rootCmd = &cobra.Command{
+		Use:   "mail-app-cli",
+		Short: "Drive macOS Mail.app from the terminal",
+		Long: `mail-app-cli reads and acts on Mail.app accounts, mailboxes, and messages.
 
-	pf := rootCmd.PersistentFlags()
-	pf.StringVarP(&flagAccount, "account", "a", "", "Mail.app account name (default: config, or the only account)")
-	pf.StringVarP(&flagMailbox, "mailbox", "m", "", "Mailbox name (default: config, or INBOX)")
-	pf.BoolVar(&outFlags.JSON, "json", false, "Emit the JSON envelope even on a terminal")
-	pf.BoolVar(&outFlags.Plain, "plain", false, "Emit the human view even when piped")
-	pf.BoolVarP(&outFlags.Quiet, "quiet", "q", false, "Emit bare JSON data without the envelope")
-	pf.BoolVar(&outFlags.IDsOnly, "ids-only", false, "Print one ID per line from list output")
-	pf.BoolVar(&outFlags.Count, "count", false, "Print only the number of items in list output")
-	pf.StringVar(&outFlags.JQ, "jq", "", "Filter JSON output with a jq expression (implies --json)")
-	pf.BoolVar(&outFlags.NoColor, "no-color", false, "Disable ANSI color in the human view")
-	pf.BoolVar(&outFlags.Agent, "agent", false, "JSON output and JSON --help for agents")
+Output is a table on a terminal and a JSON envelope when piped. See
+'mail-app-cli help output' for the envelope, 'help exit-codes' for exit
+statuses, and 'help agents' for how to drive it from a script or an agent.`,
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+
+	a.rootCmd.PersistentPreRunE = a.prepare
+	a.rootCmd.SetVersionTemplate("mail-app-cli {{.Version}}\n")
+	a.rootCmd.SetHelpFunc(a.agentAwareHelp(a.rootCmd.HelpFunc()))
+
+	pf := a.rootCmd.PersistentFlags()
+	pf.StringVar(&a.flagBackend, "backend", "", "Mail transport: native, legacy, or auto (default: native when available)")
+	pf.StringVarP(&a.flagAccount, "account", "a", "", "Mail.app account name (default: config, or the only account)")
+	pf.StringVarP(&a.flagMailbox, "mailbox", "m", "", "Mailbox name (default: config, or INBOX)")
+	pf.BoolVar(&a.outFlags.JSON, "json", false, "Emit the JSON envelope even on a terminal")
+	pf.BoolVar(&a.outFlags.Plain, "plain", false, "Emit the human view even when piped")
+	pf.BoolVarP(&a.outFlags.Quiet, "quiet", "q", false, "Emit bare JSON data without the envelope")
+	pf.BoolVar(&a.outFlags.IDsOnly, "ids-only", false, "Print one ID per line from list output")
+	pf.BoolVar(&a.outFlags.Count, "count", false, "Print only the number of items in list output")
+	pf.StringVar(&a.outFlags.JQ, "jq", "", "Filter JSON output with a jq expression (implies --json)")
+	pf.BoolVar(&a.outFlags.NoColor, "no-color", false, "Disable ANSI color in the human view")
+	pf.BoolVar(&a.outFlags.Agent, "agent", false, "JSON output and JSON --help for agents")
 	_ = pf.MarkHidden("agent")
 
-	rootCmd.AddGroup(
+	a.rootCmd.AddGroup(
 		&cobra.Group{ID: groupMail, Title: "Mail:"},
 		&cobra.Group{ID: groupManage, Title: "Manage:"},
 		&cobra.Group{ID: groupTools, Title: "Tooling:"},
 	)
 
 	for _, cmd := range []*cobra.Command{
-		tuiCmd, inboxCmd, unreadCmd, showCmd, searchCmd,
-		seenCmd, unseenCmd, flagCmd, unflagCmd, archiveCmd, deleteCmd, moveCmd, sendCmd,
+		a.tuiCmd, a.inboxCmd, a.unreadCmd, a.showCmd, a.searchCmd,
+		a.seenCmd, a.unseenCmd, a.flagCmd, a.unflagCmd, a.archiveCmd, a.deleteCmd, a.moveCmd, a.sendCmd,
 	} {
 		cmd.GroupID = groupMail
-		rootCmd.AddCommand(cmd)
+		a.rootCmd.AddCommand(cmd)
 	}
 	for _, cmd := range []*cobra.Command{
-		accountsCmd, mailboxesCmd, messagesCmd, draftsCmd, attachmentsCmd, threadsCmd,
-		rulesCmd, smartCmd, signaturesCmd, recentCmd, exportCmd, importCmd, syncCmd,
+		a.accountsCmd, a.mailboxesCmd, a.messagesCmd, a.draftsCmd, a.attachmentsCmd, a.threadsCmd,
+		a.rulesCmd, a.smartCmd, a.signaturesCmd, a.recentCmd, a.exportCmd, a.importCmd, a.syncCmd,
 	} {
 		cmd.GroupID = groupManage
-		rootCmd.AddCommand(cmd)
+		a.rootCmd.AddCommand(cmd)
 	}
 	for _, cmd := range []*cobra.Command{
-		configCmd, doctorCmd, commandsCmd, skillCmd, versionCmd,
+		a.configCmd, a.doctorCmd, a.commandsCmd, a.skillCmd, a.versionCmd,
 	} {
 		cmd.GroupID = groupTools
-		rootCmd.AddCommand(cmd)
+		a.rootCmd.AddCommand(cmd)
 	}
-	rootCmd.AddCommand(helpTopicCommands()...)
-	rootCmd.SetHelpCommand(helpCommand())
+	a.rootCmd.AddCommand(helpTopicCommands()...)
+	a.rootCmd.SetHelpCommand(a.helpCommand())
 
 	markIDList(
-		inboxCmd, unreadCmd, searchCmd,
-		accountsListCmd, messagesListCmd,
-		messagesInboxCmd, messagesUnreadCmd, messagesSentCmd, messagesDraftsCmd,
-		messagesFlaggedCmd, messagesTrashCmd, messagesJunkCmd, messagesVIPCmd,
-		draftsListCmd, smartQueryCmd, threadsListCmd, recentSearchCmd,
+		a.inboxCmd, a.unreadCmd, a.searchCmd,
+		a.accountsListCmd, a.messagesListCmd,
+		a.messagesInboxCmd, a.messagesUnreadCmd, a.messagesSentCmd, a.messagesDraftsCmd,
+		a.messagesFlaggedCmd, a.messagesTrashCmd, a.messagesJunkCmd, a.messagesVIPCmd,
+		a.draftsListCmd, a.smartQueryCmd, a.threadsListCmd, a.recentSearchCmd,
 	)
 	markList(
-		mailboxesListCmd, attachmentsListCmd, rulesListCmd, smartListCmd,
-		signaturesListCmd, exportAttachmentsCmd,
+		a.mailboxesListCmd, a.attachmentsListCmd, a.rulesListCmd, a.smartListCmd,
+		a.signaturesListCmd, a.exportAttachmentsCmd,
 	)
 }
+
+func init() { cobra.EnableCommandSorting = false }

@@ -52,7 +52,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		membership := `(m.mailbox = box.ID or (
 			lower(box.URL) not glob '*/all%20mail' and lower(box.URL) not glob '*/all mail'
 			and lower(box.URL) not glob '*/archive'
-			and exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = box.ID)))`
+			and ` + indexLabelMembershipCondition("box.ID") + "))"
 		selects = append(selects, fmt.Sprintf(`select %d as VerificationScope,
 		(select ID from %s) as MailboxID,
 		(select URL from %s) as MailboxURL,

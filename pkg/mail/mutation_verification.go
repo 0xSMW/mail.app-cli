@@ -58,21 +58,6 @@ func (identity StableIdentity) fallbackKey() string {
 	return identity.Sender + "\x00" + identity.Subject + "\x00" + identity.DateSent + "\x00" + strconv.Itoa(identity.MessageSize)
 }
 
-func (c *Client) captureStableIdentity(item BatchItem) (StableIdentity, error) {
-	identity := item.Identity
-	identity.Sender = strings.TrimSpace(identity.Sender)
-	identity.Subject = strings.TrimSpace(identity.Subject)
-	identity.DateSent = canonicalIdentityDate(identity.DateSent)
-	identity.RFCMessageID = validRFCMessageID(identity.RFCMessageID)
-	if !identity.valid() {
-		identity = StableIdentity{Sender: strings.TrimSpace(item.Sender), Subject: strings.TrimSpace(item.Subject), DateSent: canonicalIdentityDate(item.DateSent), MessageSize: item.MessageSize}
-	}
-	// Mail's header property is the only source accepted as an RFC Message-ID.
-	// The Envelope Index's numeric message_id is a local database value.
-	message, err := c.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
-	return completeStableIdentity(identity, message, err)
-}
-
 // completeStableIdentity treats the live RFC read as enrichment. A complete
 // index-captured fallback is already safe and must not be discarded merely
 // because Mail.app did not answer the optional header read in time.
@@ -102,63 +87,6 @@ func completeStableIdentity(identity StableIdentity, message *Message, enrichmen
 // verificationBackoff is deliberately small but bounded: Mail and IMAP can
 // accept a move before the destination row is visible in the Envelope Index.
 var verificationBackoff = []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
-
-type verificationPresence struct {
-	Source      bool
-	Destination bool
-}
-
-type verificationLookup func() (verificationPresence, error)
-type verificationPause func(context.Context, time.Duration) error
-
-func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause verificationPause) (string, error) {
-	for attempt, delay := range verificationBackoff {
-		if attempt > 0 {
-			if err := pause(ctx, delay); err != nil {
-				return "unknown_after_timeout", err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return "unknown_after_timeout", err
-		}
-		presence, err := lookup()
-		if err != nil {
-			if isVerificationTimeout(err) {
-				return "unknown_after_timeout", err
-			}
-			if isRetryableVerificationError(err) && attempt < len(verificationBackoff)-1 {
-				continue
-			}
-			return "applied_destination_unverified", err
-		}
-		// Always use the final observation: a local source can reappear after
-		// an initially successful destination observation.
-		if attempt == len(verificationBackoff)-1 {
-			if presence.Source {
-				return "present_in_source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-			}
-			if presence.Destination {
-				return "confirmed_destination", nil
-			}
-			return "applied_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
-		}
-	}
-	return "applied_destination_unverified", fmt.Errorf("message destination could not be verified")
-}
-
-func isRetryableVerificationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if IsNotFound(err) {
-		return true
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "apple event connection is invalid") ||
-		strings.Contains(message, "connection invalid") ||
-		strings.Contains(message, "connection interrupted") ||
-		strings.Contains(message, "(-609)")
-}
 
 func isVerificationTimeout(err error) bool {
 	if err == nil {
@@ -316,7 +244,7 @@ func captureBatchIdentities(client *Client, opts BatchOptions, items []BatchItem
 				session = nil
 				reader.session = nil
 			}
-			if opts.ReuseBridge && len(items) > 1 && session == nil {
+			if !reader.nativeEnabled() && opts.ReuseBridge && len(items) > 1 && session == nil {
 				session, err = newJXASession(ctx)
 				reader.session = session
 			}
@@ -397,21 +325,8 @@ func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) 
 		items[i].VerifyStatus, items[i].VerifyError, items[i].Observed = "", "", nil
 	}
 	verified := VerifyMutations(client, opts, items)
-	var skippedMarks []BatchItem
-	var skippedIndices []int
-	for i, item := range items {
-		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
-			item.Status = "succeeded"
-			skippedMarks = append(skippedMarks, item)
-			skippedIndices = append(skippedIndices, i)
-		}
-	}
-	if len(skippedMarks) > 0 {
-		checks := VerifyMutations(client, BatchOptions{Action: "mark", Read: true, VerifyBudget: opts.VerifyBudget, readOnlyVerification: true}, skippedMarks)
-		for i, check := range checks {
-			verified[skippedIndices[i]].VerifyStatus, verified[skippedIndices[i]].VerifyError = check.VerifyStatus, check.VerifyError
-		}
-	}
+	verifySkippedMarks(client, opts, verified, nil)
+
 	receipt.Unverified = 0
 	for i := range verified {
 		if receipt.Items[i].Status == "unknown" && verified[i].VerifyStatus == "" {

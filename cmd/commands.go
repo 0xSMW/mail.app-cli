@@ -4,7 +4,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -33,42 +33,6 @@ type flagRecord struct {
 	Default   string `json:"default,omitempty"`
 	Usage     string `json:"usage"`
 	Hidden    bool   `json:"hidden,omitempty"`
-}
-
-var commandsCmd = &cobra.Command{
-	Use:   "commands",
-	Short: "Describe every command and flag (add --json for the full tree)",
-	Annotations: map[string]string{
-		annotationAgentNotes: "The authoritative list. Each record carries agentNotes and compatibility; prefer commands without compatibility=true.",
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		record := describeCommand(cmd.Root(), true)
-		return writer.Write(output.Result{
-			Data:    record,
-			Summary: "command tree for mail-app-cli " + version,
-			Plain: func(p *output.Printer) {
-				var rows [][]string
-				var walk func(r commandRecord, depth int)
-				walk = func(r commandRecord, depth int) {
-					if r.Path != "" {
-						name := strings.Repeat("  ", depth-1) + lastWord(r.Path)
-						short := r.Short
-						if r.Compatibility {
-							short += p.Dim(" (1.x compatibility)")
-						}
-						rows = append(rows, []string{name, short})
-					}
-					for _, sub := range r.Subcommands {
-						walk(sub, depth+1)
-					}
-				}
-				walk(record, 0)
-				p.Table([]string{"COMMAND", "DESCRIPTION"}, rows)
-				p.Blank()
-				p.Line("%s", p.Dim("mail-app-cli commands --json for flags and agent notes"))
-			},
-		})
-	},
 }
 
 func lastWord(path string) string {
@@ -150,4 +114,42 @@ func defaultValue(f *pflag.Flag) string {
 		return ""
 	}
 	return f.DefValue
+}
+
+func (a *application) buildInventoryCommand() {
+	a.commandsCmd = &cobra.Command{
+		Use:   "commands",
+		Short: "Describe every command and flag (add --json for the full tree)",
+		Annotations: map[string]string{
+			annotationAgentNotes: "The authoritative list. Each record carries agentNotes and compatibility; prefer commands without compatibility=true.",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			record := describeCommand(cmd.Root(), true)
+			return a.writer.Write(output.Result{
+				Data:    record,
+				Summary: "command tree for mail-app-cli " + version,
+				Plain: func(p *output.Printer) {
+					var rows [][]string
+					var walk func(r commandRecord, depth int)
+					walk = func(r commandRecord, depth int) {
+						if r.Path != "" {
+							name := strings.Repeat("  ", depth-1) + lastWord(r.Path)
+							short := r.Short
+							if r.Compatibility {
+								short += p.Dim(" (1.x compatibility)")
+							}
+							rows = append(rows, []string{name, short})
+						}
+						for _, sub := range r.Subcommands {
+							walk(sub, depth+1)
+						}
+					}
+					walk(record, 0)
+					p.Table([]string{"COMMAND", "DESCRIPTION"}, rows)
+					p.Blank()
+					p.Line("%s", p.Dim("mail-app-cli commands --json for flags and agent notes"))
+				},
+			})
+		},
+	}
 }

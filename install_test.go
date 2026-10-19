@@ -31,7 +31,7 @@ func TestInstallerUsesNamedCommand(t *testing.T) {
 				"go": `#!/bin/sh
 set -eu
 case "$*" in
- "install github.com/0xSMW/mail.app-cli/v2/cmd/mail-app-cli@v2.test")
+ "install github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli@v3.test")
   /bin/cat > "$INSTALL_DEST/mail-app-cli" <<'BIN'
 #!/bin/sh
 printf 'mail-app-cli test-version\n'
@@ -54,7 +54,7 @@ esac
 			if explicitGOBIN {
 				gobin = destination
 			}
-			cmd.Env = append(os.Environ(), "PATH="+bin+":"+destination, "GOBIN="+gobin, "INSTALL_DEST="+destination, "INSTALL_GOPATH="+filepath.Join(root, "gopath"), "MAIL_APP_CLI_VERSION=v2.test")
+			cmd.Env = append(os.Environ(), "PATH="+bin+":"+destination, "GOBIN="+gobin, "INSTALL_DEST="+destination, "INSTALL_GOPATH="+filepath.Join(root, "gopath"), "MAIL_APP_CLI_VERSION=v3.test")
 			output, err := cmd.CombinedOutput()
 			if err != nil {
 				t.Fatalf("installer: %v: %s", err, output)

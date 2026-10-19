@@ -1,12 +1,13 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
 )
 
 func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) ([]Attachment, error) {
+	if c.nativeEnabled() {
+		return c.nativeAttachments(accountName, mailboxName, messageID)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -43,14 +44,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var attachments []Attachment
-	if err := json.Unmarshal([]byte(output), &attachments); err != nil {
-		return nil, fmt.Errorf("failed to parse attachments JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "attachments", &attachments); err != nil {
+		return nil, err
 	}
 
 	return attachments, nil
@@ -61,12 +57,18 @@ func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentN
 }
 
 func (c *Client) SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	return c.saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName, index, savePath, jxaMailboxLookupHelper()+jxaMessageByIdHelper(), jxaMailboxLookupExpression(mailboxName))
 }
 
 // Callers preserving a draft supply its account-owned special mailbox lookup;
 // ordinary attachment commands retain their explicit mailbox-name lookup.
 func (c *Client) saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath, lookupHelper, lookupExpression string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const app = Application.currentApplication();
@@ -110,12 +112,5 @@ try {
 }
 `, escapeJSString(mailboxName), index, lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }

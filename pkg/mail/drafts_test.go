@@ -2,9 +2,19 @@ package mail
 
 import "testing"
 
-func TestNormalizeDraftContent(t *testing.T) {
-	got := normalizeDraftContent("\r\nBody\r\n")
-	if got != "Body" {
-		t.Fatalf("normalizeDraftContent = %q, want Body", got)
+func TestOutgoingBodyPreservesDraftWhitespace(t *testing.T) {
+	for _, tc := range []struct {
+		actual string
+		want   bool
+	}{
+		{" Body\r\n", true},
+		{"\n Body\n", true},
+		{"Body\n", false},
+		{" Body \n", false},
+		{" Body\n\n", false},
+	} {
+		if got := outgoingBodyMatches(tc.actual, " Body\n"); got != tc.want {
+			t.Errorf("match(%q) = %t, want %t", tc.actual, got, tc.want)
+		}
 	}
 }

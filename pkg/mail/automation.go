@@ -37,6 +37,7 @@ type AutomationTimeoutError struct {
 	Engine  string
 	Timeout time.Duration
 	Trace   *PhaseTrace
+	Cause   error
 }
 
 func (e *AutomationTimeoutError) Error() string {
@@ -48,6 +49,9 @@ func (e *AutomationTimeoutError) Error() string {
 }
 
 func (e *AutomationTimeoutError) Unwrap() error {
+	if e.Cause != nil {
+		return e.Cause
+	}
 	return context.DeadlineExceeded
 }
 
@@ -200,7 +204,9 @@ func runAutomationUnlocked(parent context.Context, engine string, timeout time.D
 		return automationExecution{}, fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
 	}
 
+	started := time.Now()
 	err := cmd.Wait()
+	recordLegacyProcess(time.Since(started))
 	events, diagnostics := splitPhaseEvents(stderr.String())
 	execution := automationExecution{Output: strings.TrimSpace(out.String()), Events: events}
 	if parentErr := parent.Err(); parentErr != nil {
@@ -422,10 +428,7 @@ function messageById(mbox, messageId) {
 }
 
 func appleScriptBool(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
+	return jxaBool(value)
 }
 
 func appleScriptStringList(values []string) string {
@@ -434,15 +437,4 @@ func appleScriptStringList(values []string) string {
 		escaped = append(escaped, `"`+escapeAppleScriptString(value)+`"`)
 	}
 	return strings.Join(escaped, ", ")
-}
-
-func appleScriptRecipientBlock(kind string, values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(`
-		repeat with addr in {%s}
-			make new %s recipient at end of %s recipients with properties {address:addr}
-		end repeat
-`, appleScriptStringList(values), kind, kind)
 }

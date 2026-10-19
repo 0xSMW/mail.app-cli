@@ -10,7 +10,7 @@ mail-app-cli tui -a "Example Account"    # one account's INBOX
 mail-app-cli tui -a "Example Account" -m "Example Receipts" --message 100001
 ```
 
-A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; bodies and every action go through Mail.app one call at a time, with a spinner in the header while a call is queued.
+A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; complete cached bodies and attachments come from local MIME files. Actions use typed native Apple Events, with a spinner in the header while a call is queued.
 
 ![The terminal client with the mailbox sidebar, the message list across two accounts, and an open message in the reader](docs/images/tui.png)
 
@@ -50,15 +50,32 @@ Actions apply on screen right away and the list refreshes from the index two sec
 curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.sh | sh
 ```
 
-Or with Go 1.25 or newer:
+Or with Go 1.25 or newer and Xcode Command Line Tools:
 
 ```bash
-go install github.com/0xSMW/mail.app-cli/v2/cmd/mail-app-cli@latest
+CGO_ENABLED=1 go install github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli@latest
 ```
 
 The named command installs `mail-app-cli` into `GOBIN` (or `$(go env GOPATH)/bin`). The legacy module-root install remains supported but produces `mail.app-cli` with a dot.
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.
+
+## Native transport in 3.0.0
+
+On macOS with cgo, the CLI sends typed Apple Events directly to Mail. Local lists use an embedded read-only SQLite connection, and complete cached MIME files supply bodies, recipients, and attachment bytes. Mail remains responsible for message changes, composition, and synchronization. Gmail archive uses Mail's Archive action with Accessibility access for the app running the CLI.
+
+Use `--backend legacy` or `MAIL_APP_CLI_BACKEND=legacy` to select the scripting compatibility backend explicitly. `--backend native` requires the compiled native transport; `--backend auto` selects native when available. Builds made with `CGO_ENABLED=0` select legacy automatically. A native operation that fails does not replay through the legacy backend. `doctor` reports the selected backend.
+
+Native replies and forwards are available in the TUI and from `send` or `drafts create`:
+
+```bash
+mail-app-cli send -a "Example Account" -m INBOX --reply-to 100001 \
+  --to recipient@example.test --subject "Re: Example" --body "Complete reply body"
+mail-app-cli drafts create -a "Example Account" -m INBOX --forward-of 100001 \
+  --to recipient@example.test --subject "Fwd: Example" --body-file ./forward.txt
+```
+
+The body, subject, and recipients are the complete outgoing content. Add `--reply-all` with `--reply-to` to create Mail's reply-all relationship. These flags require native mode and an explicit mailbox. Sending a stored draft preserves the existing MIME checks; unsupported rich drafts remain available for editing in Mail.
 
 ## Quick start
 
@@ -398,7 +415,7 @@ Caches live in `~/.cache/mail-app-cli/` (accounts and mailboxes 24h, message lis
 
 ## How it works
 
-Reads come from Mail's Envelope Index, a SQLite file, when it is readable, and from Mail.app through JavaScript for Automation otherwise. Writes and message bodies always go through Mail.app automation, serialized across goroutines and processes because Mail.app's scripting bridge is not safe under concurrent requests. Each automation call is bounded by a timeout and runs in its own process group.
+Native builds read Mail's Envelope Index through embedded read-only SQLite and extract complete cached bodies and attachments from local MIME files. When local data is unavailable, scoped public Apple Events read from Mail. Typed Apple Events also perform composition and changes; Gmail Inbox archive uses Mail's Archive action through public Accessibility APIs. Mail transactions are bounded and serialized across goroutines and processes. The explicit legacy backend uses JavaScript for Automation and AppleScript in bounded process groups.
 
 ## Development
 

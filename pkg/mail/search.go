@@ -89,6 +89,9 @@ func searchTerms(query string) []string {
 }
 
 func (c *Client) SearchMessages(query string, limit int) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchLegacy(query, limit)
+	}
 	limitClause := ""
 	if limit > 0 {
 		limitClause = fmt.Sprintf("if msgCount > %d then set msgCount to %d", limit, limit)
@@ -155,6 +158,22 @@ func (c *Client) SearchMessagesJSONSinceWithOptions(query string, accountName st
 		target := searchTarget{AccountName: accountName, MailboxName: mailboxName}
 		messages, err := c.searchMessagesInSingleMailbox(query, accountName, mailboxName, limit, since)
 		return applySearchOptions(collectSearchResults([]searchTarget{target}, []mailboxSearchResult{{target: target, messages: messages, err: err}}, limit), options)
+	}
+
+	// Reuse one read-only account snapshot for this search's parallel targets.
+	// A named scope must not depend on unrelated account metadata.
+	if c.nativeEnabled() {
+		if accountName != "" {
+			account, err := c.accountByName(accountName)
+			if err != nil {
+				return SearchResult{}, err
+			}
+			searchClient := *c
+			searchClient.readAccountSnapshot = account
+			c = &searchClient
+		} else if _, err := c.GetAccountsJSON(); err != nil {
+			return SearchResult{}, err
+		}
 	}
 
 	targets, err := c.defaultSearchTargets(accountName)
@@ -378,6 +397,9 @@ func accountScopedSearchTargets(mailboxes []Mailbox, accountName string) []searc
 }
 
 func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxName string, limit int, since string) ([]Message, error) {
+	if c.nativeEnabled() {
+		return c.nativeSearchMailbox(query, accountName, mailboxName, limit, since, true)
+	}
 	// Use helper for escaping
 	terms := searchTerms(query)
 	if len(terms) == 0 {
@@ -389,13 +411,9 @@ func (c *Client) searchMessagesInSingleMailboxJXA(query, accountName, mailboxNam
 	}
 	escapedAccount := escapeJSString(accountName)
 	escapedMailbox := escapeJSString(mailboxName)
-	sinceUnix := int64(0)
-	if strings.TrimSpace(since) != "" {
-		parsedSince, _, err := parseSinceUnix(since)
-		if err != nil {
-			return nil, err
-		}
-		sinceUnix = parsedSince
+	sinceUnix, _, err := parseSinceUnix(since)
+	if err != nil {
+		return nil, err
 	}
 	maxToCheck := 500
 	if isArchiveAlias(mailboxName) {

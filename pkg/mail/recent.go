@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -165,11 +166,8 @@ func recordRecentMessage(message Message, action string, terms []string) error {
 		Deleted:         message.Deleted,
 		MessageSize:     message.MessageSize,
 		SearchTerms:     normalizeRecentTerms(terms),
-		LastAction:      strings.TrimSpace(action),
+		LastAction:      cmp.Or(strings.TrimSpace(action), "seen"),
 		LastSeenAt:      now,
-	}
-	if entry.LastAction == "" {
-		entry.LastAction = "seen"
 	}
 
 	replaced := false
@@ -177,24 +175,12 @@ func recordRecentMessage(message Message, action string, terms []string) error {
 		if recentMessageKey(messages[i].Account, messages[i].ID) != key {
 			continue
 		}
-		if entry.Mailbox == "" {
-			entry.Mailbox = messages[i].Mailbox
-		}
-		if messages[i].OriginalMailbox != "" {
-			entry.OriginalMailbox = messages[i].OriginalMailbox
-		}
-		if entry.Subject == "" {
-			entry.Subject = messages[i].Subject
-		}
-		if entry.Sender == "" {
-			entry.Sender = messages[i].Sender
-		}
-		if entry.DateReceived == "" {
-			entry.DateReceived = messages[i].DateReceived
-		}
-		if entry.DateSent == "" {
-			entry.DateSent = messages[i].DateSent
-		}
+		entry.Mailbox = cmp.Or(entry.Mailbox, messages[i].Mailbox)
+		entry.OriginalMailbox = cmp.Or(messages[i].OriginalMailbox, entry.OriginalMailbox)
+		entry.Subject = cmp.Or(entry.Subject, messages[i].Subject)
+		entry.Sender = cmp.Or(entry.Sender, messages[i].Sender)
+		entry.DateReceived = cmp.Or(entry.DateReceived, messages[i].DateReceived)
+		entry.DateSent = cmp.Or(entry.DateSent, messages[i].DateSent)
 		if !hasEnvelope && !entry.Read {
 			entry.Read = messages[i].Read
 		}
@@ -204,9 +190,7 @@ func recordRecentMessage(message Message, action string, terms []string) error {
 		if !hasEnvelope && !entry.Deleted {
 			entry.Deleted = messages[i].Deleted
 		}
-		if entry.MessageSize == 0 {
-			entry.MessageSize = messages[i].MessageSize
-		}
+		entry.MessageSize = cmp.Or(entry.MessageSize, messages[i].MessageSize)
 		entry.SearchTerms = mergeRecentTerms(messages[i].SearchTerms, entry.SearchTerms)
 		messages[i] = entry
 		replaced = true
@@ -237,6 +221,10 @@ func (c *Client) RecordRecentEnvelope(accountName, mailboxName, messageID, actio
 }
 
 func (c *Client) getMessageEnvelopeJXA(accountName, mailboxName, messageID string) (*Message, error) {
+	if c.nativeEnabled() {
+		message, _, err := c.nativeMessageDetails(accountName, mailboxName, messageID, mailSearchTimeout(), false, true)
+		return message, err
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 let result = null;
@@ -250,38 +238,22 @@ try {
 	const msg = messageById(mbox, '%s');
 	if (msg !== null) {
 		result = {
-			id: String(msg.id()),
-			subject: msg.subject() || '',
-			sender: msg.sender() || '',
-			dateReceived: (msg.dateReceived() || new Date()).toISOString(),
-			dateSent: (msg.dateSent() || new Date()).toISOString(),
-			read: msg.readStatus(),
-			flagged: msg.flaggedStatus(),
-			messageSize: msg.messageSize(),
-			mailbox: mbox.name(),
-			account: acc.name()
+			%s
 		};
 	}
 } catch (e) {}
 
 JSON.stringify(result);
-`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
+`, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mbox.name()", Account: "acc.name()"}.fields())
 
-	output, err := c.runJXAWithTimeout(script, mailSearchTimeout())
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(output) == "null" {
-		return nil, nil
-	}
-	var message Message
-	if err := json.Unmarshal([]byte(output), &message); err != nil {
-		return nil, fmt.Errorf("failed to parse message envelope JSON: %w", err)
+	message, err := c.runJXAMessage(script, mailSearchTimeout(), "message envelope")
+	if err != nil || message == nil {
+		return message, err
 	}
 	if message.ID == "" {
 		return nil, nil
 	}
-	return &message, nil
+	return message, nil
 }
 
 func UpdateRecentMessageLocation(account, messageID, mailbox, action string) error {

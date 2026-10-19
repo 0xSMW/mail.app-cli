@@ -38,6 +38,23 @@ func (c *Client) archiveUsesNative(account, source, destination string) (bool, e
 	if cached {
 		return useNative, nil
 	}
+	if c.nativeEnabled() {
+		var err error
+		err = c.withNativeAutomation(defaultAutomationTimeout, func(n *nativeMail) error {
+			useNative, err = n.gmailArchiveAccount(account)
+			return err
+		})
+		if err != nil {
+			return false, err
+		}
+		c.shared.accountsMu.Lock()
+		if c.shared.nativeArchiveAccounts == nil {
+			c.shared.nativeArchiveAccounts = make(map[string]bool)
+		}
+		c.shared.nativeArchiveAccounts[account] = useNative
+		c.shared.accountsMu.Unlock()
+		return useNative, nil
+	}
 	quoted, _ := json.Marshal(account)
 	output, err := c.runJXA("// mail-app-cli-native-archive-account\nconst account = Application('Mail').accounts.byName(" + string(quoted) + ");\n" + nativeArchiveGmailHelper + "JSON.stringify(isGmailArchiveAccount(account));")
 	if err != nil {
@@ -66,6 +83,12 @@ function isGmailArchiveAccount(account) {
 // Check permission before a batch performs its separately requested mark-read.
 // The action repeats this check and validates the actual Mail controls.
 func (c *Client) preflightNativeArchive() error {
+	if c.nativeEnabled() {
+		if err := c.Done(); err != nil {
+			return err
+		}
+		return c.archiveAX().Trusted()
+	}
 	output, err := c.runJXA(`ObjC.import('ApplicationServices');if (!$.AXIsProcessTrusted()) throw Error('Native Gmail archive requires Accessibility access for the app running mail-app-cli');'ready';`)
 	if err != nil {
 		return err
@@ -84,6 +107,9 @@ func (c *Client) archiveInboxThroughMail(account, messageID string) error {
 }
 
 func (c *Client) runNativeArchive(account, messageID string, apply bool) (err error) {
+	if c.nativeEnabled() {
+		return c.runNativeArchiveDirect(account, messageID, apply)
+	}
 	id, parseErr := strconv.ParseUint(messageID, 10, 53)
 	if parseErr != nil || id == 0 {
 		return fmt.Errorf("invalid native archive message ID: %q", messageID)

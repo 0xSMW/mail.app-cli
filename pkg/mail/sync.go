@@ -7,6 +7,9 @@ import "fmt"
 // Mail returns after accepting the requests; this does not prove that the
 // server has finished synchronizing.
 func (c *Client) SyncAccount(accountName string) error {
+	if c.nativeEnabled() {
+		return c.nativeSync(accountName, false)
+	}
 	script := fmt.Sprintf(`
 	tell application "Mail"
 		set targetAccount to missing value
@@ -31,6 +34,9 @@ func (c *Client) SyncAccount(accountName string) error {
 // each enabled receiving account. A successful return means the requests were
 // accepted.
 func (c *Client) SyncAllAccounts() error {
+	if c.nativeEnabled() {
+		return c.nativeSync("", true)
+	}
 	script := fmt.Sprintf(`
 	tell application "Mail"
 		repeat with acc in accounts

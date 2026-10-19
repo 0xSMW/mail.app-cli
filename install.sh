@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-module="github.com/0xSMW/mail.app-cli/v2/cmd/mail-app-cli"
+module="github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli"
 version="${MAIL_APP_CLI_VERSION:-latest}"
 binary="mail-app-cli"
 
@@ -16,7 +16,7 @@ if ! command -v go >/dev/null 2>&1; then
 fi
 
 echo "Installing ${module}@${version}..."
-go install "${module}@${version}"
+CGO_ENABLED=1 go install "${module}@${version}"
 
 gobin="$(go env GOBIN)"
 if [ -z "$gobin" ]; then

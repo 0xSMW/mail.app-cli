@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
 type doctorResult struct {
+	Backend                   string `json:"backend,omitempty"`
 	CLIVersion                string `json:"cliVersion"`
 	CurrentBinaryAvailable    bool   `json:"currentBinaryAvailable"`
 	CurrentBinary             string `json:"currentBinary,omitempty"`
@@ -46,6 +47,9 @@ type doctorClient interface {
 
 func diagnose(client doctorClient, cliVersion string, executable func() (string, error)) doctorResult {
 	result := doctorResult{CLIVersion: cliVersion}
+	if selected, ok := client.(interface{ Backend() string }); ok {
+		result.Backend = selected.Backend()
+	}
 	if binaryPath, err := executable(); err != nil {
 		result.CurrentBinaryError = err.Error()
 	} else if info, err := os.Stat(binaryPath); err != nil {
@@ -111,6 +115,7 @@ func renderDoctor(r doctorResult) func(*output.Printer) {
 			return []string{label, state, output.Truncate(detail, 80)}
 		}
 		rows := [][]string{
+			{"backend", "", r.Backend},
 			check("binary", r.CurrentBinaryAvailable, firstNonEmpty(r.CurrentBinaryError, r.CurrentBinary)),
 			check("Mail.app bundle", r.MailBridgeAvailable, r.MailBridgeError),
 			check("Mail.app process", r.MailRunning != nil && *r.MailRunning, mailProcessDetail(r)),
@@ -168,19 +173,21 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check Mail.app access, permissions, and index availability",
-	Annotations: map[string]string{
-		annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
-	},
-	RunE: func(cmd *cobra.Command, args []string) error {
-		result := diagnose(mailClient, version, os.Executable)
-		summary := "healthy"
-		if !result.Healthy {
-			summary = "not healthy"
-		}
-		failure := doctorFailure(result)
-		return writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
-	},
+func (a *application) buildDoctorCommands() {
+	a.doctorCmd = &cobra.Command{
+		Use:   "doctor",
+		Short: "Check Mail.app access, permissions, and index availability",
+		Annotations: map[string]string{
+			annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
+		},
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result := diagnose(a.mailClient, version, os.Executable)
+			summary := "healthy"
+			if !result.Healthy {
+				summary = "not healthy"
+			}
+			failure := doctorFailure(result)
+			return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
+		},
+	}
 }

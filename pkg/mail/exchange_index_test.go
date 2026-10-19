@@ -2,6 +2,8 @@ package mail
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -15,14 +17,14 @@ func TestIndexMailboxSchemesAndSnapshotParity(t *testing.T) {
 			{"INBOX root queried as Inbox", "Inbox", "(1,'%s://abc/Inbox'),(2,'%s://ABC/INBOX')", 2},
 			{"exact before nested", "INBOX", "(1,'%s://ABC/Parent/INBOX'),(2,'%s://ABC/INBOX')", 2},
 			{"nested", "Projects", "(1,'%s://ABC/Parent/Projects')", 1},
-			{"localized", "受信トレイ", "(1,'%s://ABC/受信トレイ')", 1},
+			{"localized", "受信トレイ", "(1,'%s://ABC/%%E5%%8F%%97%%E4%%BF%%A1%%E3%%83%%88%%E3%%83%%AC%%E3%%82%%A4')", 1},
 			{"Gmail alias", "Archive", "(1,'%s://ABC/Archive'),(2,'%s://ABC/%%5BGmail%%5D/All%%20Mail')", 2},
 			{"literal Archive before broad fallback", "Archive", "(1,'%s://ABC/Other/All%%20Mail'),(2,'%s://ABC/Archive')", 2},
 			{"nested Archive before broad fallback", "Archive", "(1,'%s://ABC/Other/All%%20Mail'),(2,'%s://ABC/Parent/Archive')", 2},
 			{"nested All Mail fallback", "All Mail", "(1,'%s://ABC/Parent/All%%20Mail')", 1},
 			{"space percent is literal", "Team Box", "(1,'%s://ABC/Parent/TeamX20Box'),(2,'%s://ABC/Parent/Team%%20Box')", 2},
 			{"underscore is literal", "A_B", "(1,'%s://ABC/Parent/AxB'),(2,'%s://ABC/Parent/A_B')", 2},
-			{"backslash is literal", `A\B`, "(1,'%s://ABC/Parent/AB'),(2,'%s://ABC/Parent/A\\B')", 2},
+			{"backslash is literal", `A\B`, "(1,'%s://ABC/Parent/AB'),(2,'%s://ABC/Parent/A%%5CB')", 2},
 			{"same name other account", "INBOX", "(1,'%s://DEF/INBOX'),(2,'%s://ABCD/INBOX'),(3,'%s://ABC/INBOX')", 3},
 		} {
 			t.Run(scheme+"/"+tc.name, func(t *testing.T) {
@@ -36,7 +38,7 @@ func TestIndexMailboxSchemesAndSnapshotParity(t *testing.T) {
 				rows := fmt.Sprintf(tc.rows, schemes...)
 				data := "insert into mailboxes(rowid,url) values " + rows + ";"
 				data += fmt.Sprintf("insert into messages(rowid,mailbox,subject,sender,date_sent,size,read,deleted) values (101,%d,1,1,1787961600,42,1,0);", tc.want)
-				client, _ := snapshotSQLiteFixture(t, data)
+				client, _ := exchangeSQLiteFixture(t, data)
 				mailbox, ok, err := client.resolveIndexMailbox("Work", tc.mailbox)
 				if err != nil || !ok || mailbox.ID != tc.want {
 					t.Fatalf("resolved %+v, %v, %v; want %d", mailbox, ok, err, tc.want)
@@ -52,7 +54,7 @@ func TestIndexMailboxSchemesAndSnapshotParity(t *testing.T) {
 }
 
 func TestIndexMailboxAccountBoundariesAndMixedSchemes(t *testing.T) {
-	client, _ := snapshotSQLiteFixture(t, `
+	client, _ := exchangeSQLiteFixture(t, `
 insert into mailboxes(rowid,url) values
  (1,'ews://A_%/INBOX'), (2,'imap://A_%/Parent/Projects'),
  (3,'ews://Axx/INBOX'), (4,'ews://A_%more/INBOX'), (5,'ews://a_%/INBOX'),
@@ -80,7 +82,7 @@ insert into mailboxes(rowid,url) values
 }
 
 func TestIndexMailboxCustomRootCaseRemainsExact(t *testing.T) {
-	client, _ := snapshotSQLiteFixture(t, `insert into mailboxes(rowid,url) values (1,'ews://ABC/projects');`)
+	client, _ := exchangeSQLiteFixture(t, `insert into mailboxes(rowid,url) values (1,'ews://ABC/projects');`)
 	box, ok, err := client.resolveIndexMailbox("Work", "Projects")
 	if err != nil || ok || box != nil {
 		t.Fatalf("custom root case mismatch must remain absent: %+v, %v, %v", box, ok, err)
@@ -92,7 +94,7 @@ func TestIndexMailboxCustomRootCaseRemainsExact(t *testing.T) {
 }
 
 func TestIndexMailboxInboxAliasPreservesListedNameAndCounts(t *testing.T) {
-	client, _ := snapshotSQLiteFixture(t, `insert into mailboxes(rowid,url) values (1,'ews://ABC/Inbox');`)
+	client, _ := exchangeSQLiteFixture(t, `insert into mailboxes(rowid,url) values (1,'ews://ABC/Inbox');`)
 	mailboxes, ok, err := client.getMailboxesFromIndex(Account{ID: "ABC", Name: "Work"})
 	if err != nil || !ok || len(mailboxes) != 1 {
 		t.Fatalf("list Inbox: %+v, %v, %v", mailboxes, ok, err)
@@ -100,4 +102,14 @@ func TestIndexMailboxInboxAliasPreservesListedNameAndCounts(t *testing.T) {
 	if mailbox := mailboxes[0]; mailbox.Name != "Inbox" || mailbox.TotalCount != 0 || mailbox.UnreadCount != 0 {
 		t.Fatalf("Inbox alias must preserve indexed display name and counts: %+v", mailbox)
 	}
+}
+
+func exchangeSQLiteFixture(t *testing.T, data string) (*Client, string) {
+	t.Helper()
+	c, log := snapshotSQLiteFixture(t, data)
+	out, err := exec.Command(os.Getenv("SNAPSHOT_SQLITE_BINARY"), os.Getenv("SNAPSHOT_SQLITE_DATABASE"), "alter table mailboxes add column total_count integer default 0; alter table mailboxes add column unread_count integer default 0;").CombinedOutput()
+	if err != nil {
+		t.Fatalf("Exchange fixture counts: %v: %s", err, out)
+	}
+	return c, log
 }

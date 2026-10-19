@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
+	"github.com/0xSMW/mail.app-cli/v3/internal/mailax"
 )
 
 // clientState is shared by every Client derived from the same NewClient call,
@@ -19,15 +22,20 @@ type clientState struct {
 	warn                     func(string)
 	bodyFromMail             bool
 	bodyAlternatives         bool
+	backend                  string
+	nativeSender             appleevents.Sender
+	nativeAX                 mailax.Driver
 }
 
-// Client talks to Mail.app through osascript and to Mail's Envelope Index
-// through sqlite3. Every subprocess it starts is bound to its context, so a
-// caller that cancels stops waiting on a queued automation call.
+// Client reads the local index and MIME and sends changes through the selected
+// Mail transport. Contexts bound local queries, queued automation and subprocesses.
 type Client struct {
 	ctx     context.Context
 	shared  *clientState
 	session *jxaSession
+	// Only a local cross-mailbox search copy sets this immutable named-account
+	// snapshot. It never marks the shared global account cache as complete.
+	readAccountSnapshot *Account
 }
 
 func NewClient() *Client {
@@ -40,7 +48,7 @@ func (c *Client) WithContext(ctx context.Context) *Client {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Client{ctx: ctx, shared: c.shared}
+	return &Client{ctx: ctx, shared: c.shared, readAccountSnapshot: c.readAccountSnapshot}
 }
 
 // Context is the context the client's subprocesses run under.

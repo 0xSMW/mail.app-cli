@@ -3,8 +3,6 @@ package mail
 import (
 	"fmt"
 	"strings"
-
-	"golang.org/x/net/html"
 )
 
 // BodyDiagnostics describes the local MIME-to-text extraction, not whether a
@@ -75,42 +73,6 @@ func (d *BodyDiagnostics) finish() {
 		chosen, exists := selected[alternative.Group]
 		if exists && !alternative.Selected && alternative.Text != "" && alternative.Text != chosen {
 			d.Warnings = append(d.Warnings, fmt.Sprintf("MIME alternative %s contains different extracted text from selected rendering in group %s; inspect alternatives for its text.", alternative.Part, alternative.Group))
-		}
-	}
-}
-
-// inspectHTML inventories markup without changing the extraction or loading
-// referenced resources. Alt text is evidence for callers, never substituted
-// into the body. Counts cover HTML from all visited renderings, including
-// hidden markup, rather than attempting to guess what an image communicates.
-func (d *BodyDiagnostics) inspectHTML(source string) {
-	tokenizer := html.NewTokenizer(strings.NewReader(source))
-	for {
-		switch tokenizer.Next() {
-		case html.ErrorToken:
-			return
-		case html.StartTagToken, html.SelfClosingTagToken:
-			name, _ := tokenizer.TagName()
-			tag := string(name)
-			if tag == "img" {
-				d.HTMLImageCount++
-			}
-			switch tag {
-			case "svg", "canvas", "video", "audio", "object", "embed", "iframe":
-				d.RichContentElements++
-			}
-			for {
-				key, value, more := tokenizer.TagAttr()
-				if tag == "img" && string(key) == "alt" && strings.TrimSpace(string(value)) != "" {
-					d.HTMLImageAltTexts = append(d.HTMLImageAltTexts, string(value))
-				}
-				if string(key) == "style" && htmlStyleValue(string(value), "background-image") != "" && htmlStyleValue(string(value), "background-image") != "none" {
-					d.RichContentElements++
-				}
-				if !more {
-					break
-				}
-			}
 		}
 	}
 }
