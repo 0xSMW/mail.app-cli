@@ -179,13 +179,19 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 		t.Fatal("Node is required for production outgoing tests")
 	}
 	tests := []struct {
-		name        string
-		config      map[string]any
-		attachments []string
-		submitted   bool
-		closes      int
-		ok          bool
+		name           string
+		config         map[string]any
+		attachments    []string
+		submitted      bool
+		closes         int
+		ok             bool
+		beforeDispatch bool
 	}{
+		{name: "missing filename getter uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissing": true, "intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "missing previously readable filename retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingAfterSend": true}, submitted: true},
+		{name: "truthy ObjC nil wrapper fails closed", config: map[string]any{"snapshotNil": true}, beforeDispatch: true, closes: 1},
+		{name: "required count missing before dispatch", config: map[string]any{"snapshotCountMissing": true}, beforeDispatch: true, closes: 1},
+		{name: "required count missing after ack", config: map[string]any{"snapshotCountMissing": true, "failAfterSend": true}, submitted: true},
 		{name: "unchanged owned composition", submitted: true, closes: 1, ok: true},
 		{name: "unchanged attachments", attachments: []string{"/tmp/report.pdf"}, submitted: true, closes: 1, ok: true},
 		{name: "subject changed", config: map[string]any{"afterSend": map[string]any{"subject": "edited"}}, submitted: true},
@@ -234,7 +240,11 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 			if err := json.Unmarshal(raw, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != 1 || got.Deleted != tt.closes {
+			expectedSent := 1
+			if tt.beforeDispatch {
+				expectedSent = 0
+			}
+			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != expectedSent || got.Deleted != tt.closes {
 				t.Fatalf("execution=%s", raw)
 			}
 			if tt.submitted && !tt.ok {
@@ -242,10 +252,18 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 					t.Fatalf("lost authoritative ack=%s", raw)
 				}
 			}
+			if tt.name == "required count missing before dispatch" || tt.name == "required count missing after ack" {
+				if !strings.Contains(got.Response.Error, "AppleScript error -1728") {
+					t.Fatalf("lost nil-wrapper error metadata: %s", raw)
+				}
+			}
+			if tt.beforeDispatch && (got.Response.Uncertain || got.Response.Phase != "send_fingerprint") {
+				t.Fatalf("pre-dispatch count failure not safe: %s", raw)
+			}
 			if tt.name == "wrong availability descriptor retains" && (!strings.Contains(got.Response.Error, `available="long"`) || !strings.Contains(got.Response.Error, "1819242087")) {
 				t.Fatalf("missing descriptor diagnostics: %s", raw)
 			}
-			if !tt.submitted && !got.Response.Uncertain {
+			if !tt.submitted && !tt.beforeDispatch && !got.Response.Uncertain {
 				t.Fatalf("lost send uncertainty=%s", raw)
 			}
 		})
