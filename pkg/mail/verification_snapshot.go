@@ -57,7 +57,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		(select ID from %s) as MailboxID,
 		(select URL from %s) as MailboxURL,
 		(select json_group_array(json_object(
-			'ID', m.ROWID, 'Subject', coalesce(s.subject, ''),
+			'ID', m.ROWID, 'Subject', `+indexSubjectExpression+`,
 			'Sender', case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end,
 			'DateSent', coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), ''),
 			'MessageSize', m.size, 'Read', m.read))
