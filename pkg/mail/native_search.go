@@ -53,8 +53,17 @@ func (n *nativeMail) searchMailbox(predicate appleevents.Value, account, mailbox
 	if err != nil {
 		return nil, err
 	}
-	v, err := n.get(appleevents.ByTest("mssg", predicate, box))
-	if err != nil {
+	// Only the potentially long-running search query uses its configured
+	// timeout. Resolution, metadata reads, and mutation events keep defaults;
+	// the operation context still caps the complete search.
+	var v appleevents.Value
+	if err := n.phase("search_mailbox", func() error {
+		var err error
+		v, err = n.eventWithTimeout("core", "getd", map[string]appleevents.Value{
+			"----": appleevents.ByTest("mssg", predicate, box),
+		}, mailSearchTimeout())
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	if v.Kind != "list" {
