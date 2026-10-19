@@ -77,6 +77,24 @@ mail-app-cli drafts create -a "Example Account" -m INBOX --forward-of 100001 \
 
 The body, subject, and recipients are the complete outgoing content. Add `--reply-all` with `--reply-to` to create Mail's reply-all relationship. These flags require native mode and an explicit mailbox. Sending a stored draft preserves the existing MIME checks; unsupported rich drafts remain available for editing in Mail.
 
+## Exchange accounts in 3.0.0
+
+Use an Exchange account already connected to Mail.app with the same commands as other accounts:
+
+```bash
+mail-app-cli search "quarterly report" -a "Work Exchange" --limit 50
+mail-app-cli attachments list 100001 -a "Work Exchange" -m Inbox
+mail-app-cli archive 100001 -a "Work Exchange" -m Inbox --verify
+mail-app-cli drafts create -a "Work Exchange" --to colleague@example.test \
+  --subject "Review" --body-file review.txt --attach report.pdf
+```
+
+Search includes Exchange Inbox and other non-empty mailboxes, recognizes Mail's Exchange mailbox URLs, and treats `Inbox` and `INBOX` consistently. Incomplete mailbox searches return an error unless `--allow-partial` is requested; partial results identify the mailboxes that could not be read.
+
+Moves and archive verification follow the RFC Message-ID when Exchange changes the local ID or stored size. The account, source and destination, sender, subject, and sent time remain checked; ambiguous matches stay unverified. Attachment lookup accepts canonically equivalent Unicode filenames. Saved draft attachment reads use the selected account's special Drafts mailbox even before its local index catches up.
+
+Sending and draft updates accept recognized plain content stored inside Mail's generated HTML wrapper when text and attachment preservation can be proved. Rich formatting, unsupported inline content, signing, encryption, and reply-header reconstruction remain guarded; use Mail to send drafts outside the supported forms. Mail must acknowledge submission before the CLI closes its unchanged outgoing composition or removes the unchanged stored draft. An uncertain submission is never automatically retried.
+
 ## Quick start
 
 ```bash
