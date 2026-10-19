@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -295,7 +296,7 @@ func TestNativeDescriptorPlainDraftSendFunctionalChain(t *testing.T) {
 	if c.Backend() != BackendNative || result.DraftID != "15" || result.Account != "Personal" || result.AccountID != "account-id" || result.Sender != "alias@example.com" || result.Status != "submitted" || !result.Submitted || !result.Sent || result.Uncertain || result.CleanupPending {
 		t.Fatalf("native draft-send receipt %+v", result)
 	}
-	if f.sendCalls != 1 || f.originalDeletes != 1 || !f.draft.removed || f.outgoing.closeCalls != 0 {
+	if f.sendCalls != 1 || f.originalDeletes != 1 || !f.draft.removed || f.outgoing.closeCalls != 1 {
 		t.Fatalf("dispatch/cleanup counts: sends=%d originalDeletes=%d removed=%t outgoingCloses=%d", f.sendCalls, f.originalDeletes, f.draft.removed, f.outgoing.closeCalls)
 	}
 	if f.sourceReadsAtSend != 2 || f.sourceReadsAtDelete != 3 {
@@ -320,6 +321,12 @@ func TestNativeDescriptorPlainDraftSendFunctionalChain(t *testing.T) {
 	if sendIndex < 0 || deleteIndex <= sendIndex || readsAfterDelete == 0 {
 		t.Fatalf("cleanup ordering/removal verification missing: send=%d delete=%d removalReads=%d", sendIndex, deleteIndex, readsAfterDelete)
 	}
+	for _, event := range f.events {
+		if event.ID == "clos" && (!reflect.DeepEqual(event.Params["----"], f.outgoing.outgoing) || event.Params["savo"].Code != "no  ") {
+			t.Fatalf("cleanup escaped owned outgoing composition: %+v", event)
+		}
+	}
+
 }
 func TestNativeDescriptorPlainDraftLostSendReplyNeverReplaysOrDeletesOriginal(t *testing.T) {
 	f := newNativePlainDraftSendFixture()
@@ -344,7 +351,13 @@ func TestNativeDescriptorPlainDraftChangedAfterSendRetainsOriginalWithoutResendi
 	if !errors.As(e, &mutation) || mutation.Phase != "cleanup_original" || !mutation.Submitted || !mutation.Attempted || mutation.Uncertain || result == nil || !result.Submitted || !result.Sent || !result.CleanupPending || result.Status != "submitted_cleanup_pending" {
 		t.Fatalf("changed original receipt=%+v error=%v", result, e)
 	}
-	if f.sendCalls != 1 || f.originalDeletes != 0 || f.draft.removed || !f.draft.changed || f.outgoing.closeCalls != 0 || f.sourceReads != 3 {
+	if f.sendCalls != 1 || f.originalDeletes != 0 || f.draft.removed || !f.draft.changed || f.outgoing.closeCalls != 1 || f.sourceReads != 3 {
 		t.Fatalf("changed original lost or resent: sends=%d deletes=%d removed=%t changed=%t closes=%d sourceReads=%d", f.sendCalls, f.originalDeletes, f.draft.removed, f.draft.changed, f.outgoing.closeCalls, f.sourceReads)
 	}
+	for _, event := range f.events {
+		if event.ID == "clos" && (!reflect.DeepEqual(event.Params["----"], f.outgoing.outgoing) || event.Params["savo"].Code != "no  ") {
+			t.Fatalf("cleanup escaped owned outgoing composition: %+v", event)
+		}
+	}
+
 }
