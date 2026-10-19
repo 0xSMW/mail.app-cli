@@ -25,6 +25,7 @@ type nativeOutgoingRun struct {
 	before              map[string]bool
 	body, step, cleanup string
 	attempted, saved    bool
+	attachmentProofs    []outgoingAttachmentProof
 }
 
 func (r *nativeOutgoingRun) cleanupOwned(err error) {
