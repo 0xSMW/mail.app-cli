@@ -291,66 +291,203 @@ func (r *nativeOutgoingRun) dispatch() error {
 	})
 }
 
+func (r *nativeOutgoingRun) savedDraftCandidate(strictReadiness bool) (*Message, error) {
+	// Read IDs together so polling never reads every preexisting draft.
+	// Only new account-scoped IDs receive the strict fingerprint read.
+	v, e := r.n.get(ae.Property("ID  ", ae.All("mssg", r.box)))
+	if e != nil {
+		return nil, e
+	}
+	ids, e := nativeList(v, "saved draft IDs")
+	if e != nil {
+		return nil, e
+	}
+	var candidates []*Message
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id.Kind != "int" || id.Number <= 0 {
+			return nil, fmt.Errorf("saved draft ID unavailable")
+		}
+		key := outgoingID(id)
+		if seen[key] {
+			return nil, fmt.Errorf("saved draft ID is ambiguous")
+		}
+		seen[key] = true
+		if r.before[key] {
+			continue
+		}
+		ref := ae.ByID("mssg", id, r.box)
+		m, e := r.n.outgoingSnapshotMessage(ref, r.input.Account, r.box)
+		if e != nil {
+			if nativeMissing(e) {
+				if strictReadiness {
+					return nil, nil
+				}
+				continue
+			}
+			var inactive *NotFoundError
+			if strictReadiness && errors.As(e, &inactive) && inactive.Kind == "draft" {
+				continue
+			}
+			return nil, e
+		}
+		if m.ID != key {
+			return nil, fmt.Errorf("saved draft ID readback mismatch")
+		}
+		names, e := r.n.outgoingAttachmentNames(ref, true)
+		if e != nil {
+			return nil, e
+		}
+		sender, e := draftSenderAddress(m.Sender)
+		if e != nil {
+			continue
+		}
+		if m.Subject == r.input.Subject && r.savedDraftBodyMatches(m.Content) && strings.EqualFold(sender, r.result.Sender) && outgoingEqual(m.ToRecipients, r.input.To) && outgoingEqual(m.CcRecipients, r.input.Cc) && outgoingEqual(m.BccRecipients, r.input.Bcc) && outgoingEqual(names, outgoingExpectedNames(r.input.Attachments)) {
+			candidates = append(candidates, m)
+		}
+	}
+	if len(candidates) > 1 {
+		return nil, fmt.Errorf("saved draft identity is ambiguous")
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	return nil, nil
+}
+
 func (r *nativeOutgoingRun) verifySavedDraft() error {
 	for i := 0; i < 80; i++ {
-		// Read IDs together so polling never reads every preexisting draft.
-		// Only new account-scoped IDs receive the strict fingerprint read.
-		v, e := r.n.get(ae.Property("ID  ", ae.All("mssg", r.box)))
-		if e != nil {
-			return e
+		candidate, err := r.savedDraftCandidate(false)
+		if err != nil {
+			return err
 		}
-		ids, e := nativeList(v, "saved draft IDs")
-		if e != nil {
-			return e
-		}
-		var candidates []*Message
-		seen := map[string]bool{}
-		for _, id := range ids {
-			if id.Kind != "int" || id.Number <= 0 {
-				return fmt.Errorf("saved draft ID unavailable")
-			}
-			key := outgoingID(id)
-			if seen[key] {
-				return fmt.Errorf("saved draft ID is ambiguous")
-			}
-			seen[key] = true
-			if r.before[key] {
-				continue
-			}
-			ref := ae.ByID("mssg", id, r.box)
-			m, e := r.n.outgoingSnapshotMessage(ref, r.input.Account, r.box)
-			if e != nil {
-				if nativeMissing(e) {
-					continue
-				}
-				return e
-			}
-			if m.ID != key {
-				return fmt.Errorf("saved draft ID readback mismatch")
-			}
-			names, e := r.n.outgoingAttachmentNames(ref, true)
-			if e != nil {
-				return e
-			}
-			sender, e := draftSenderAddress(m.Sender)
-			if e != nil {
-				continue
-			}
-			if m.Subject == r.input.Subject && r.savedDraftBodyMatches(m.Content) && strings.EqualFold(sender, r.result.Sender) && outgoingEqual(m.ToRecipients, r.input.To) && outgoingEqual(m.CcRecipients, r.input.Cc) && outgoingEqual(m.BccRecipients, r.input.Bcc) && outgoingEqual(names, outgoingExpectedNames(r.input.Attachments)) {
-				candidates = append(candidates, m)
-			}
-		}
-		if len(candidates) > 1 {
-			return fmt.Errorf("saved draft identity is ambiguous")
-		}
-		if len(candidates) == 1 {
-			r.result.Draft = candidates[0]
+		if candidate != nil {
+			r.result.Draft = candidate
 			r.result.Status = "saved"
 			return nil
 		}
-		if e = r.n.outgoingPause(); e != nil {
-			return e
+		if err = r.n.outgoingPause(); err != nil {
+			return err
 		}
 	}
 	return fmt.Errorf("saved draft could not be verified in target account Drafts")
+}
+
+// Exchange can replace a newly saved draft's local ID during synchronization.
+// Reconcile against the original pre-save baseline, never by subject alone,
+// and never repeat the save or close that created the stored draft.
+func (r *nativeOutgoingRun) freshSavedDraftCandidate() (*Message, error) {
+	account, err := r.n.account(r.input.Account)
+	if err != nil {
+		return nil, err
+	}
+	accountID, err := r.n.stringProperty("ID  ", account)
+	if err != nil {
+		return nil, err
+	}
+	if accountID != r.result.AccountID {
+		return nil, fmt.Errorf("saved draft account identity changed")
+	}
+	box, err := r.n.outgoingDraftMailbox(account)
+	if err != nil {
+		return nil, err
+	}
+	r.box = box
+	return r.savedDraftCandidate(true)
+}
+
+func savedDraftReadinessTransient(err error) bool {
+	if nativeMissing(err) {
+		return true
+	}
+	var missing *NotFoundError
+	return errors.As(err, &missing) && missing.Kind == "message"
+}
+
+func (r *nativeOutgoingRun) verifySavedDraftAttachmentReadiness() error {
+	var pending error
+	for i := 0; i < 80; i++ {
+		err := r.verifySavedDraftAttachmentObservation()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errSavedDraftAttachmentPending) && !savedDraftReadinessTransient(err) {
+			return err
+		}
+		pending = err
+		if i < 79 {
+			if err := r.n.outgoingPause(); err != nil {
+				return err
+			}
+		}
+	}
+	return fmt.Errorf("saved draft attachment readiness could not be verified: %w", pending)
+}
+
+var errSavedDraftAttachmentPending = errors.New("saved draft attachment identity not stable")
+
+// Each observation uses only getters and local hashing. Both snapshots must
+// identify the same unique active account-owned draft, with unchanged MIME.
+func (r *nativeOutgoingRun) verifySavedDraftAttachmentObservation() error {
+	before, err := r.freshSavedDraftCandidate()
+	if err != nil {
+		return err
+	}
+	if before == nil {
+		return errSavedDraftAttachmentPending
+	}
+	r.result.Draft = before
+	ref, err := r.n.scopedDraft(before.Account, before.Mailbox, before.ID)
+	if err != nil {
+		return err
+	}
+	source, err := r.n.stringProperty("raso", ref)
+	if err != nil {
+		return err
+	}
+	if err = proveOutgoingMIMEAttachments(r.n.ctx, source, r.attachmentProofs); err != nil {
+		return err
+	}
+	after, err := r.freshSavedDraftCandidate()
+	if err != nil {
+		return err
+	}
+	if after == nil || after.ID != before.ID {
+		return errSavedDraftAttachmentPending
+	}
+	if !reflect.DeepEqual(before, after) {
+		return fmt.Errorf("saved draft changed during attachment verification")
+	}
+	current, err := r.n.scopedDraft(after.Account, after.Mailbox, after.ID)
+	if err != nil {
+		return err
+	}
+	finalSource, err := r.n.stringProperty("raso", current)
+	if err != nil {
+		return err
+	}
+	if finalSource != source {
+		return fmt.Errorf("saved draft source changed during attachment verification")
+	}
+	final, err := r.freshSavedDraftCandidate()
+	if err != nil {
+		return err
+	}
+	if final == nil || final.ID != after.ID {
+		return errSavedDraftAttachmentPending
+	}
+	if !reflect.DeepEqual(final, after) {
+		return fmt.Errorf("saved draft changed after attachment verification")
+	}
+
+	inputs, err := hashOutgoingAttachmentInputs(r.n.ctx, r.input.Attachments)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(inputs, r.attachmentProofs) {
+		return fmt.Errorf("attachment input files changed during composition")
+	}
+	r.result.Draft = after
+	r.result.Status = "saved"
+	return nil
 }
