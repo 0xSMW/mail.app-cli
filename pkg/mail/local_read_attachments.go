@@ -167,9 +167,9 @@ func (c *Client) saveLocalAttachment(account, mailbox, messageID, name string, s
 	err = walkLocalAttachments(c.Context(), rfc.Header.Get, rfc.Body, 0, func(attachment Attachment, reader io.Reader) (int64, error) {
 		currentIndex := attachmentIndex
 		attachmentIndex++
-		if (selectionIndex < 0 && attachment.Name == name) || (selectionIndex >= 0 && currentIndex == selectionIndex) {
+		if (selectionIndex < 0 && attachmentNamesEqual(attachment.Name, name)) || (selectionIndex >= 0 && currentIndex == selectionIndex) {
 			matches++
-			if selectionIndex >= 0 && name != "" && attachment.Name != name {
+			if selectionIndex >= 0 && name != "" && !attachmentNamesEqual(attachment.Name, name) {
 				selectionErr = fmt.Errorf("attachment index %d has name %q, expected %q", selectionIndex, attachment.Name, name)
 				return io.Copy(io.Discard, reader)
 			}
