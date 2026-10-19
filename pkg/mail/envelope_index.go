@@ -437,6 +437,10 @@ func parseSinceUnix(since string) (int64, bool, error) {
 	return 0, false, fmt.Errorf("invalid --since date %q", since)
 }
 
+// Mail stores the literal reply/forward prefix separately from the base
+// subject. Preserve its exact text everywhere an indexed subject is observed.
+const indexSubjectExpression = "(coalesce(m.subject_prefix, '') || coalesce(s.subject, ''))"
+
 const indexMessageFrom = `
 from messages m
 join subjects s on s.ROWID = m.subject
@@ -450,7 +454,7 @@ func buildIndexMessageSelect(accountName, mailboxName string) string {
 select
 	m.ROWID as ID,
 	coalesce(m.date_received, 0) as ReceivedUnix,
-	coalesce(s.subject, '') as Subject,
+	`+indexSubjectExpression+` as Subject,
 	case
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
 		else a.comment || ' <' || a.address || '>'
@@ -605,7 +609,7 @@ func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
 			}
 			senderCondition = "lower(coalesce(a.address, '')) = " + sqlQuote(address)
 		}
-		condition := fmt.Sprintf(`(coalesce(s.subject, '') = %s
+		condition := fmt.Sprintf(`(`+indexSubjectExpression+` = %s
         and %s
         and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s`, sqlQuote(identity.Subject), senderCondition, sqlQuote(canonicalIdentityDate(identity.DateSent)))
 		// A confirmed RFC header tolerates server reserialization changing size.
@@ -622,7 +626,7 @@ func indexSearchTermConditions(terms []string) []string {
 	for _, term := range terms {
 		needle := sqlQuote(escapeSQLLikePattern(term))
 		conditions = append(conditions, fmt.Sprintf(`(
-		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
+		lower(`+indexSubjectExpression+`) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(su.summary, '')) like '%%' || %s || '%%' escape '\'
