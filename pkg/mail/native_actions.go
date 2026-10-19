@@ -201,13 +201,13 @@ func (c *Client) nativeSaveAttachment(account, mailbox, id, name string, index i
 			if index >= len(refs) {
 				return notFound("attachment", fmt.Sprint(index))
 			}
-			if name != "" && attachments[index].Name != name {
+			if name != "" && !attachmentNamesEqual(attachments[index].Name, name) {
 				return fmt.Errorf("attachment index %d has name %q, expected %q", index, attachments[index].Name, name)
 			}
 			selected = index
 		} else {
 			for i, attachment := range attachments {
-				if attachment.Name == name {
+				if attachmentNamesEqual(attachment.Name, name) {
 					if selected >= 0 {
 						return fmt.Errorf("attachment name is ambiguous: %s; select its index", name)
 					}
