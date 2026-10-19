@@ -66,10 +66,20 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 	if len(referencedIDs) != len(contentIDs) {
 		return reject()
 	}
-	for i, id := range referencedIDs {
-		if id != contentIDs[i] {
+	// Related MIME siblings may be serialized in a different order from the
+	// attachment objects in the HTML. Content-ID, rather than sibling position,
+	// links each object to its payload. Both parsers reject duplicate IDs.
+	partsByID := make(map[string]draftMIMEAttachment, len(contentIDs))
+	for i, id := range contentIDs {
+		partsByID[id] = attachments[i]
+	}
+	orderedAttachments := make([]draftMIMEAttachment, 0, len(referencedIDs))
+	for _, id := range referencedIDs {
+		attachment, found := partsByID[id]
+		if !found {
 			return reject()
 		}
+		orderedAttachments = append(orderedAttachments, attachment)
 	}
 	// The leading placeholder and containing paragraphs add edge newlines to
 	// Mail's text readback. Keep that exact readback, after proving all actual
@@ -80,7 +90,7 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 	if normalize(text) != normalize(snapshot.Message.Content) {
 		return "", nil, fmt.Errorf("draft body differs from its Apple plain-text wrapper source")
 	}
-	return snapshot.Message.Content, attachments, nil
+	return snapshot.Message.Content, orderedAttachments, nil
 }
 
 func applePlainWrapperContent(source string) (string, []string, bool) {
