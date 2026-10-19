@@ -453,3 +453,104 @@ func TestNativeDescriptorSignatureUnicodeRead(t *testing.T) {
 		}
 	}
 }
+
+func TestNativeDescriptorRuleListBatchesEightyNineRules(t *testing.T) {
+	f := newRulesDescriptorFixture()
+	for i := 0; i < 89; i++ {
+		fixtureListedRule(f, fmt.Sprintf("listed-%d", i), true)
+	}
+	f.conditions = []ae.Value{ruleFixtureRef("condition")}
+	got, err := rulesFixtureClient(f).ListRules()
+	if err != nil || len(got) != 89 {
+		t.Fatalf("rules=%d err=%v", len(got), err)
+	}
+	// Before batching: discovery + 89*(6 properties + conditions + 3 fields)=891.
+	// Now: discovery + ceil(89*7/32) + ceil(89*3/32)=30.
+	if len(f.events) != 30 {
+		t.Fatalf("events=%d want30", len(f.events))
+	}
+	for _, event := range f.events {
+		if event.ID != "getd" {
+			t.Fatalf("list mutated Mail: %+v", event)
+		}
+		request := event.Params["----"]
+		if request.Kind == "list" && len(request.Items) > 32 {
+			t.Fatalf("unbounded batch: %d", len(request.Items))
+		}
+	}
+	if !reflect.DeepEqual(got[88].Conditions, []string{"from header does contain value example.com"}) {
+		t.Fatalf("last rule shifted: %+v", got[88])
+	}
+}
+
+func TestNativeDescriptorRuleListMalformedBatchFailsClosed(t *testing.T) {
+	for _, reply := range []ae.Value{ae.Null(), ae.List(), ae.List(ae.Bool(true))} {
+		t.Run(reply.Kind+fmt.Sprint(len(reply.Items)), func(t *testing.T) {
+			f := newRulesDescriptorFixture()
+			fixtureListedRule(f, "listed", true)
+			c := rulesFixtureClient(f)
+			c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+				if event.ID == "getd" && event.Params["----"].Kind == "list" {
+					f.events = append(f.events, event)
+					return reply, ae.Stats{Events: 1}, nil
+				}
+				return f.send(ctx, event)
+			}
+			_, err := c.ListRules()
+			if err == nil || !strings.Contains(err.Error(), "expected 7 explicit values") {
+				t.Fatalf("malformed batch accepted: %v", err)
+			}
+			if len(f.events) != 2 {
+				t.Fatalf("retried malformed batch: %d", len(f.events))
+			}
+		})
+	}
+}
+
+func TestNativeDescriptorRuleListBatchCancellationStopsDispatch(t *testing.T) {
+	f := newRulesDescriptorFixture()
+	for i := 0; i < 89; i++ {
+		fixtureListedRule(f, fmt.Sprintf("listed-%d", i), true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := rulesFixtureClient(f).WithContext(ctx)
+	c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+		v, stats, err := f.send(ctx, event)
+		if event.Params["----"].Kind == "list" {
+			cancel()
+		}
+		return v, stats, err
+	}
+	_, err := c.ListRules()
+	if !errors.Is(err, context.Canceled) || len(f.events) != 2 {
+		t.Fatalf("cancel error=%v events=%d", err, len(f.events))
+	}
+}
+
+func TestNativeDescriptorRuleListBatchTimeoutHasPhaseAndDoesNotRetry(t *testing.T) {
+	f := newRulesDescriptorFixture()
+	for i := 0; i < 89; i++ {
+		fixtureListedRule(f, fmt.Sprintf("listed-%d", i), true)
+	}
+	c := rulesFixtureClient(f)
+	batches := 0
+	c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+		if event.Params["----"].Kind == "list" {
+			batches++
+			if batches == 2 {
+				f.events = append(f.events, event)
+				return ae.Value{}, ae.Stats{Events: 1}, context.DeadlineExceeded
+			}
+		}
+		return f.send(ctx, event)
+	}
+	_, err := c.ListRules()
+	var timeout *AutomationTimeoutError
+	if !errors.As(err, &timeout) || timeout.Trace == nil || timeout.Trace.Pending != "rules_projection_2" || timeout.Trace.LastCompleted != "rules_projection_1" {
+		t.Fatalf("timeout lost batch progress: %v", err)
+	}
+	if len(f.events) != 3 || batches != 2 {
+		t.Fatalf("timeout retried: events=%d batches=%d", len(f.events), batches)
+	}
+}
