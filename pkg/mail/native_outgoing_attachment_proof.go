@@ -83,13 +83,12 @@ func proveOutgoingMIMEAttachments(ctx context.Context, source string, expected [
 
 // Mail can render a trailing group of rich-text attachment objects as a
 // leading LF/line-separator pair in the stored message. Admit only that exact
-// observed mapping, with every requested text character preserved. Ordinary
-// saves and normal body matches keep their existing behavior.
+// observed mapping, with every requested text character preserved. Normal body matches keep their existing behavior.
 func (r *nativeOutgoingRun) savedDraftBodyMatches(actual string) bool {
 	if outgoingBodyMatches(actual, r.body) {
 		return true
 	}
-	if r.action != "send" || len(r.input.Attachments) == 0 || strings.ContainsRune(r.body, '\ufffc') {
+	if (r.action != "send" && r.action != "save") || len(r.input.Attachments) == 0 || strings.ContainsRune(r.body, '\ufffc') {
 		return false
 	}
 	normalize := func(value string) string { return strings.ReplaceAll(value, "\r\n", "\n") }
