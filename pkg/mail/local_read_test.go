@@ -182,7 +182,7 @@ func TestLocalReadIndexMissRechecksScopedLiveMessage(t *testing.T) {
 }
 
 func TestLocalReadIndexMissRetainsLiveAbsenceAndErrors(t *testing.T) {
-	for _, state := range []string{"absent", "wrong mailbox", "permission denied"} {
+	for _, state := range []string{"absent", "wrong mailbox", "wrong account", "permission denied"} {
 		t.Run(state, func(t *testing.T) {
 			c, _, _ := localReadFixture(t)
 			f := localReadLiveFixture(c)
@@ -193,19 +193,25 @@ func TestLocalReadIndexMissRetainsLiveAbsenceAndErrors(t *testing.T) {
 					if state == "permission denied" {
 						return denied
 					}
-					if state == "wrong mailbox" && f.key(ref.Fields["from"].Fields["from"]) != "mbxp:inbox" {
-						return &appleevents.Error{Code: -1728, Message: "no such scoped message"}
-					}
 				}
 				return nil
 			}
-			id, mailbox := "999", "INBOX"
+			account, id, mailbox := "Work", "999", "INBOX"
 			if state == "permission denied" {
 				id = "42"
 			} else if state == "wrong mailbox" {
 				id, mailbox = "42", "All Mail"
+			} else if state == "wrong account" {
+				account, id = "Other", "42"
+				other := fixtureRef("mact", "other")
+				f.accounts = append(f.accounts, other)
+				f.properties["mact:other"] = map[string]appleevents.Value{"pnam": appleevents.String("Other"), "ID  ": appleevents.String("OTHER")}
+				f.boxes["mact:other"] = []appleevents.Value{fixtureRef("mbxp", "other-inbox")}
+				f.properties["mbxp:other-inbox"] = map[string]appleevents.Value{"pnam": appleevents.String("INBOX"), "mact": other}
 			}
-			message, err := c.GetMessageDetailsJSON("Work", mailbox, id)
+			// The fixture, like Mail, resolves direct by-ID reads globally.
+			// Only the selected mailbox's collection can prove membership.
+			message, err := c.GetMessageDetailsJSON(account, mailbox, id)
 			if state == "permission denied" {
 				if !errors.Is(err, denied) || message != nil {
 					t.Fatalf("permission failure became absence: %#v, %v", message, err)
@@ -215,6 +221,31 @@ func TestLocalReadIndexMissRetainsLiveAbsenceAndErrors(t *testing.T) {
 			}
 			if len(f.events) == 0 {
 				t.Fatal("index miss did not verify live scope")
+			}
+		})
+	}
+}
+
+func TestLocalReadIndexMissRejectsMalformedMembership(t *testing.T) {
+	for _, value := range []appleevents.Value{
+		appleevents.Null(),
+		appleevents.List(appleevents.String("42")),
+		appleevents.List(appleevents.Int(43)),
+		appleevents.List(appleevents.Int(42), appleevents.Int(42)),
+	} {
+		t.Run(fmt.Sprint(value), func(t *testing.T) {
+			c, _, _ := localReadFixture(t)
+			f := localReadLiveFixture(c)
+			c.shared.nativeSender = func(ctx context.Context, event appleevents.Event) (appleevents.Value, appleevents.Stats, error) {
+				ref := event.Params["----"]
+				if ref.Kind == "object" && ref.Fields["seld"].Code == "ID  " && ref.Fields["from"].Fields["form"].Code == "test" && ref.Fields["from"].Fields["want"].Code == "mssg" {
+					return value, appleevents.Stats{Attempted: true, Events: 1}, nil
+				}
+				return f.sender(ctx, event)
+			}
+			message, err := c.GetMessageDetailsJSON("Work", "INBOX", "42")
+			if err == nil || message != nil {
+				t.Fatalf("malformed membership accepted: %#v, %v", message, err)
 			}
 		})
 	}
