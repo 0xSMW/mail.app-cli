@@ -3,7 +3,9 @@ package mail
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"os"
+	"strings"
 
 	ae "github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
 )
@@ -170,6 +172,9 @@ func (n *nativeMail) outgoingDraftSnapshot(accountName, draftID string) (*draftS
 		if e != nil {
 			return nil, ae.Value{}, e
 		}
+		if e = reconcileDraftSourceRecipients(m, raw); e != nil {
+			return nil, ae.Value{}, e
+		}
 		if snapshot != nil {
 			return nil, ae.Value{}, fmt.Errorf("draft ID is ambiguous; specify an account")
 		}
@@ -184,6 +189,42 @@ func (n *nativeMail) outgoingDraftSnapshot(accountName, draftID string) (*draftS
 	}
 	return snapshot, found, nil
 }
+
+// Exchange sometimes exposes empty stored-message recipient collections even
+// when the source retains the recipients. Fill only missing collections; a
+// nonempty collection must still agree with source during reconstruction.
+func reconcileDraftSourceRecipients(message *Message, source string) error {
+	if strings.TrimSpace(source) == "" {
+		return nil
+	}
+	parsed, err := mail.ReadMessage(strings.NewReader(source))
+	if err != nil {
+		return fmt.Errorf("read draft recipient headers: %w", err)
+	}
+	for _, item := range []struct {
+		key       string
+		addresses *[]string
+	}{{"To", &message.ToRecipients}, {"Cc", &message.CcRecipients}, {"Bcc", &message.BccRecipients}} {
+		values := parsed.Header[item.key]
+		if len(values) > 1 {
+			return fmt.Errorf("draft source has duplicate %s recipient headers", item.key)
+		}
+		if len(values) == 0 || strings.TrimSpace(values[0]) == "" {
+			continue
+		}
+		list, err := mail.ParseAddressList(values[0])
+		if err != nil {
+			return fmt.Errorf("read draft %s recipients: %w", item.key, err)
+		}
+		if len(*item.addresses) == 0 {
+			for _, address := range list {
+				*item.addresses = append(*item.addresses, address.Address)
+			}
+		}
+	}
+	return nil
+}
+
 func (c *Client) readNativeDraftSnapshot(accountName, draftID string) (*draftSnapshot, error) {
 	var snapshot *draftSnapshot
 	err := c.withNativeAutomation(0, func(n *nativeMail) error {
