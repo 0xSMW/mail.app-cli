@@ -43,26 +43,21 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if c.nativeEnabled() {
 		return c.updateNativeDraft(accountName, draftID, input, attachments)
 	}
-	draft, err := c.GetDraft(accountName, draftID)
+	snapshot, err := c.readDraftSnapshot(accountName, draftID)
 	if err != nil {
 		return nil, err
 	}
-	details, err := c.getMessageDetailsFromMail(draft.Account, draft.Mailbox, draft.ID)
+	draft := snapshot.Message
+	body, mimeAttachments, err := reconstructibleDraft(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("cannot preserve draft content: %w", err)
+	}
+	sender, err := draftSenderAddress(draft.Sender)
 	if err != nil {
 		return nil, err
 	}
-	if details == nil {
-		return nil, notFound("draft", draftID)
-	}
-	if details.ContentError != "" {
-		return nil, fmt.Errorf("cannot preserve draft body: %s", details.ContentError)
-	}
-	sender, err := draftSenderAddress(details.Sender)
-	if err != nil {
-		return nil, err
-	}
-	replacement := draftReplacement(draft.Account, details, sender, details.Content, input)
-	if replacement.Subject == details.Subject && replacement.Body == details.Content && len(attachments) == 0 {
+	replacement := draftReplacement(draft.Account, draft, sender, body, input)
+	if replacement.Subject == draft.Subject && replacement.Body == body && len(attachments) == 0 {
 		return draft, nil
 	}
 	if len(replacement.To) == 0 {
@@ -79,13 +74,23 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, fmt.Errorf("preserve draft attachments: %w", err)
 	}
+	if err := compareDraftMIMEAttachments(preserved, mimeAttachments); err != nil {
+		return nil, fmt.Errorf("preserve draft attachment bytes: %w", err)
+	}
+	current, err := c.readDraftSnapshot(draft.Account, draft.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !sameDraftSnapshot(snapshot, current) {
+		return nil, fmt.Errorf("draft changed while preparing replacement")
+	}
 	replacement.Attachments = append(preserved, attachments...)
 	updated, err := c.CreateDraft(replacement)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
-		return nil, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
+	if err := c.deleteUnchangedDraft(snapshot); err != nil {
+		return updated, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
 	}
 	return updated, nil
 }
