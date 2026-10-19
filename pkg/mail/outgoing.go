@@ -129,6 +129,7 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 		if !validIdentity || !validStatus {
 			return responseFailure(result, errors.New("Mail returned an incomplete outgoing receipt"))
 		}
+		envelope.Attempted, envelope.Uncertain = true, false
 	}
 	if !envelope.OK {
 		if envelope.Error == "" {
