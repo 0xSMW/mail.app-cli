@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/mail"
@@ -81,9 +82,26 @@ func proveOutgoingMIMEAttachments(ctx context.Context, source string, expected [
 	return nil
 }
 
-// Mail can render a trailing group of rich-text attachment objects as a
-// leading LF/line-separator pair in the stored message. Admit only that exact
-// observed mapping, with every requested text character preserved. Normal body matches keep their existing behavior.
+// Mail renders each exact empty body paragraph as a line separator and adds
+// one wrapper LF. Preserve every character in nonempty lines, and remove only
+// the one terminal LF that closes the final paragraph before splitting.
+func attachmentParagraphReadback(body string) (string, bool) {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	if !strings.HasSuffix(body, "\n") {
+		return "", false
+	}
+	lines := strings.Split(strings.TrimSuffix(body, "\n"), "\n")
+	for i, line := range lines {
+		if line == "" {
+			lines[i] = "\u2028"
+		}
+	}
+	return "\n" + strings.Join(lines, "\n") + "\n", true
+}
+
+// The rendered mapping is admitted only with an exact captured owned body
+// followed by exactly one attachment object per requested file. Existing
+// normal body matches retain their behavior.
 func (r *nativeOutgoingRun) savedDraftBodyMatches(actual string) bool {
 	if outgoingBodyMatches(actual, r.body) {
 		return true
@@ -93,7 +111,8 @@ func (r *nativeOutgoingRun) savedDraftBodyMatches(actual string) bool {
 	}
 	normalize := func(value string) string { return strings.ReplaceAll(value, "\r\n", "\n") }
 	body, owned, stored := normalize(r.body), normalize(r.preSaveOwnedBody), normalize(actual)
-	return owned == body+strings.Repeat("\ufffc", len(r.input.Attachments)) && stored == "\n\u2028"+body
+	rendered, ok := attachmentParagraphReadback(body)
+	return ok && owned == body+strings.Repeat("\ufffc", len(r.input.Attachments)) && stored == rendered
 }
 
 // Save and inspect this same owned composition before dispatch. Rich-text
@@ -238,6 +257,21 @@ func preparedDraftPresent(n *nativeMail, box ae.Value, id string) (bool, error) 
 			found = true
 		}
 	}
+	if found {
+		number, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || number <= 0 {
+			return false, fmt.Errorf("prepared draft ID unavailable")
+		}
+		err = n.requireActiveDraft(ae.ByID("mssg", ae.Int(number), box))
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		// A missing nested property is not proof of deletion. Keep the ID
+		// present so the existing exact-root reconciliation can resolve it.
+		if err != nil && !nativeMissing(err) {
+			return false, err
+		}
+	}
 	return found, nil
 }
 
@@ -262,6 +296,10 @@ func (r *nativeOutgoingRun) cleanupPreparedDraft(n *nativeMail) error {
 	ref := ae.ByID("mssg", ae.Int(number), box)
 	message, err := n.outgoingSnapshotMessage(ref, r.input.Account, box)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			_, err = r.preparedDraftBox(n)
+			return err
+		}
 		if nativeMissing(err) {
 			return r.reconcilePreparedMissing(n, "read prepared draft snapshot", err)
 		}
