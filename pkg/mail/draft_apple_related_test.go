@@ -56,6 +56,34 @@ func TestDraftAppleRelatedPreservesPlainBodyAndExactAttachmentBytes(t *testing.T
 	}
 }
 
+func TestDraftAppleRelatedMatchesAttachmentsByContentID(t *testing.T) {
+	const secondCID = "11234567-89AB-CDEF-0123-456789ABCDEF"
+	for _, reordered := range []bool{false, true} {
+		snapshot := appleRelatedFixture(t)
+		snapshot.Source = strings.Replace(snapshot.Source, appleRelatedObject(appleRelatedCID), appleRelatedObject(appleRelatedCID)+appleRelatedObject(secondCID), 1)
+		second := "--related\r\nContent-Type: application/octet-stream; name=second.bin\r\nContent-Disposition: attachment; filename=second.bin\r\nContent-ID: <" + secondCID + ">\r\nContent-Transfer-Encoding: base64\r\n\r\nc2Vjb25k\r\n"
+		if reordered {
+			snapshot.Source = strings.Replace(snapshot.Source, "--related\r\nContent-Type: application/macbinary", second+"--related\r\nContent-Type: application/macbinary", 1)
+		} else {
+			snapshot.Source = strings.Replace(snapshot.Source, "--related--", second+"--related--", 1)
+		}
+		body, attachments, err := reconstructibleDraft(snapshot)
+		if err != nil || body != snapshot.Message.Content || len(attachments) != 2 {
+			t.Fatalf("reordered=%v body=%q attachments=%+v err=%v", reordered, body, attachments, err)
+		}
+		if attachments[0].name != "re\u0301sume\u0301.bin" || string(attachments[0].data) != "\x00\x01\x02\x03" || attachments[1].name != "second.bin" || string(attachments[1].data) != "second" {
+			t.Fatalf("reordered=%v lost Content-ID association or HTML order: %+v", reordered, attachments)
+		}
+		for _, replacement := range []string{appleRelatedCID, "21234567-89AB-CDEF-0123-456789ABCDEF"} {
+			invalid := *snapshot
+			invalid.Source = strings.Replace(snapshot.Source, "Content-ID: <"+secondCID+">", "Content-ID: <"+replacement+">", 1)
+			if _, _, err := reconstructibleDraft(&invalid); err == nil {
+				t.Fatalf("reordered=%v accepted duplicate or unreferenced Content-ID %s", reordered, replacement)
+			}
+		}
+	}
+}
+
 func TestDraftAppleRelatedRejectsFormattingAndUnprovenAttachments(t *testing.T) {
 	for _, tc := range []struct{ name, before, after string }{
 		{"different text", "Plain &lt;line&gt;", "Different &lt;line&gt;"},
