@@ -2,6 +2,7 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os/exec"
@@ -111,7 +112,12 @@ func TestOutgoingProductionScript(t *testing.T) {
 			if err := json.Unmarshal(output, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != tc.deleted || got.Response.Uncertain != tc.uncertain {
+			// Successful sends close the same owned composition without saving.
+			expectedDeleted := tc.deleted
+			if tc.ok && action == "send" {
+				expectedDeleted++
+			}
+			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != expectedDeleted || got.Response.Uncertain != tc.uncertain {
 				t.Fatalf("unexpected execution: %s", output)
 			}
 			if got.Sent == 1 && got.ComposedBody != input.Body {
@@ -162,6 +168,140 @@ func TestOutgoingStrictReceipts(t *testing.T) {
 			var mutation *MutationError
 			if !errors.As(err, &mutation) || !mutation.Uncertain {
 				t.Fatalf("missing uncertainty: %v", err)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for production outgoing tests")
+	}
+	tests := []struct {
+		name        string
+		config      map[string]any
+		attachments []string
+		submitted   bool
+		closes      int
+		ok          bool
+	}{
+		{name: "unchanged owned composition", submitted: true, closes: 1, ok: true},
+		{name: "unchanged attachments", attachments: []string{"/tmp/report.pdf"}, submitted: true, closes: 1, ok: true},
+		{name: "subject changed", config: map[string]any{"afterSend": map[string]any{"subject": "edited"}}, submitted: true},
+		{name: "body changed", config: map[string]any{"afterSend": map[string]any{"body": "edited"}}, submitted: true},
+		{name: "sender changed", config: map[string]any{"afterSend": map[string]any{"sender": "other@example.com"}}, submitted: true},
+		{name: "To changed", config: map[string]any{"afterSend": map[string]any{"to": []string{"other@example.com"}}}, submitted: true},
+		{name: "Cc changed", config: map[string]any{"afterSend": map[string]any{"cc": []string{"other@example.com"}}}, submitted: true},
+		{name: "Bcc changed", config: map[string]any{"afterSend": map[string]any{"bcc": []string{"other@example.com"}}}, submitted: true},
+		{name: "unsupported baseline filenames uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameUnsupported": true}, submitted: true, closes: 1, ok: true},
+		{name: "previously readable filenames become unsupported", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameUnsupportedAfterSend": true}, submitted: true},
+		{name: "attachment name changed", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"afterSend": map[string]any{"attachments": []string{"other.pdf"}}}, submitted: true},
+		{name: "attachment count changed", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"afterSend": map[string]any{"attachments": []string{"report.pdf", "report.pdf"}}}, submitted: true},
+		{name: "nested recipient missing is not owned absence", config: map[string]any{"fingerprintFailures": []string{"cc"}, "failAfterSend": true}, submitted: true},
+		{name: "nested attachment missing is not owned absence", config: map[string]any{"fingerprintFailures": []string{"attachments"}, "failAfterSend": true}, submitted: true},
+		{name: "body read failure retains composition", config: map[string]any{"fingerprintFailures": []string{"body"}, "failAfterSend": true}, submitted: true},
+		{name: "owned object already gone", config: map[string]any{"fingerprintFailures": []string{"subject"}, "failAfterSend": true}, submitted: true, ok: true},
+		{name: "wrong root descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"root": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong count descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"count": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong availability descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"flag": "long"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong names list descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"names": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong filename descriptor retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"name": "long"}, "malformedAfterSend": true}, submitted: true},
+		{name: "close failure preserves acknowledgement", config: map[string]any{"cleanupThrows": true}, submitted: true, closes: 1},
+		{name: "send false retains", config: map[string]any{"sendFalse": true}},
+		{name: "send throws retains", config: map[string]any{"sendThrows": true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: tt.attachments}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "send", "config": tt.config})
+			cmd := exec.Command(node, "testdata/outgoing_mock.js")
+			cmd.Stdin = bytes.NewReader(payload)
+			raw, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("mock: %v %s", err, raw)
+			}
+			var got struct {
+				Response      outgoingEnvelope
+				Sent, Deleted int
+				Events        []json.RawMessage
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != 1 || got.Deleted != tt.closes {
+				t.Fatalf("execution=%s", raw)
+			}
+			if tt.submitted && !tt.ok {
+				if got.Response.Phase != "submitted_cleanup" || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "" || got.Response.Uncertain {
+					t.Fatalf("lost authoritative ack=%s", raw)
+				}
+			}
+			if !tt.submitted && !got.Response.Uncertain {
+				t.Fatalf("lost send uncertainty=%s", raw)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingCleanupErrorPreservesReceipt(t *testing.T) {
+	t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+	writeFakeOsaScript(t, `printf '%s' '{"ok":false,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted_cleanup_pending","submitted":true},"phase":"submitted_cleanup","error":"composition changed; retained","cleanup":"cleanup pending","attempted":true,"uncertain":false}'`)
+	result, err := NewClient().SendOutgoing(OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}})
+	var mutation *MutationError
+	if result == nil || !result.Submitted || !errors.As(err, &mutation) || !mutation.Submitted || mutation.Uncertain || mutation.Phase != "submitted_cleanup" || mutation.Cleanup == "" {
+		t.Fatalf("result=%+v err=%+v", result, err)
+	}
+}
+
+func TestLegacyOutgoingInterruptedAfterAcknowledgement(t *testing.T) {
+	for _, tt := range []struct {
+		name, tail string
+		cancel     bool
+	}{
+		{name: "bridge failure after ack", tail: "exit 1"},
+		{name: "caller deadline during cleanup", tail: "/bin/sleep 5", cancel: true},
+		{name: "invalid final JSON after ack", tail: "printf '%s' invalid"},
+		{name: "empty final JSON object after ack", tail: `printf '%s' '{}'`},
+		{name: "empty success receipt after ack", tail: `printf '%s' '{"ok":true}'`},
+		{name: "incomplete success receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","status":"submitted","submitted":true}}'`},
+		{name: "false submitted receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":false}}'`},
+		{name: "wrong account receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Other","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":true}}'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+			ready := filepath.Join(t.TempDir(), "ready")
+			t.Setenv("OUTGOING_ACK_READY", ready)
+			writeFakeOsaScript(t, `printf '%s\n' 'mail-app-cli-phase {"name":"outgoing_send","state":"done"}' 'mail-app-cli-phase {"name":"outgoing_submitted_cleanup","state":"start"}' >&2
+printf ready > "$OUTGOING_ACK_READY"
+`+tt.tail)
+			client := NewClient()
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+			var result *OutgoingResult
+			var err error
+			if tt.cancel {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				client = client.WithContext(ctx)
+				type receipt struct {
+					result *OutgoingResult
+					err    error
+				}
+				finished := make(chan receipt, 1)
+				go func() { result, err := client.SendOutgoing(input); finished <- receipt{result, err} }()
+				waitForAutomationLog(t, ready, "ready")
+				cancel()
+				got := <-finished
+				result, err = got.result, got.err
+			} else {
+				result, err = client.SendOutgoing(input)
+			}
+			var mutation *MutationError
+			if result == nil || !result.Submitted || result.Status != "submitted_cleanup_pending" || !errors.As(err, &mutation) || !mutation.Submitted || !mutation.Attempted || mutation.Uncertain || mutation.Cleanup == "" || !strings.Contains(err.Error(), "do not resend") {
+				t.Fatalf("result=%+v error=%+v", result, err)
+			}
+			if tt.name == "wrong account receipt after ack" && (result.Account != input.Account || result.AccountID != "" || result.Sender != input.Sender) {
+				t.Fatalf("untrusted receipt identity survived: %+v", result)
 			}
 		})
 	}
