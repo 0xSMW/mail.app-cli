@@ -86,7 +86,7 @@ const accounts = collection([work, other], 'accounts');
 let outgoing = null;
 const inserted = [];
 function preparedMessage(data) {
- return {id:()=>700,mailbox:()=>special,subject:()=>data.subject,sender:()=>data.sender,content:()=>data.body,
+ return {id:()=>700,mailbox:()=>special,deletedStatus:()=>false,subject:()=>data.subject,sender:()=>data.sender,content:()=>data.body,
   source:()=>data.source,toRecipients:()=>recipients(data.to),ccRecipients:()=>recipients(data.cc),bccRecipients:()=>recipients(data.bcc),
   mailAttachments:()=>{state.preparedEnumerated.push('700');return data.attachments.map(file=>({name:()=>file.name}));},
   delete:()=>{
