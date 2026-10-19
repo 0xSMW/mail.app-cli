@@ -86,9 +86,20 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 				}
 			}
 		}
+		preparedSaved := false
+		if action == "send" && trace != nil {
+			for _, phase := range trace.Phases {
+				if phase.Name == "outgoing_prepare_save" && phase.Error == "" {
+					preparedSaved = true
+				}
+			}
+		}
 		cleanup := ""
 		if action != "preview" && !attempted && trace != nil && trace.Pending == "outgoing_compose" {
 			cleanup = "cleanup could not be confirmed after interrupted composition"
+		}
+		if action == "send" && !attempted && trace != nil && (trace.Pending == "outgoing_prepare_save" || preparedSaved) {
+			cleanup = "prepared composition or stored draft may remain; cleanup could not be confirmed; inspect Mail before retrying"
 		}
 		// A completed send phase records an affirmative acknowledgement, even if
 		// the bridge is interrupted while checking or closing the owned composition.
@@ -97,7 +108,7 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 			result := &OutgoingResult{Account: input.Account, Sender: input.Sender, Status: "submitted_cleanup_pending", Submitted: true}
 			return result, &MutationError{Operation: action, Phase: "submitted_cleanup", Account: input.Account, Sender: input.Sender, Cause: err, Attempted: true, Submitted: true, Cleanup: cleanup}
 		}
-		return nil, &MutationError{Operation: action, Phase: "automation", Account: input.Account, Sender: input.Sender, Cause: err, Attempted: attempted, Uncertain: attempted, Cleanup: cleanup}
+		return nil, &MutationError{Operation: action, Phase: "automation", Account: input.Account, Sender: input.Sender, Cause: err, Attempted: attempted, Uncertain: attempted, Cleanup: cleanup, Saved: preparedSaved}
 	}
 	acknowledged := action == "send" && trace != nil && (trace.LastCompleted == "outgoing_send" || trace.LastCompleted == "outgoing_submitted_cleanup" || trace.Pending == "outgoing_submitted_cleanup")
 	responseFailure := func(result *OutgoingResult, cause error) (*OutgoingResult, error) {
@@ -185,7 +196,7 @@ function composeOutgoing(input, action) {
  const mail = Application('Mail');
  let outgoing = null, attempted = false, accepted = false, saved = false;
  let step = 'account_resolution';
- const composeBody=action === 'save' && !input.body.endsWith('\n') ? input.body+'\n' : input.body;
+ const composeBody=(action === 'save' || action === 'send') && !input.body.endsWith('\n') ? input.body+'\n' : input.body;
  let result = {account: input.account, accountId: '', sender: '', status: '', submitted: false};
  function fail(message) { throw new Error(message); }
  function address(value) {
@@ -346,6 +357,81 @@ function composeOutgoing(input, action) {
   // Do not trim user whitespace or accept arbitrary body differences.
   return body===input.body.replace(/\r\n/g,'\n') || body===expected || body==='\n'+expected;
  }
+ // Stored Drafts ownership is established before dispatch, never guessed from
+ // a Sent message or a post-send subject search.
+ function storedSnapshot(message) {
+  function text(value) { if (typeof value !== 'string') fail('Prepared draft text property unavailable'); return value; }
+  function list(kind) { const values=message[kind](); if(!Array.isArray(values)) fail('Prepared draft recipients unavailable'); return values.map(r=>text(r.address())); }
+  const box=message.mailbox(), owner=box.account();
+  const accountId=text(owner.id()), mailbox=text(box.name());
+  if(accountId !== result.accountId) fail('Prepared draft account ownership changed');
+  const attachments=message.mailAttachments();
+  if(!Array.isArray(attachments)) fail('Prepared draft attachments unavailable');
+  const files=attachments.map(a=>text(a.name()).normalize('NFC')).sort();
+  const source=text(message.source());
+  if(source.length === 0) fail('Prepared draft raw source unavailable');
+  return {id:String(message.id()),accountId:accountId,mailbox:mailbox,subject:text(message.subject()),sender:text(message.sender()),body:text(message.content()),
+   to:list('toRecipients'),cc:list('ccRecipients'),bcc:list('bccRecipients'),source:source,files:files};
+ }
+ function matchesPrepared(snapshot) {
+  return snapshot.subject === input.subject && matchesBody(snapshot.body) && address(snapshot.sender).toLowerCase() === result.sender.toLowerCase() &&
+   equal(snapshot.to,input.to) && equal(snapshot.cc,input.cc) && equal(snapshot.bcc,input.bcc) && equal(snapshot.files,expectedNames);
+ }
+ function preparedById(box,id) {
+  if(!/^[0-9]+$/.test(id) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0) fail('Prepared draft ID is not a supported numeric identity');
+  const ids=box.messages.id();
+  if(!Array.isArray(ids)) fail('Prepared Drafts IDs unavailable');
+  const matching=ids.filter(value=>String(value)===id);
+  if(matching.length === 0) return null;
+  if(matching.length !== 1) fail('Prepared draft ID is ambiguous');
+  // The destructive reference must remain by-ID even if mailbox order changes.
+  const message=box.messages.byId(Number(id));
+  if(String(message.id()) !== id) fail('Prepared draft exact-ID readback mismatch');
+  return message;
+ }
+ function prepareSendDraft(target,before) {
+  phase('outgoing_prepare_save',function(){mail.save(outgoing);saved=true;});
+  for(let i=0;i<80;i++) {
+   const box=draftMailboxForAccount(mail,target.account);
+   let candidates=[];
+   try {
+    const messages=box.messages();
+    if(!Array.isArray(messages)) fail('Prepared Drafts messages unavailable');
+    for(const message of messages) {
+     const id=String(message.id());
+     if(before[id]) continue;
+     // Match all requested fields before taking the full immutable snapshot.
+     if(matches(message)) { const exact=preparedById(box,id); if(exact === null) continue; const snapshot=storedSnapshot(exact); if(snapshot.id !== id) fail('Prepared draft identity changed during read'); if(matchesPrepared(snapshot)) candidates.push(snapshot); }
+    }
+   } catch(e) { if(e.errorNumber !== -1728) throw e; delay(0.1);continue; }
+   if(candidates.length > 1) fail('Prepared draft identity is ambiguous');
+   if(candidates.length === 1) return candidates[0];
+   delay(0.1);
+  }
+  fail('Prepared draft could not be verified before dispatch');
+ }
+ function currentPreparedBox(expected) {
+  const currentAccount=resolve();
+  if(currentAccount.id !== result.accountId || currentAccount.id !== expected.accountId) fail('Prepared draft account identity changed; retained');
+  return draftMailboxForAccount(mail,currentAccount.account);
+ }
+ function cleanupPreparedDraft(expected) {
+  let box=currentPreparedBox(expected);
+  let message=preparedById(box,expected.id);
+  if(message === null) {currentPreparedBox(expected);return;}
+  if(!equal(expected,storedSnapshot(message))) fail('Prepared draft changed after submission; retained');
+  // Re-resolve ownership immediately before the destructive exact-ID read.
+  box=currentPreparedBox(expected);
+  message=preparedById(box,expected.id);
+  if(message === null) {currentPreparedBox(expected);return;}
+  if(!equal(expected,storedSnapshot(message))) fail('Prepared draft changed before removal; retained');
+  message.delete();
+  for(let i=0;i<30;i++) {
+   if(preparedById(box,expected.id) === null) {currentPreparedBox(expected);return;}
+   delay(0.1);
+  }
+  fail('Prepared draft removal could not be verified after submission');
+ }
  function matches(message) {
   return String(message.subject()) === input.subject && matchesBody(message.content()) &&
    address(message.sender()).toLowerCase() === result.sender.toLowerCase() && equal(recipients(message,'toRecipients'),input.to) &&
@@ -356,9 +442,12 @@ function composeOutgoing(input, action) {
   result.accountId = target.id; result.sender = target.sender;
   if (action === 'preview') { result.status='preview'; return {ok:true,result:result}; }
   let drafts = null, before = {};
-  if (action === 'save') {
+  if (action === 'save' || action === 'send') {
+   step='draft_baseline';
    drafts = draftMailboxForAccount(mail,target.account);
-   drafts.messages().forEach(m => { before[String(m.id())] = true; });
+   const baseline=drafts.messages.id();
+   if(!Array.isArray(baseline)) fail('Draft baseline IDs unavailable');
+   baseline.forEach(id => { before[String(id)] = true; });
   }
   phase('outgoing_compose',function() {
   step='compose';
@@ -379,7 +468,12 @@ function composeOutgoing(input, action) {
   step=action;
   if (action === 'send') {
    step='send_fingerprint';
-   const expected = ownedFingerprint();
+   const expected=ownedFingerprint();
+   step='prepare_send';
+   const prepared=prepareSendDraft(target,before);
+   guardSender();
+   step='prepared_compose_verification';
+   if(!equal(expected,ownedFingerprint(expected.files !== null))) fail('Owned composition changed during draft preparation; retained');
    step='send';
    phase('outgoing_send',function() {
     attempted=true;
@@ -387,7 +481,7 @@ function composeOutgoing(input, action) {
     accepted=true; result.submitted=true; result.status='submitted';
    });
    step='submitted_cleanup';
-   phase('outgoing_submitted_cleanup',function() { cleanupSubmitted(expected); });
+   phase('outgoing_submitted_cleanup',function() { cleanupSubmitted(expected); cleanupPreparedDraft(prepared); });
    return {ok:true,result:result,attempted:true};
   }
   phase('outgoing_save',function() { attempted=true; mail.save(outgoing); mail.close(outgoing,{saving:'yes'}); saved=true; });
