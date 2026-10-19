@@ -458,7 +458,12 @@ function composeOutgoing(input, action) {
      if(exact === null)continue;
      if(matches(exact)) { const snapshot=storedSnapshot(exact); if(snapshot.id !== id) fail('Prepared draft identity changed during read'); if(matchesPrepared(snapshot)) candidates.push(snapshot); }
     }
-   } catch(e) { if(e.deletedStatusFailure || e.errorNumber !== -1728) throw e; delay(0.1);continue; }
+   } catch(e) {
+    // A newly saved exact object can be visible before required properties
+    // settle. Retry reads only; never infer active/deleted state from failure.
+    if(e.errorNumber !== -1728)throw e;
+    delay(0.1);continue;
+   }
    if(candidates.length > 1) fail('Prepared draft identity is ambiguous');
    if(candidates.length === 1) return candidates[0];
    delay(0.1);
@@ -591,7 +596,12 @@ function composeOutgoing(input, action) {
      if(exact !== null && matches(exact))candidates.push(exact);
     }
    }
-   catch(e) { if(e.deletedStatusFailure || e.errorNumber !== -1728) throw e; delay(0.1); continue; }
+   catch(e) {
+    // The save was already acknowledged. Only transient missing-property
+    // readiness reads are retried within this bounded verification loop.
+    if(e.errorNumber !== -1728)throw e;
+    delay(0.1);continue;
+   }
    if (candidates.length > 1) fail('Saved draft identity is ambiguous');
    if (candidates.length === 1) {
     const m=candidates[0];
