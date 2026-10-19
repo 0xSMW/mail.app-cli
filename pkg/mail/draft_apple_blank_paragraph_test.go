@@ -95,3 +95,58 @@ func TestDraftAppleRelatedLeadingDefaultBlankRejectsBodyDrift(t *testing.T) {
 		t.Fatal("accepted display separator without proven leading blank paragraph")
 	}
 }
+
+func TestDraftAppleRelatedExactBlankParagraphPositions(t *testing.T) {
+	const first = "Plain <line> & symbols.\n"
+	const second = "Unicode: café 日本語 🚀\n"
+	for _, position := range []string{"leading", "interior", "consecutive", "trailing", "leading and interior"} {
+		t.Run(position, func(t *testing.T) {
+			snapshot, _ := appleLeadingBlankFixture(t)
+			snapshot.Source = strings.Replace(snapshot.Source, appleLeadingBlank+"\n", "", 1)
+			canonical := first + second
+			switch position {
+			case "leading":
+				snapshot.Source = strings.Replace(snapshot.Source, `<p style="margin: 0.0px 0.0px 0.0px 0.0px">`, appleLeadingBlank+`<p style="margin: 0.0px 0.0px 0.0px 0.0px">`, 1)
+				canonical = "\n" + canonical
+			case "interior", "leading and interior":
+				snapshot.Source = strings.Replace(snapshot.Source, "</p>\n", "</p>\n"+appleLeadingBlank+"\n", 1)
+				canonical = first + "\n" + second
+				if position == "leading and interior" {
+					snapshot.Source = strings.Replace(snapshot.Source, `<p style="margin: 0.0px 0.0px 0.0px 0.0px">`, appleLeadingBlank+`<p style="margin: 0.0px 0.0px 0.0px 0.0px">`, 1)
+					canonical = "\n" + canonical
+				}
+			case "consecutive":
+				snapshot.Source = strings.Replace(snapshot.Source, "</p>\n", "</p>\n"+appleLeadingBlank+appleLeadingBlank+"\n", 1)
+				canonical = first + "\n\n" + second
+			case "trailing":
+				snapshot.Source = strings.Replace(snapshot.Source, appleRelatedObject(appleRelatedCID), appleLeadingBlank+appleRelatedObject(appleRelatedCID), 1)
+				canonical += "\n"
+			}
+			rendered, ok := attachmentParagraphReadback(canonical)
+			if !ok {
+				t.Fatal("invalid canonical fixture")
+			}
+			snapshot.Message.Content = rendered
+			body, files, err := reconstructibleDraft(snapshot)
+			if err != nil || body != canonical || len(files) != 2 || string(files[0].data) != "\x00\x01\x02\x03" || string(files[1].data) != "second\n" {
+				t.Fatalf("body=%q files=%+v err=%v", body, files, err)
+			}
+			for _, changed := range []string{strings.Replace(rendered, "\u2028", "", 1), strings.Replace(rendered, "Plain", "Pl\u2028ain", 1), rendered + " "} {
+				snapshot.Message.Content = changed
+				if _, _, err := reconstructibleDraft(snapshot); err == nil {
+					t.Fatalf("accepted altered rendering %q", changed)
+				}
+			}
+		})
+	}
+}
+
+func TestDraftAppleRelatedBlankRenderingRejectsUnprovenParagraphBreaks(t *testing.T) {
+	for _, extra := range []string{`<p style="margin: 0.0px 0.0px 0.0px 0.0px"></p>`, `<p style="margin: 0.0px 0.0px 0.0px 0.0px">` + appleRelatedFont("Helvetica", "<br>") + `</p>`} {
+		snapshot, _ := appleLeadingBlankFixture(t)
+		snapshot.Source = strings.Replace(snapshot.Source, appleLeadingBlank, appleLeadingBlank+extra, 1)
+		if _, _, err := reconstructibleDraft(snapshot); err == nil {
+			t.Fatal("accepted additional unproven blank paragraph structure")
+		}
+	}
+}
