@@ -341,6 +341,8 @@ Native sends with attachments save the same composition before submission and ve
 
 Outgoing commands require Mail to acknowledge the operation. A failure returns a nonzero exit; an uncertain submission must be checked before retrying. `sent` and `submitted` indicate Mail accepted submission, not recipient delivery. Draft creation verifies the saved draft directly through Mail rather than waiting for the search index. It identifies the account’s Drafts folder through Mail’s special mailbox references, including localized and nested folders.
 
+Sending requires Mail to expose one uniquely identified Drafts folder belonging to the selected account. The CLI saves the composition before sending and records that saved copy. After submission, it removes the copy only if it is unchanged and verifies its absence. A `submitted_cleanup_pending` receipt still means Mail accepted the message; check the retained draft instead of sending again.
+
 `drafts send` rebuilds supported plain-text drafts and ordinary file attachments as an outgoing message, preserving the sender and To/Cc/Bcc addresses. Standard Mail signature-selection, base-URL, and attachment-preference headers are accepted only with recognized values; content preservation is still verified independently. It rejects rich text, inline content, reply-thread headers, signing/encryption, or other unsupported message semantics before submission; send those drafts in Mail. The original stays until Mail acknowledges submission and is removed only if it is unchanged. A receipt with `submitted: true` and `cleanupPending: true` means the message was submitted but the original draft remains; do not resend it.
 
 ## Search
