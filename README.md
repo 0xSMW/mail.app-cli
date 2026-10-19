@@ -314,7 +314,9 @@ mail-app-cli search "sample invoice" -a "Example Account" --since 2026-01-01 --s
 mail-app-cli search "sample invoice" -a "Example Account" -m "All Mail"
 ```
 
-Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` in regular structured output. With `--ids-only` or `--count`, those list modifiers operate on `messages`. If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
+Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers each enabled account's Inbox and its other non-empty mailboxes (or only the account named with `-a`). Mailboxes with unknown counts are included. Exchange and IMAP accounts use Mail's local index when available.
+
+If a mailbox cannot be completely searched, the command exits 5. This includes reaching the automation fallback's scan budget or being unable to read a field needed to determine a match. The same rule applies with `-m`. `--allow-partial` returns observed matches as `{messages, complete, searchedMailboxes, failedMailboxes}`; incomplete mailbox entries include available scan counts, truncation, and read-failure details. Reaching the requested result limit alone is normal success. With `--ids-only` or `--count`, those list modifiers operate on `messages`. A known incomplete search is never replaced by cached success. The recent-message journal can be consulted when live search cannot start; `--no-cache` disables that fallback.
 
 ## Other commands
 
