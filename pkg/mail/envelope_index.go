@@ -258,6 +258,33 @@ func indexMailboxURLPattern(accountID, mailboxName string) string {
 	return fmt.Sprintf("imap://%s/%s", accountID, escapedName)
 }
 
+// Match the complete authority in each indexed URL rather than assuming an
+// account's provider scheme. Comparing the authority with = keeps account IDs
+// case-sensitive and treats LIKE wildcards in an ID literally.
+func indexAccountMailboxCondition(accountID string) string {
+	if accountID == "" {
+		return "0"
+	}
+	authority := "substr(url, instr(url, '://') + 3)"
+	return fmt.Sprintf("instr(url, '://') > 1 and substr(%s, 1, instr(%s, '/') - 1) = %s collate binary",
+		authority, authority, sqlQuote(accountID))
+}
+
+// Use the same ranked selection for normal reads and verification snapshots.
+// The scheme comes from each row, so mixed schemes and subsequent index updates
+// do not require a cached account-to-scheme mapping.
+func indexMailboxSelect(accountID, mailbox string, counts bool) string {
+	projection := "ROWID as ID, url as URL"
+	if counts {
+		projection += ", total_count, unread_count"
+	}
+	return indexMailboxCandidateSelect(accountID, mailbox, projection)
+}
+
+func indexMailboxPath(accountID string) string {
+	return fmt.Sprintf("substr(url, instr(url, '://') + 3 + length(%s))", sqlQuote(accountID+"/"))
+}
+
 func escapeMailboxURLPath(name string) string {
 	components := strings.Split(name, "/")
 	for i := range components {
@@ -338,9 +365,9 @@ select
 	total_count as TotalCount,
 	unread_count as UnreadCount
 from mailboxes
-where url like %s
+where %s
 order by url;
-`, sqlQuote("imap://"+account.ID+"/%"))
+`, indexAccountMailboxCondition(account.ID))
 
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
@@ -564,15 +591,28 @@ func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
 		if !identity.hasFallback() {
 			return nil, fmt.Errorf("stable identity lacks complete indexed metadata")
 		}
-		key := identity.fallbackKey()
+		key := identity.verificationKey()
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		conditions = append(conditions, fmt.Sprintf(`(coalesce(s.subject, '') = %s
-		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
-		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
-		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
+		senderCondition := "(case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = " + sqlQuote(identity.Sender)
+		rfc := validRFCMessageID(identity.RFCMessageID)
+		if rfc != "" {
+			address := stableSenderAddress(identity.Sender)
+			if address == "" {
+				return nil, fmt.Errorf("RFC stable identity lacks a valid sender address")
+			}
+			senderCondition = "lower(coalesce(a.address, '')) = " + sqlQuote(address)
+		}
+		condition := fmt.Sprintf(`(coalesce(s.subject, '') = %s
+        and %s
+        and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s`, sqlQuote(identity.Subject), senderCondition, sqlQuote(canonicalIdentityDate(identity.DateSent)))
+		// A confirmed RFC header tolerates server reserialization changing size.
+		if rfc == "" {
+			condition += fmt.Sprintf(" and m.size = %d", identity.MessageSize)
+		}
+		conditions = append(conditions, condition+")")
 	}
 	return conditions, nil
 }
@@ -680,15 +720,21 @@ func indexMailboxPreference(accountID, mailbox string) indexMailboxCandidates {
 }
 
 func indexMailboxExactCondition(accountID, mailbox string) string {
-	return "url = " + sqlQuote(indexMailboxURLPattern(accountID, mailbox))
+	exact := strings.TrimPrefix(indexMailboxURLPattern(accountID, mailbox), "imap://"+accountID+"/")
+	comparison := indexMailboxPath(accountID) + " = " + sqlQuote(exact)
+	if strings.EqualFold(mailbox, "INBOX") {
+		comparison += " collate nocase"
+	}
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + comparison + ")"
 }
 
 func indexMailboxBroadCondition(accountID, mailbox string) string {
-	return "url like " + sqlQuote("imap://"+accountID+"/%/"+escapedMailboxLeaf(mailbox))
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(escapedMailboxLeaf(mailbox))) + ` escape '\')`
 }
 
 func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
-	return "url = " + sqlQuote("imap://"+accountID+"/Archive"), "url like " + sqlQuote("imap://"+accountID+"/%/Archive")
+	prefix := "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID)
+	return prefix + " = 'Archive')", prefix + ` like '%/Archive' escape '\')`
 }
 
 func indexMailboxCandidateSelect(accountID, mailbox, projection string) string {

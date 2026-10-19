@@ -107,32 +107,82 @@ func nativeRuleEnum(code string) string {
 	}
 }
 
-// Rule conditions can have inapplicable properties. Read each list field
-// explicitly so a target failure retains its exact rule/property context.
-func (n *nativeMail) outgoingRuleListFields(object ae.Value, label string, codes ...string) (map[string]ae.Value, error) {
-	fields := make(map[string]ae.Value, len(codes))
-	for _, code := range codes {
-		value, e := n.get(ae.Property(code, object))
-		if e != nil {
-			return nil, fmt.Errorf("read %s property %s: %w", label, code, e)
-		}
-		fields[code] = value
+// Mail supports homogeneous property projections over an element collection.
+// Do not send an arbitrary list of object specifiers as a getter: Mail rejects it.
+func (n *nativeMail) ruleColumns(collection ae.Value, count int, label, phase string, codes ...string) (map[string][]ae.Value, error) {
+	columns := make(map[string][]ae.Value, len(codes))
+	if count == 0 {
+		return columns, nil
 	}
-	return fields, nil
+	for _, code := range codes {
+		var value ae.Value
+		err := n.phase(phase+"_"+code, func() error {
+			var err error
+			value, err = n.get(ae.Property(code, collection))
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("read %s property %s: %w", label, code, err)
+		}
+		if value.Kind != "list" || len(value.Items) != count {
+			return nil, fmt.Errorf("read %s property %s: expected %d column values (descriptor kind=%q count=%d)", label, code, count, value.Kind, len(value.Items))
+		}
+		columns[code] = value.Items
+	}
+	return columns, nil
+}
+
+// Ordered names detect observed collection drift; separate Apple Events are not
+// an atomic snapshot. Each discovered reference is also checked before use.
+func (n *nativeMail) guardRuleOrder(expected []string, phase string) error {
+	columns, err := n.ruleColumns(ae.All("rule", ae.Null()), len(expected), "rules order", phase, "pnam")
+	if err != nil {
+		return err
+	}
+	for i, value := range columns["pnam"] {
+		name, err := nativeString(value, "rule name")
+		if err != nil {
+			return err
+		}
+		if name != expected[i] {
+			return fmt.Errorf("rules identity/order changed during listing")
+		}
+	}
+	return nil
 }
 
 func (c *Client) listNativeRules() ([]Rule, error) {
 	out := []Rule{}
 	err := c.withNativeAutomation(0, func(n *nativeMail) error {
-		refs, e := n.outgoingRuleRefs("")
+		var refs []ae.Value
+		e := n.phase("rules_discovery", func() error {
+			var err error
+			refs, err = n.outgoingRuleRefs("")
+			return err
+		})
 		if e != nil {
+			return e
+		}
+		codes := []string{"pnam", "isac", "rstm", "rdme", "rmre", "rmfl"}
+		columns, e := n.ruleColumns(ae.All("rule", ae.Null()), len(refs), "rules", "rules_columns", codes...)
+		if e != nil {
+			return e
+		}
+		names := make([]string, len(refs))
+		for i, value := range columns["pnam"] {
+			names[i], e = nativeString(value, "rule name")
+			if e != nil {
+				return e
+			}
+		}
+		if e = n.guardRuleOrder(names, "rules_order_after_columns"); e != nil {
 			return e
 		}
 		for ruleIndex, ref := range refs {
 			label := fmt.Sprintf("rule %d", ruleIndex+1)
-			f, e := n.outgoingRuleListFields(ref, label, "pnam", "isac", "rstm", "rdme", "rmre", "rmfl")
-			if e != nil {
-				return e
+			f := make(map[string]ae.Value, len(codes))
+			for _, code := range codes {
+				f[code] = columns[code][ruleIndex]
 			}
 			name, e := nativeString(f["pnam"], "rule name")
 			if e != nil {
@@ -143,21 +193,35 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 					return fmt.Errorf("rule property %s unavailable", code)
 				}
 			}
+			actualName, e := n.stringProperty("pnam", ref)
+			if e != nil {
+				return fmt.Errorf("read %s identity: %w", label, e)
+			}
+			if actualName != name {
+				out = nil
+				return fmt.Errorf("%s identity/order changed during listing", label)
+			}
 			rule := Rule{Name: name, Enabled: f["isac"].Boolean}
-			v, e := n.get(ae.All("rucr", ref))
+			var conditionList ae.Value
+			e = n.phase(fmt.Sprintf("rules_%d_conditions", ruleIndex+1), func() error {
+				var err error
+				conditionList, err = n.get(ae.All("rucr", ref))
+				return err
+			})
 			if e != nil {
 				return fmt.Errorf("read %s conditions: %w", label, e)
 			}
-			conditions, e := nativeList(v, "rule conditions")
+			conditions, e := nativeList(conditionList, "rule conditions")
 			if e != nil {
 				return e
 			}
-			for conditionIndex, condition := range conditions {
+			conditionColumns, e := n.ruleColumns(ae.All("rucr", ref), len(conditions), label+" conditions", fmt.Sprintf("rules_%d_condition_columns", ruleIndex+1), "rtyp", "rqua", "rexp")
+			if e != nil {
+				return e
+			}
+			for conditionIndex := range conditions {
 				conditionLabel := fmt.Sprintf("%s condition %d", label, conditionIndex+1)
-				cf, e := n.outgoingRuleListFields(condition, conditionLabel, "rtyp", "rqua", "rexp")
-				if e != nil {
-					return e
-				}
+				cf := map[string]ae.Value{"rtyp": conditionColumns["rtyp"][conditionIndex], "rqua": conditionColumns["rqua"][conditionIndex], "rexp": conditionColumns["rexp"][conditionIndex]}
 				for _, code := range []string{"rtyp", "rqua"} {
 					if cf[code].Kind != "enum" || len(cf[code].Code) != 4 {
 						return fmt.Errorf("read %s property %s: expected enumerated value (descriptor kind=%q code=%q)", conditionLabel, code, cf[code].Kind, cf[code].Code)
@@ -201,6 +265,10 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 				rule.Actions = append(rule.Actions, "mark flagged")
 			}
 			out = append(out, rule)
+		}
+		if e = n.guardRuleOrder(names, "rules_order_after_walk"); e != nil {
+			out = nil
+			return e
 		}
 		return nil
 	})

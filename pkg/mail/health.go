@@ -16,6 +16,38 @@ const DoctorProbeTimeout = 3 * time.Second
 
 var mailAppBundlePath = "/System/Applications/Mail.app"
 
+// RunningMailProcessIDs inspects the workspace without sending Mail an Apple
+// Event or launching it. A running process does not imply a responsive bridge.
+func (c *Client) RunningMailProcessIDs(timeout time.Duration) ([]int, error) {
+	output, err := c.runJXAWithTimeout(`
+// mail-app-cli doctor: running process probe (no Apple Events)
+ObjC.import('AppKit');
+const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier('com.apple.mail');
+const pids = [];
+for (let i = 0; i < apps.count; i++) {
+	const app = apps.objectAtIndex(i);
+	if (!app.terminated) pids.push(Number(app.processIdentifier));
+}
+JSON.stringify(pids);
+`, timeout)
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	if err := json.Unmarshal([]byte(output), &pids); err != nil {
+		return nil, fmt.Errorf("failed to parse Mail.app process probe: %w", err)
+	}
+	if pids == nil {
+		return nil, fmt.Errorf("Mail.app process probe returned no process list")
+	}
+	for _, pid := range pids {
+		if pid <= 0 {
+			return nil, fmt.Errorf("Mail.app process probe returned invalid PID %d", pid)
+		}
+	}
+	return pids, nil
+}
+
 // CheckMailBridge verifies that the local Mail.app bundle is present without
 // issuing an Apple Event. Automation permission is checked independently so a
 // denied permission cannot be mistaken for a missing Mail installation.

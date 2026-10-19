@@ -1,10 +1,12 @@
 package mail
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // OutgoingInput composes a new message. Sender optionally selects an exact
@@ -69,28 +71,66 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 		return nil, err
 	}
 	script := jxaPhaseHelper() + jxaOutgoingHelper() + "\nJSON.stringify(composeOutgoing(" + string(payload) + ", " + fmt.Sprintf("%q", action) + "));"
-	output, err := c.runJXA(script)
+	output, trace, err := c.runOutgoingJXA(script)
 	if err != nil {
 		attempted := action != "preview"
 		var lockErr *AutomationLockTimeoutError
 		if errors.As(err, &lockErr) {
 			attempted = false
 		}
-		var timeoutErr *AutomationTimeoutError
-		if errors.As(err, &timeoutErr) && timeoutErr.Trace != nil {
-			attempted = timeoutErr.Trace.Pending == "outgoing_"+action || timeoutErr.Trace.LastCompleted == "outgoing_"+action
+		if trace != nil {
+			attempted = trace.Pending == "outgoing_"+action || trace.LastCompleted == "outgoing_"+action
+			for _, phase := range trace.Phases {
+				if phase.Name == "outgoing_"+action {
+					attempted = true
+				}
+			}
 		}
 		cleanup := ""
-		if action != "preview" && !attempted && timeoutErr != nil && timeoutErr.Trace != nil && timeoutErr.Trace.Pending == "outgoing_compose" {
+		if action != "preview" && !attempted && trace != nil && trace.Pending == "outgoing_compose" {
 			cleanup = "cleanup could not be confirmed after interrupted composition"
+		}
+		// A completed send phase records an affirmative acknowledgement, even if
+		// the bridge is interrupted while checking or closing the owned composition.
+		if action == "send" && trace != nil && (trace.LastCompleted == "outgoing_send" || trace.LastCompleted == "outgoing_submitted_cleanup" || trace.Pending == "outgoing_submitted_cleanup") {
+			cleanup = "submitted composition cleanup could not be confirmed"
+			result := &OutgoingResult{Account: input.Account, Sender: input.Sender, Status: "submitted_cleanup_pending", Submitted: true}
+			return result, &MutationError{Operation: action, Phase: "submitted_cleanup", Account: input.Account, Sender: input.Sender, Cause: err, Attempted: true, Submitted: true, Cleanup: cleanup}
 		}
 		return nil, &MutationError{Operation: action, Phase: "automation", Account: input.Account, Sender: input.Sender, Cause: err, Attempted: attempted, Uncertain: attempted, Cleanup: cleanup}
 	}
+	acknowledged := action == "send" && trace != nil && (trace.LastCompleted == "outgoing_send" || trace.LastCompleted == "outgoing_submitted_cleanup" || trace.Pending == "outgoing_submitted_cleanup")
+	responseFailure := func(result *OutgoingResult, cause error) (*OutgoingResult, error) {
+		if result == nil {
+			result = &OutgoingResult{}
+		}
+		if result.Account != input.Account {
+			result.AccountID, result.Sender = "", input.Sender
+		}
+		result.Account = input.Account
+		result.Submitted = true
+		result.Status = "submitted_cleanup_pending"
+		return result, &MutationError{Operation: action, Phase: "response", Account: input.Account, Sender: result.Sender, Cause: cause, Attempted: true, Submitted: true, Cleanup: "send acknowledged; final receipt and submitted composition cleanup could not be verified"}
+	}
 	var envelope outgoingEnvelope
 	if err := json.Unmarshal([]byte(output), &envelope); err != nil {
-		return nil, &MutationError{Operation: action, Phase: "response", Account: input.Account, Sender: input.Sender, Cause: fmt.Errorf("invalid outgoing response: %w", err), Attempted: action != "preview", Uncertain: action != "preview"}
+		cause := fmt.Errorf("invalid outgoing response: %w", err)
+		if acknowledged {
+			return responseFailure(nil, cause)
+		}
+		return nil, &MutationError{Operation: action, Phase: "response", Account: input.Account, Sender: input.Sender, Cause: cause, Attempted: action != "preview", Uncertain: action != "preview"}
 	}
 	result := &envelope.Result
+	if acknowledged {
+		// The phase receipt proves acceptance, but cannot repair an incomplete
+		// final response or establish that submitted-composition cleanup completed.
+		validIdentity := result.Account == input.Account && result.AccountID != "" && result.Sender != "" && result.Submitted
+		validStatus := (envelope.OK && result.Status == "submitted") || (!envelope.OK && result.Status == "submitted_cleanup_pending" && envelope.Phase == "submitted_cleanup" && envelope.Cleanup != "")
+		if !validIdentity || !validStatus {
+			return responseFailure(result, errors.New("Mail returned an incomplete outgoing receipt"))
+		}
+		envelope.Attempted, envelope.Uncertain = true, false
+	}
 	if !envelope.OK {
 		if envelope.Error == "" {
 			envelope.Error = "Mail did not return a successful outgoing receipt"
@@ -107,6 +147,33 @@ func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingR
 		}
 	}
 	return result, nil
+}
+
+// Keep phase receipts on cancellation or a severed one-shot bridge so a known
+// send acknowledgement cannot be downgraded to an uncertain send.
+func (c *Client) runOutgoingJXA(script string) (string, *PhaseTrace, error) {
+	if c.session != nil {
+		output, err := c.runJXA(script)
+		var timeout *AutomationTimeoutError
+		if errors.As(err, &timeout) {
+			return output, timeout.Trace, err
+		}
+		return output, nil, err
+	}
+	ctx := c.Context()
+	lockCtx, cancel := context.WithTimeout(ctx, automationLockTimeout)
+	defer cancel()
+	if err := acquireAutomationGate(lockCtx); err != nil {
+		return "", nil, automationLockError("jxa", ctx, err)
+	}
+	defer releaseAutomationGate()
+	release, err := acquireAutomationProcessLock(lockCtx)
+	if err != nil {
+		return "", nil, automationLockError("jxa", ctx, err)
+	}
+	defer release()
+	execution, err := runAutomationUnlocked(ctx, "jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
+	return execution.Output, buildPhaseTrace(execution.Events, time.Now()), err
 }
 
 // The same helper is executed by osascript and the Node mock tests. No account
@@ -181,6 +248,97 @@ function composeOutgoing(input, action) {
  const expectedNames = (input.attachments || []).map(p => p.split('/').pop().normalize('NFC')).sort();
  function equal(a,b) { return JSON.stringify(a) === JSON.stringify(b); }
  function recipients(message, kind) { return message[kind]().map(r => String(r.address())); }
+ // Read only the exact composition created by this invocation. Every field
+ // is required; a failed recipient/attachment read cannot prove it unchanged.
+ function ownedFingerprint(readNames) {
+  function text(value) { if (typeof value !== 'string') fail('Owned composition field is not readable text'); return value; }
+  function list(kind) {
+   const values = outgoing[kind]();
+   if (!Array.isArray(values)) fail('Owned composition recipient list is unavailable');
+   return values.map(r => text(r.address()));
+  }
+  const id = String(outgoing.id());
+  if (!/^[0-9]+$/.test(id)) fail('Owned outgoing message ID unavailable');
+  // JXA cannot reliably address Mail's rich-text attachments. Use the same
+  // public AppleScript content attachment surface used during insertion.
+  // The outgoing object is the one created and retained by this invocation.
+  const lines=['-- mail-app-cli-owned-attachment-snapshot','try','tell application "Mail"','tell outgoing message id '+id,'tell content',
+   'set attachmentCount to count attachments','set attachmentNames to {}',
+   'if attachmentCount is 0 then return {attachmentCount, attachmentNames, true}'];
+  // Mail can expose a valid count while rejecting the public filename getter.
+  // Preserve that precise baseline limitation; required count reads always fail
+  // closed, and a later loss of previously readable names retains the object.
+  if (readNames === false) lines.push('return {attachmentCount, attachmentNames, false}');
+  else lines.push('try','repeat with attachmentItem in attachments',
+   'set attachmentFile to file name of attachmentItem',
+   'if attachmentFile is missing value then return {attachmentCount, {}, false}',
+   'set end of attachmentNames to POSIX path of attachmentFile','end repeat',
+   'on error errorMessage number errorNumber',
+   'if errorNumber is -10000 or errorNumber is -1708 or errorNumber is -1728 then return {attachmentCount, {}, false}',
+   'error errorMessage number errorNumber','end try','return {attachmentCount, attachmentNames, true}');
+  lines.push('end tell','end tell','end tell','on error errorMessage number errorNumber','return {errorNumber}','end try');
+  const error=Ref();
+  const value=$.NSAppleScript.alloc.initWithSource(lines.join('\n')).executeAndReturnError(error);
+  // Foundation can return a truthy JXA ObjC nil wrapper. Inspect only its
+  // descriptor type; unwrapping nil/error-ref internals can crash osascript.
+  // Required AppleScript runtime errors return a typed one-integer tuple.
+  if (!value || !Number.isInteger(Number(value.descriptorType))) fail('Owned attachment read returned an invalid descriptor: root=invalid');
+  function typeCode(code) { return code.split('').reduce((value,ch) => value*256+ch.charCodeAt(0),0); }
+  function hasType(descriptor, code) { return descriptor && Number(descriptor.descriptorType) === typeCode(code); }
+  function descriptorKind(descriptor) {
+   if (!descriptor) return 'missing';
+   const kind=Number(descriptor.descriptorType);
+   if (!Number.isInteger(kind)) return 'invalid';
+   const code=[24,16,8,0].map(shift => String.fromCharCode(Math.floor(kind/Math.pow(2,shift))%256)).join('');
+   return JSON.stringify(code)+' ('+kind+')';
+  }
+  if (hasType(value,'list') && Number(value.numberOfItems) === 1) {
+   const failure=value.descriptorAtIndex(1);
+   if (!hasType(failure,'long')) fail('Owned attachment error tuple returned invalid type: error='+descriptorKind(failure));
+   const number=Number(failure.int32Value);
+   if (!Number.isInteger(number)) fail('Owned attachment error tuple returned an invalid error number');
+   fail('Owned attachment read failed: AppleScript error '+number);
+  }
+  if (!hasType(value,'list') || Number(value.numberOfItems) !== 3) fail('Owned attachment read returned an invalid descriptor: root='+descriptorKind(value));
+  const countDescriptor=value.descriptorAtIndex(1);
+  const names=value.descriptorAtIndex(2);
+  const availableDescriptor=value.descriptorAtIndex(3);
+  // AppleScript count returns a signed 32-bit integer. NSAppleEventDescriptor
+  // accessors coerce other types, so validate each descriptor before reading.
+  if (!hasType(countDescriptor,'long') || !hasType(names,'list') || !['bool','true','fals'].some(code => hasType(availableDescriptor,code))) {
+   fail('Owned attachment read returned invalid field types: count='+descriptorKind(countDescriptor)+', names='+descriptorKind(names)+', available='+descriptorKind(availableDescriptor));
+  }
+  const count=Number(countDescriptor.int32Value);
+  // Apple Events permits intrinsic true/fals descriptors as well as bool.
+  // Intrinsic descriptors carry their value in the type, without a payload.
+  let namesAvailable;
+  if (hasType(availableDescriptor,'true')) namesAvailable=true;
+  else if (hasType(availableDescriptor,'fals')) namesAvailable=false;
+  else {
+   const flag=availableDescriptor.booleanValue;
+   if (typeof flag === 'boolean') namesAvailable=flag;
+   else if (typeof flag === 'number' && (flag === 0 || flag === 1)) namesAvailable=flag === 1;
+   else fail('Owned attachment read returned an invalid Boolean value: available='+descriptorKind(availableDescriptor));
+  }
+  if (!Number.isInteger(count) || count < 0 || (namesAvailable ? Number(names.numberOfItems) !== count : Number(names.numberOfItems) !== 0)) fail('Owned attachment count does not match filenames');
+  const files=namesAvailable ? [] : null;
+  for (let i=1;namesAvailable && i<=count;i++) {
+   const nameDescriptor=names.descriptorAtIndex(i);
+   if (!['TEXT','utxt','utf8'].some(code => hasType(nameDescriptor,code))) fail('Owned attachment filename has an invalid descriptor type');
+   const name=ObjC.deepUnwrap(nameDescriptor.stringValue);
+   if (typeof name !== 'string' || name.length === 0) fail('Owned attachment filename unavailable');
+   files.push(name.split('/').pop().normalize('NFC'));
+  }
+  return {id:id,sender:text(outgoing.sender()),subject:text(outgoing.subject()),body:text(outgoing.content()),
+   to:list('toRecipients'),cc:list('ccRecipients'),bcc:list('bccRecipients'),attachmentCount:count,files:files === null ? null : files.sort()};
+ }
+ function cleanupSubmitted(expected) {
+  // Only a missing owned object establishes absence. Missing nested properties
+  // are failures and must preserve the composition for inspection.
+  try { outgoing.subject(); } catch(e) { if (e.errorNumber === -1728) return; throw e; }
+  if (!equal(expected,ownedFingerprint(expected.files !== null))) fail('Submitted composition changed; retained');
+  try { mail.close(outgoing,{saving:'no'}); } catch(e) { if (e.errorNumber !== -1728) throw e; }
+ }
  function matchesBody(value) {
   const body=String(value).replace(/\r\n/g,'\n');
   const expected=composeBody.replace(/\r\n/g,'\n');
@@ -220,9 +378,16 @@ function composeOutgoing(input, action) {
   });
   step=action;
   if (action === 'send') {
-   const response = phase('outgoing_send',function() { attempted=true; return mail.send(outgoing); });
-   if (response !== true) fail('Mail did not accept send (expected true)');
-   accepted=true; result.submitted=true; result.status='submitted';
+   step='send_fingerprint';
+   const expected = ownedFingerprint();
+   step='send';
+   phase('outgoing_send',function() {
+    attempted=true;
+    if (mail.send(outgoing) !== true) fail('Mail did not accept send (expected true)');
+    accepted=true; result.submitted=true; result.status='submitted';
+   });
+   step='submitted_cleanup';
+   phase('outgoing_submitted_cleanup',function() { cleanupSubmitted(expected); });
    return {ok:true,result:result,attempted:true};
   }
   phase('outgoing_save',function() { attempted=true; mail.save(outgoing); mail.close(outgoing,{saving:'yes'}); saved=true; });
@@ -246,6 +411,7 @@ function composeOutgoing(input, action) {
   fail('Saved draft could not be verified directly in target account Drafts');
  } catch(e) {
   let cleanup='';
+  if (accepted) { result.status='submitted_cleanup_pending'; cleanup='submitted composition cleanup pending: '+String(e && e.message ? e.message : e); }
   // After a send/save attempt, keep every potentially submitted/saved object.
   if (outgoing !== null && !attempted) {
    try { mail.close(outgoing,{saving:'no'}); }

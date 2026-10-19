@@ -427,8 +427,13 @@ func TestGmailLabelBareMailMessageID(t *testing.T) {
 			t.Fatalf("accepted invalid RFC identity %q", invalid)
 		}
 	}
-	if validRFCMessageID("real@example.com") != "" {
-		t.Fatal("global StableIdentity RFC semantics changed")
+	if got := validRFCMessageID("real@example.com"); got != "<real@example.com>" {
+		t.Fatalf("Mail bare identity must share validated canonical form: %q", got)
+	}
+	for _, invalid := range []string{"262225", "<262225>", "Name <real@example.com>", "real@example.com\r\nInjected: true"} {
+		if validRFCMessageID(invalid) != "" {
+			t.Fatalf("global identity accepted invalid Mail ID %q", invalid)
+		}
 	}
 }
 

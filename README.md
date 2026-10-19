@@ -77,6 +77,24 @@ mail-app-cli drafts create -a "Example Account" -m INBOX --forward-of 100001 \
 
 The body, subject, and recipients are the complete outgoing content. Add `--reply-all` with `--reply-to` to create Mail's reply-all relationship. These flags require native mode and an explicit mailbox. Sending a stored draft preserves the existing MIME checks; unsupported rich drafts remain available for editing in Mail.
 
+## Exchange accounts in 3.0.0
+
+Use an Exchange account already connected to Mail.app with the same commands as other accounts:
+
+```bash
+mail-app-cli search "quarterly report" -a "Work Exchange" --limit 50
+mail-app-cli attachments list 100001 -a "Work Exchange" -m Inbox
+mail-app-cli archive 100001 -a "Work Exchange" -m Inbox --verify
+mail-app-cli drafts create -a "Work Exchange" --to colleague@example.test \
+  --subject "Review" --body-file review.txt --attach report.pdf
+```
+
+Search includes Exchange Inbox and other non-empty mailboxes, recognizes Mail's Exchange mailbox URLs, and treats `Inbox` and `INBOX` consistently. Incomplete mailbox searches return an error unless `--allow-partial` is requested; partial results identify the mailboxes that could not be read.
+
+Moves and archive verification follow the RFC Message-ID when Exchange changes the local ID or stored size. The account, source and destination, sender, subject, and sent time remain checked; ambiguous matches stay unverified. Attachment lookup accepts canonically equivalent Unicode filenames. Saved draft attachment reads use the selected account's special Drafts mailbox even before its local index catches up.
+
+Sending and draft updates accept recognized plain content stored inside Mail's generated HTML wrapper when text and attachment preservation can be proved. Rich formatting, unsupported inline content, signing, encryption, and reply-header reconstruction remain guarded; use Mail to send drafts outside the supported forms. After acknowledged submission, the CLI closes only its unchanged outgoing composition and removes only the unchanged stored draft. An uncertain submission is never automatically retried.
+
 ## Quick start
 
 ```bash
@@ -315,7 +333,7 @@ mail-app-cli drafts send <draft-id>
 mail-app-cli drafts delete <draft-id> --dry-run
 ```
 
-Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. `--dry-run` validates paths and previews the requested files without changing Mail.
+Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. Mail controls delivery MIME encoding; text attachments can acquire CRLF line endings in transit. `--dry-run` validates paths and previews the requested files without changing Mail.
 
 `send` and `drafts create` accept `--from <address>` to select an address configured on the account. Without it, they use the first configured address. Both validate the account and read the compose sender back before sending or saving; an unexpected sender or an address shared across accounts stops the operation. Draft updates preserve the original sender. Dry-run receipts include the account ID and selected sender, and validate the configured identity without composing a message. Sender validation does not establish which delivery route Mail will use.
 
@@ -331,7 +349,9 @@ mail-app-cli search "sample invoice" -a "Example Account" --since 2026-01-01 --s
 mail-app-cli search "sample invoice" -a "Example Account" -m "All Mail"
 ```
 
-Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` in regular structured output. With `--ids-only` or `--count`, those list modifiers operate on `messages`. If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
+Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers each enabled account's Inbox and its other non-empty mailboxes (or only the account named with `-a`). Mailboxes with unknown counts are included. Exchange and IMAP accounts use Mail's local index when available.
+
+If a mailbox cannot be completely searched, the command exits 5. This includes reaching the automation fallback's scan budget or being unable to read a field needed to determine a match. The same rule applies with `-m`. `--allow-partial` returns observed matches as `{messages, complete, searchedMailboxes, failedMailboxes}`; incomplete mailbox entries include available scan counts, truncation, and read-failure details. Reaching the requested result limit alone is normal success. With `--ids-only` or `--count`, those list modifiers operate on `messages`. A known incomplete search is never replaced by cached success. The recent-message journal can be consulted when live search cannot start; `--no-cache` disables that fallback.
 
 ## Other commands
 

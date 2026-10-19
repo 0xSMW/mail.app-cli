@@ -30,6 +30,7 @@ type outgoingDescriptorFixture struct {
 	sendReply                  ae.Value
 	corrupt                    string
 	sendCalls, closeCalls      int
+	closed                     bool
 }
 
 func newOutgoingDescriptorFixture() *outgoingDescriptorFixture {
@@ -79,6 +80,9 @@ func (f *outgoingDescriptorFixture) accountIndex(v ae.Value) int {
 	return descriptorAccountIndex(v)
 }
 func (f *outgoingDescriptorFixture) get(v ae.Value) (ae.Value, error) {
+	if f.closed && reflect.DeepEqual(v.Fields["from"], f.outgoing) {
+		return ae.Value{}, &ae.Error{Code: -1728, Message: "owned composition absent"}
+	}
 	if v.Kind == "list" {
 		items := make([]ae.Value, len(v.Items))
 		for i, ref := range v.Items {
@@ -193,6 +197,9 @@ func (f *outgoingDescriptorFixture) send(ctx context.Context, event ae.Event) (a
 		return f.sendReply, stats, f.sendErr
 	case "coreclos":
 		f.closeCalls++
+		if f.closeErr == nil {
+			f.closed = true
+		}
 		return ae.Null(), stats, f.closeErr
 	}
 	return ae.Value{}, stats, fmt.Errorf("unexpected event %s/%s", event.Class, event.ID)
@@ -489,11 +496,11 @@ func TestNativeDescriptorOutgoingAttachmentReadinessPollsTypedMissingFiles(t *te
 			if e != nil {
 				t.Fatal(e)
 			}
-			expectedReads := 2
+			expectedReads := 4
 			if pending.Code == "msng" {
-				expectedReads = 1
+				expectedReads = 3
 			}
-			if reads != expectedReads || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 0 {
+			if reads != expectedReads || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("readiness result=%+v reads=%d sends=%d closes=%d", result, reads, f.sendCalls, f.closeCalls)
 			}
 		})
@@ -540,7 +547,7 @@ func TestNativeDescriptorOutgoingAttachmentReadinessPollsMissingProperty(t *test
 	if e != nil {
 		t.Fatal(e)
 	}
-	if reads != 1 || !result.Submitted || f.sendCalls != 1 {
+	if reads != 3 || !result.Submitted || f.sendCalls != 1 {
 		t.Fatalf("readiness result=%+v reads=%d sends=%d", result, reads, f.sendCalls)
 	}
 }
@@ -577,7 +584,7 @@ func TestNativeDescriptorOutgoingAttachmentUnsupportedGetterNeedsExactNativeCoun
 			if e != nil {
 				t.Fatal(e)
 			}
-			if counts != 3 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 0 {
+			if counts != 5 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("count guard result=%+v counts=%d sends=%d closes=%d", result, counts, f.sendCalls, f.closeCalls)
 			}
 		})
@@ -699,7 +706,7 @@ func TestNativeDescriptorOutgoingAttachmentMissingMakeReceiptAcceptedOnlyWithRea
 			if e != nil {
 				t.Fatal(e)
 			}
-			if counts != 2 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 0 {
+			if counts != 4 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("missing receipt readiness result=%+v counts=%d sends=%d closes=%d", result, counts, f.sendCalls, f.closeCalls)
 			}
 		})

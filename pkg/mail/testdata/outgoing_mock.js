@@ -42,10 +42,14 @@ const mail={
  accounts:()=>{accountReads++;if(config.disableBeforeMutation && accountReads>=3) accounts[0].enabled=()=>false;return accounts;},
  outgoingMessages:{push:message=>{ composed++; outgoing=message; }},
  OutgoingMessage:properties=> {
-  const message={subject:()=>properties.subject,content:()=>properties.content,id:()=> 7};
+  function property(name, value) {
+   if ((config.fingerprintFailures || []).includes(name) && (!config.failAfterSend || sent > 0)) {const e=new Error(name+' unavailable');e.errorNumber=-1728;throw e;}
+   return value;
+  }
+  const message={subject:()=>property('subject',properties.subject),content:()=>property('body',properties.content),id:()=> 7};
   let sender=properties.sender;
-  Object.defineProperty(message,'sender',{get:()=>()=>{ if(config.getterThrows) throw new Error('sender read failed'); reads++;if(config.fallbackBeforeMutation && reads>=2) return 'other@example.com'; return config.readback || sender; },set:value=>{ if(config.setterThrows) throw new Error('sender write failed'); if(!config.ignoreSetter) sender=value; }});
-  ['to','cc','bcc'].forEach(kind=>{message[kind+'Recipients']=collection([]); if(config.dropRecipients)message[kind+'Recipients'].push=()=>{}});
+  Object.defineProperty(message,'sender',{get:()=>()=>{ if(config.getterThrows) throw new Error('sender read failed'); property('sender',sender); reads++;if(config.fallbackBeforeMutation && reads>=2) return 'other@example.com'; return config.readback || sender; },set:value=>{ if(config.setterThrows) throw new Error('sender write failed'); if(!config.ignoreSetter) sender=value; }});
+  ['to','cc','bcc'].forEach(kind=>{const values=[];const list=()=>property(kind,values);list.push=x=>values.push(x);message[kind+'Recipients']=list;if(config.dropRecipients)list.push=()=>{}});
   message.content.attachments=()=>config.attachNeverReady ? [] : attached;
   message.content.attachments.push=value=>{ if(config.attachmentThrows) throw new Error('attachment insertion failed'); attached.push(value); };
   const content=message.content;
@@ -55,12 +59,48 @@ const mail={
  },
  ToRecipient:p=>({address:()=>p.address}), CcRecipient:p=>({address:()=>p.address}), BccRecipient:p=>({address:()=>p.address}),
  Attachment:p=>({fileName:()=>p.fileName}),
- send:message=>{if(message!==outgoing) throw new Error('wrong outgoing');sent++;if(config.sendThrows)throw new Error('transport failed');return config.sendFalse ? false : true;},
+ send:message=>{if(message!==outgoing) throw new Error('wrong outgoing');sent++;if(config.sendThrows)throw new Error('transport failed');
+  if(config.afterSend){
+   const change=config.afterSend;
+   if(change.subject!==undefined)message.subject=()=>change.subject;
+   if(change.body!==undefined)message.content=change.body;
+   if(change.sender!==undefined)message.sender=change.sender;
+   ['to','cc','bcc'].forEach(kind=>{if(change[kind]!==undefined)message[kind+'Recipients']=()=>recipients(change[kind]);});
+   if(change.attachments!==undefined)attached=change.attachments.map(name=>({fileName:()=>name}));
+  }
+  return config.sendFalse ? false : true;},
  save:message=>{if(message!==outgoing)throw new Error('invalid save');},
  close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
  delete:message=>{if(message!==outgoing)throw new Error('deleting unrelated object');deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');}
 };
 const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnError:error=>{
+ if(code.includes('-- mail-app-cli-owned-attachment-snapshot')) {
+  if(!code.includes('tell outgoing message id 7') || !code.includes('tell content')) throw new Error('invalid owned attachment snapshot');
+  if((config.fingerprintFailures || []).includes('attachments') && (!config.failAfterSend || sent>0)){error[0]={message:'attachment read failed'};return null;}
+  if(config.snapshotNil && (!config.failAfterSend || sent>0)) return {__objcNil:true};
+  const typeCode=code=>[...code].reduce((value,ch)=>value*256+ch.charCodeAt(0),0);
+  if(config.snapshotCountMissing && (!config.failAfterSend || sent>0)){
+   if(!code.includes('on error errorMessage number errorNumber\nreturn {errorNumber}')) throw new Error('required count errors need outer typed error tuple');
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1728})};
+  }
+  const malformed=(!config.malformedAfterSend || sent>0) ? (config.malformedSnapshot || {}) : {};
+  const names=attached.map(a=>({descriptorType:typeCode(malformed.name || 'utxt'),stringValue:a.fileName()}));
+  if((config.fingerprintFailures || []).includes('attachmentName') && (!config.failAfterSend || sent>0))names.forEach(n=>n.stringValue=null);
+  const filenameMissingValue=config.filenameMissingValue || (config.filenameMissingValueAfterSend && sent>0);
+  if(filenameMissingValue && code.includes('repeat with attachmentItem') && !code.includes('if attachmentFile is missing value then return {attachmentCount, {}, false}')){
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1700})};
+  }
+  if(config.filenameMalformed && code.includes('repeat with attachmentItem')){
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1700})};
+  }
+  const filenameMissing = filenameMissingValue || (config.filenameMissing || (config.filenameMissingAfterSend && sent>0));
+  if(filenameMissing && code.includes('repeat with attachmentItem') && !code.includes('or errorNumber is -1728 then')){
+   error[0]={NSAppleScriptErrorNumber:-1728,NSAppleScriptErrorBriefMessage:'Filename getter unavailable'};
+   return {__objcNil:true};
+  }
+  const namesAvailable = names.length===0 || !(filenameMissing || config.filenameUnsupported || (config.filenameUnsupportedAfterSend && sent>0) || (code.includes('return {attachmentCount, attachmentNames, false}') && !code.includes('repeat with attachmentItem')));
+  return {descriptorType:typeCode(malformed.root || 'list'),numberOfItems:3,descriptorAtIndex:i=>i===1 ? {descriptorType:typeCode(malformed.count || 'long'),int32Value:names.length} : i===3 ? {descriptorType:typeCode(malformed.flag || (config.intrinsicBoolean ? (namesAvailable ? 'true' : 'fals') : 'bool')),booleanValue:namesAvailable} : {descriptorType:typeCode(malformed.names || 'list'),numberOfItems:namesAvailable?names.length:0,descriptorAtIndex:j=>names[j-1]}};
+ }
  if(!code.includes('tell outgoing message id 7') || !code.includes('tell content'))throw new Error('invalid native attachment script');
  if(config.attachmentThrows){error[0]={message:'attachment insertion failed'};return null;}
  for(const line of code.split('\n')) {
@@ -72,4 +112,4 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
 const sandbox={Application:name=>{if(name!=='Mail')throw new Error('wrong app');return mail;},Path:path=>path,delay:seconds=>{events.push(['delay',seconds]);if(config.realDelay)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,seconds*1000);},ObjC:{import:()=>{},deepUnwrap:v=>v},$:foundation,Ref:()=>[],reply:event=>events.push(event)};
 let response=vm.runInNewContext(request.script || request.helper+'\ncomposeOutgoing('+JSON.stringify(input)+','+JSON.stringify(request.action)+')',sandbox);
 if(typeof response==='string')response=JSON.parse(response);
-process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,composedBody:outgoing?outgoing.content():null,transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));
+process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,composedBody:(()=>{try{return outgoing?outgoing.content():null;}catch(e){return null;}})(),transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));

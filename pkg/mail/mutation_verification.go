@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // StableIdentity identifies a logical message across Mail.app local-ID
@@ -38,12 +40,69 @@ func canonicalIdentityDate(value string) string {
 	return value
 }
 
+// Mail's messageId property commonly omits the header's angle brackets.
+// Accept only an ASCII dot-atom addr-spec, never a local numeric Mail ID or
+// a header containing display names, comments, whitespace, or control bytes.
+var rfcMessageIDAtom = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
+
 func validRFCMessageID(value string) string {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return ""
+		}
+	}
 	value = strings.TrimSpace(value)
-	if len(value) < 3 || value[0] != '<' || value[len(value)-1] != '>' || strings.ContainsAny(value[1:len(value)-1], " \t\r\n<>") {
+	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
+		value = value[1 : len(value)-1]
+	}
+	parts := strings.Split(value, "@")
+	if len(parts) != 2 {
 		return ""
 	}
-	return value
+	for _, part := range parts {
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".") || strings.Contains(part, "..") || !rfcMessageIDAtom.MatchString(part) {
+			return ""
+		}
+	}
+	return "<" + value + ">"
+}
+
+func (identity StableIdentity) envelopeKey() string {
+	return identity.Sender + "\x00" + identity.Subject + "\x00" + identity.DateSent
+}
+
+func (identity StableIdentity) verificationKey() string {
+	if rfc := validRFCMessageID(identity.RFCMessageID); rfc != "" {
+		return rfc + "\x00" + identity.rfcEnvelopeKey()
+	}
+	return identity.fallbackKey()
+}
+
+// RFC identity permits presentation-only sender-name changes. Parse a single
+// address and validate its addr-spec; malformed sender text never weakens the
+// guard to subject/date matching. Mail treats mailbox addresses case-insensitively.
+func stableSenderAddress(sender string) string {
+	address, err := draftSenderAddress(sender)
+	if err != nil || validRFCMessageID(address) == "" {
+		return ""
+	}
+	return strings.ToLower(address)
+}
+
+func (identity StableIdentity) rfcEnvelopeKey() string {
+	address := stableSenderAddress(identity.Sender)
+	if address == "" {
+		return ""
+	}
+	return address + "\x00" + identity.Subject + "\x00" + canonicalIdentityDate(identity.DateSent)
+}
+
+func (identity StableIdentity) matchesEnvelope(message Message) bool {
+	actual := StableIdentityFromMessage(message)
+	if rfc := validRFCMessageID(identity.RFCMessageID); rfc != "" {
+		return identity.rfcEnvelopeKey() != "" && identity.rfcEnvelopeKey() == actual.rfcEnvelopeKey() && actual.RFCMessageID == rfc
+	}
+	return identity.envelopeKey() == actual.envelopeKey() && identity.hasFallback() && identity.MessageSize == actual.MessageSize
 }
 
 func (identity StableIdentity) hasFallback() bool {

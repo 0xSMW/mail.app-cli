@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
@@ -19,6 +21,9 @@ type doctorResult struct {
 	CurrentBinaryError        string `json:"currentBinaryError,omitempty"`
 	MailBridgeAvailable       bool   `json:"mailBridgeAvailable"`
 	MailBridgeError           string `json:"mailBridgeError,omitempty"`
+	MailRunning               *bool  `json:"mailRunning,omitempty"`
+	MailProcessIDs            []int  `json:"mailProcessIDs,omitempty"`
+	MailProcessError          string `json:"mailProcessError,omitempty"`
 	AutomationAccessAvailable bool   `json:"automationAccessAvailable"`
 	AutomationAccessError     string `json:"automationAccessError,omitempty"`
 	AccountAccessAvailable    bool   `json:"accountAccessAvailable"`
@@ -33,6 +38,7 @@ type doctorResult struct {
 
 type doctorClient interface {
 	CheckMailBridge() error
+	RunningMailProcessIDs(timeout time.Duration) ([]int, error)
 	CheckAutomationAccess(timeout time.Duration) error
 	CheckAccountAccess(timeout time.Duration) (int, error)
 	CheckEnvelopeIndex() error
@@ -61,6 +67,13 @@ func diagnose(client doctorClient, cliVersion string, executable func() (string,
 		result.MailBridgeError = err.Error()
 	} else {
 		result.MailBridgeAvailable = true
+	}
+	if pids, err := client.RunningMailProcessIDs(mail.DoctorProbeTimeout); err != nil {
+		result.MailProcessError = err.Error()
+	} else {
+		running := len(pids) > 0
+		result.MailRunning = &running
+		result.MailProcessIDs = pids
 	}
 	if err := client.CheckAutomationAccess(mail.DoctorProbeTimeout); err != nil {
 		result.AutomationAccessError = err.Error()
@@ -105,6 +118,7 @@ func renderDoctor(r doctorResult) func(*output.Printer) {
 			{"backend", "", r.Backend},
 			check("binary", r.CurrentBinaryAvailable, firstNonEmpty(r.CurrentBinaryError, r.CurrentBinary)),
 			check("Mail.app bundle", r.MailBridgeAvailable, r.MailBridgeError),
+			check("Mail.app process", r.MailRunning != nil && *r.MailRunning, mailProcessDetail(r)),
 			check("automation access", r.AutomationAccessAvailable, r.AutomationAccessError),
 			check("account access", r.AccountAccessAvailable, firstNonEmpty(r.AccountAccessError, plural(r.AccountCount, "account"))),
 			check("Envelope Index", r.EnvelopeIndexAvailable, firstNonEmpty(r.EnvelopeIndexError, "fast reads available")),
@@ -121,6 +135,33 @@ func renderDoctor(r doctorResult) func(*output.Printer) {
 			p.Line("%s", p.Dim("Grant Full Disk Access to the app running mail-app-cli for fast index-backed reads and cross-mailbox search."))
 		}
 	}
+}
+
+func mailProcessDetail(r doctorResult) string {
+	if r.MailProcessError != "" {
+		return r.MailProcessError
+	}
+	if r.MailRunning == nil {
+		return "unknown"
+	}
+	if !*r.MailRunning {
+		return "not running at process probe"
+	}
+	return fmt.Sprintf("running at process probe; PIDs %v", r.MailProcessIDs)
+}
+
+func doctorFailure(r doctorResult) *clierr.Error {
+	if r.Healthy {
+		return nil
+	}
+	if r.MailRunning != nil && *r.MailRunning &&
+		(strings.Contains(r.AutomationAccessError, "(-600)") ||
+			strings.Contains(r.AccountAccessError, "(-600)") ||
+			strings.Contains(r.LiveProbeError, "(-600)")) {
+		return clierr.New(clierr.CodeUnavailable, "Mail.app was observed running, but its automation bridge is unreachable").WithHint(
+			"-600 describes the Apple Event target; it does not prove Mail.app has stopped. Process presence does not prove responsiveness. No operation was retried; preserve compose state before any recovery.")
+	}
+	return clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
 }
 
 func firstNonEmpty(values ...string) string {
@@ -145,10 +186,7 @@ func (a *application) buildDoctorCommands() {
 			if !result.Healthy {
 				summary = "not healthy"
 			}
-			var failure *clierr.Error
-			if !result.Healthy {
-				failure = clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
-			}
+			failure := doctorFailure(result)
 			return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
 		},
 	}

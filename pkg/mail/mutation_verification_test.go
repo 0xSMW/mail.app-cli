@@ -102,17 +102,18 @@ func TestRFCOnlyIdentityRefusesMailboxWideLookup(t *testing.T) {
 	}
 }
 
-func TestCompleteIdentityUsesEnvelopeIndexWithoutRFCMailboxScan(t *testing.T) {
+func TestCompleteIdentityUsesEnvelopeIndexWithBoundedRFCRead(t *testing.T) {
 	client := fakeRelocationIndex(t, "INBOX", "Archive", "imap://ABC/INBOX", "[]", "["+fakeIdentityRow+"]", false)
 	item := verificationItem()
 	item.TargetMailbox, item.Status = "Archive", "succeeded"
 	item.Identity.RFCMessageID = "<stable@example.com>"
+	installVerificationIdentityBridge(t, Message{ID: "205", RFCMessageID: "stable@example.com", Sender: "sender@example.com", Subject: "subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}, "")
 	got := VerifyMutations(client, BatchOptions{Action: "move"}, []BatchItem{item})[0]
 	if got.VerifyStatus != "confirmed_destination" || got.Observed == nil || len(got.Observed.DestinationIDs) != 1 || got.Observed.DestinationIDs[0] != "205" {
 		t.Fatalf("complete identity did not use scoped index snapshot: %+v", got)
 	}
-	// The fixture rejects every bridge request, so this success also proves
-	// indexed metadata did not cause an RFC header or mailbox enumeration.
+	// The bridge fixture accepts only a direct-ID metadata read, and rejects
+	// mailbox enumeration or content reads.
 }
 
 func TestArchiveSourceResolutionPreservesExplicitNonGmailWithoutIndex(t *testing.T) {

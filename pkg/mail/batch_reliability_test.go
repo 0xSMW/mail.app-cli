@@ -47,7 +47,7 @@ func fakeRelocationIndex(t *testing.T, source, target, actualSourceURL, sourceRo
  *)
  if [ '%t' = true ] && [ "$n" -lt 3 ]; then printf '%%s\n' '%s'; else printf '%%s\n' '%s'; fi ;;
  esac ;;
-`, counter, counter, counter, indexMailboxURLPattern("ABC", source), recur, snapshotRows(true, false), snapshotRows(true, true), recur, snapshotRows(false, false), snapshotRows(false, true))
+`, counter, counter, counter, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", source), "imap://ABC/")), recur, snapshotRows(true, false), snapshotRows(true, true), recur, snapshotRows(false, false), snapshotRows(false, true))
 	script := fmt.Sprintf(`#!/bin/sh
 case "$4" in
 %s
@@ -60,7 +60,7 @@ case "$4" in
  *"%s"*) printf '%%s\n' '[{"ID":2,"URL":"%s","TotalCount":1,"UnreadCount":0}]' ;;
  *) printf '[]\n' ;;
 esac
-`, snapshotScript, counter, counter, counter, recur, sourceRows, destinationRows, indexMailboxURLPattern("ABC", source), actualSourceURL, indexMailboxURLPattern("ABC", target), indexMailboxURLPattern("ABC", target))
+`, snapshotScript, counter, counter, counter, recur, sourceRows, destinationRows, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", source), "imap://ABC/")), actualSourceURL, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", target), "imap://ABC/")), indexMailboxURLPattern("ABC", target))
 	if err := os.WriteFile(filepath.Join(bin, "sqlite3"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}

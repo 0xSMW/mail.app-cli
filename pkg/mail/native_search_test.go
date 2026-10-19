@@ -119,7 +119,7 @@ func TestNativeSearchPredicatePreservesAndOrSince(t *testing.T) {
 	if err != nil || len(messages) != 0 {
 		t.Fatalf("phrase OR widened into AND terms: %#v %v", messages, err)
 	}
-	messages, err = c.searchArchiveMailboxWithWhoseJXA("fixture body", "Personal", "INBOX", 1, "")
+	messages, err = c.nativeSearchMailbox("fixture body", "Personal", "INBOX", 1, "", false)
 	if err != nil || len(messages) != 0 {
 		t.Fatalf("metadata archive search rendered body: %#v %v", messages, err)
 	}
@@ -151,6 +151,7 @@ func TestNativeSearchFailsClosedOnNativeFault(t *testing.T) {
 
 func TestNativeIdentityFallbackUniqueExactWithoutBody(t *testing.T) {
 	f, c := newNativeSearchFixture(t)
+	f.properties["mssg:42"]["sndr"] = appleevents.String("Sender <sender@example.test>")
 	forbidNativeScripts(t)
 	identity := StableIdentityFromMessage(*nativeMessageFields(f.properties["mssg:42"], "Personal", "INBOX"))
 	present, err := c.hasMessageIdentityWithWhoseJXA("Personal", "INBOX", identity)
@@ -262,11 +263,13 @@ func TestNativeSearchCrossMailboxPrimesOneAccountSnapshot(t *testing.T) {
 	for i := 0; i < 370; i++ {
 		fmt.Fprintf(&inserts, "insert into mailboxes(url,total_count,unread_count) values('imap://ABC/Label%03d',1,0);\n", i)
 	}
+	// An unrelated backing row without Work label membership must stay out.
+	inserts.WriteString("insert into messages(ROWID,subject,sender,summary,mailbox,date_received,date_sent,read,flagged,deleted,size) values(107,1,1,1,3,1690000000,1690000000,0,0,0,1234);\n")
 	if output, err := exec.Command(binary, os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"), inserts.String()).CombinedOutput(); err != nil {
 		t.Fatalf("synthetic mailbox fixture: %v %s", err, output)
 	}
 	result, err := c.SearchMessagesJSONSinceWithOptions("indexed", "Work", "", 500, "", SearchOptions{})
-	if err != nil || !result.Complete || len(result.SearchedMailboxes) != 372 || len(result.Messages) != 5 {
+	if err != nil || !result.Complete || len(result.SearchedMailboxes) != 373 || len(result.Messages) != 6 {
 		t.Fatalf("indexed cross-mailbox result targets=%d rows=%#v complete=%v err=%v", len(result.SearchedMailboxes), result.Messages, result.Complete, err)
 	}
 	if len(f.events) != 2 || c.shared.accountsLoaded || c.readAccountSnapshot != nil {
@@ -279,12 +282,12 @@ func TestNativeSearchCrossMailboxPrimesOneAccountSnapshot(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, message := range result.Messages {
-		if message.Account != "Work" || message.ID == "102" {
+		if message.Account != "Work" || message.ID == "107" {
 			t.Fatalf("cross-account index result %#v", message)
 		}
 		seen[message.ID] = true
 	}
-	for _, id := range []string{"101", "103", "104", "105", "106"} {
+	for _, id := range []string{"101", "102", "103", "104", "105", "106"} {
 		if !seen[id] {
 			t.Fatalf("snapshot changed indexed result IDs: %#v", seen)
 		}
@@ -354,8 +357,16 @@ func TestNativeSearchNamedSnapshotIgnoresUnrelatedMalformedAccount(t *testing.T)
 	nativeSearchOtherAccount(f)
 	f.properties["mact:other"]["unme"] = appleevents.Null()
 	result, err := c.SearchMessagesJSONSinceWithOptions("indexed", "Work", "", 500, "", SearchOptions{})
-	if err != nil || !result.Complete || len(result.Messages) != 5 || len(f.events) != 2 || c.shared.accountsLoaded {
+	if err != nil || !result.Complete || len(result.Messages) != 6 || len(f.events) != 2 || c.shared.accountsLoaded {
 		t.Fatalf("unrelated metadata blocked named scope: result=%#v events=%d loaded=%v err=%v", result, len(f.events), c.shared.accountsLoaded, err)
+	}
+	if len(result.SearchedMailboxes) != 3 {
+		t.Fatalf("named scope must include Inbox: %+v", result.SearchedMailboxes)
+	}
+	for _, message := range result.Messages {
+		if message.Account != "Work" {
+			t.Fatalf("named scope leaked account: %+v", message)
+		}
 	}
 	for _, event := range f.events {
 		direct := event.Params["----"]
@@ -373,7 +384,7 @@ func TestNativeSearchGlobalPrimesFullCacheAndNamedSearchPreservesIt(t *testing.T
 		t.Fatalf("global snapshot result=%#v events=%d loaded=%v err=%v", result, len(f.events), c.shared.accountsLoaded, err)
 	}
 	result, err = c.SearchMessagesJSONSinceWithOptions("indexed", "Work", "", 500, "", SearchOptions{})
-	if err != nil || !result.Complete || len(result.Messages) != 5 || len(f.events) != 7 || !c.shared.accountsLoaded || len(c.shared.accounts) != 2 || c.readAccountSnapshot != nil {
+	if err != nil || !result.Complete || len(result.Messages) != 6 || len(f.events) != 7 || !c.shared.accountsLoaded || len(c.shared.accounts) != 2 || c.readAccountSnapshot != nil {
 		t.Fatalf("named search changed full cache: result=%#v events=%d loaded=%v err=%v", result, len(f.events), c.shared.accountsLoaded, err)
 	}
 }
