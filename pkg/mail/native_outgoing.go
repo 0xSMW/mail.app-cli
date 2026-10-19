@@ -415,7 +415,7 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 		if !strings.HasSuffix(r.body, "\n") {
 			r.body += "\n"
 		}
-		if action == "send" {
+		if action == "send" || (action == "save" && len(input.Attachments) > 0) {
 			r.step = "attachment_input_hash"
 			err = n.phase("outgoing_attachment_input_hash", func() error {
 				var hashErr error
@@ -446,15 +446,14 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 			return err
 		}
 		r.step = "save_verification"
+		if len(input.Attachments) > 0 {
+			r.step = "attachment_verification"
+			return r.verifySavedDraftAttachmentReadiness()
+		}
 		return r.verifySavedDraft()
 	})
 	if err != nil {
 		return r.result, &MutationError{Operation: action, Phase: r.step, Account: input.Account, Sender: r.result.Sender, Cause: err, Attempted: r.attempted, Uncertain: r.attempted && !r.result.Submitted, Submitted: r.result.Submitted, Saved: r.saved, Cleanup: r.cleanup}
-	}
-	if action == "save" && len(input.Attachments) > 0 {
-		if err := c.verifyDraftAttachments(r.result.Draft, input.Attachments); err != nil {
-			return r.result, &MutationError{Operation: action, Phase: "attachment_verification", Account: input.Account, Sender: r.result.Sender, Cause: err, Attempted: true, Saved: true, Uncertain: true}
-		}
 	}
 	return r.result, nil
 }
