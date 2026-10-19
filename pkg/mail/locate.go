@@ -48,7 +48,7 @@ func (c *Client) LocateMessages(ids []string) (map[string]MessageLocation, error
 	query := fmt.Sprintf(`
 select
 	m.ROWID as ID,
-	coalesce(s.subject, '') as Subject,
+	`+indexSubjectExpression+` as Subject,
 	case
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
 		else a.comment || ' <' || a.address || '>'
@@ -186,7 +186,7 @@ func (c *Client) countMessageIdentityInMailbox(accountName, mailboxName string, 
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
 	and m.deleted = 0
-	and coalesce(s.subject, '') = %s
+	and `+indexSubjectExpression+` = %s
 	and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
 	and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
 	and m.size = %d
