@@ -30,7 +30,7 @@ func TestEscapeJSString(t *testing.T) {
 
 func TestJXAMailboxLookupUsesInboxAccessor(t *testing.T) {
 	helper := jxaMailboxLookupHelper()
-	for _, want := range []string{"function findMailbox(acc, requestedName, names)", "return acc.inbox()"} {
+	for _, want := range []string{"function findMailbox(acc, requestedName, names)", "const inbox = acc.inbox()"} {
 		if !strings.Contains(helper, want) {
 			t.Fatalf("jxaMailboxLookupHelper missing %q", want)
 		}
@@ -277,6 +277,7 @@ func TestDefaultSearchTargetsPreferAccountCorpusForScopedAccount(t *testing.T) {
 		{AccountName: "Klu.ai", MailboxName: "All Mail"},
 		{AccountName: "Klu.ai", MailboxName: "Spam"},
 		{AccountName: "Klu.ai", MailboxName: "Trash"},
+		{AccountName: "Klu.ai", MailboxName: "INBOX"},
 		{AccountName: "Klu.ai", MailboxName: "Newsletter"},
 	}
 	if len(targets) != len(want) {
@@ -301,6 +302,7 @@ func TestDefaultSearchTargetsUseArchiveAliasForScopedAccount(t *testing.T) {
 	want := []searchTarget{
 		{AccountName: "Work", MailboxName: "Archive"},
 		{AccountName: "Work", MailboxName: "Junk"},
+		{AccountName: "Work", MailboxName: "INBOX"},
 		{AccountName: "Work", MailboxName: "Clients"},
 	}
 	if len(targets) != len(want) {
@@ -451,10 +453,10 @@ esac
 	}
 }
 
-func TestArchiveWhoseQueryFailureIsPartialAndFailsClosed(t *testing.T) {
+func TestArchiveSearchFailureIsPartialAndFailsClosed(t *testing.T) {
 	writeFakeOsaScript(t, `
 case "$*" in
-  *"const subjectMatches = mbox.messages.whose"*)
+  *"mailbox search failed for"*)
     printf '%s\n' 'whose query failed' >&2
     exit 1
     ;;
@@ -469,9 +471,9 @@ esac
 		{AccountName: "Work", MailboxName: "All Mail"},
 		{AccountName: "Personal", MailboxName: "INBOX"},
 	}
-	_, archiveErr := NewClient().searchArchiveMailboxWithWhoseJXA("invoice", targets[0].AccountName, targets[0].MailboxName, 50, "")
+	_, archiveErr := NewClient().searchMessagesInSingleMailboxJXA("invoice", targets[0].AccountName, targets[0].MailboxName, 50, "")
 	if archiveErr == nil {
-		t.Fatal("searchArchiveMailboxWithWhoseJXA returned complete empty success for a whose query failure")
+		t.Fatal("searchMessagesInSingleMailboxJXA returned complete empty success for a whose query failure")
 	}
 
 	result := collectSearchResults(targets, []mailboxSearchResult{
