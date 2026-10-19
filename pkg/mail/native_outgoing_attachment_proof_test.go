@@ -45,7 +45,7 @@ func attachmentProofMIME(names []string, payloads [][]byte) string {
 }
 
 func TestNativeAttachmentPayloadReadiness(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed", "plain owned snapshot vanished", "plain owned recipient getter failed", "plain stored snapshot vanished", "plain stored source vanished", "plain stored recipient getter failed", "plain vanished before delete", "plain stale IDs after root vanished", "plain stale IDs remain", "plain close missing root vanished", "plain close missing root present", "rendered body", "rendered body changed text", "rendered body missing payload", "rendered body corrupt payload"} {
+	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed", "plain owned snapshot vanished", "plain owned recipient getter failed", "plain stored snapshot vanished", "plain stored source vanished", "plain stored recipient getter failed", "plain vanished before delete", "plain stale IDs after root vanished", "plain stale IDs remain", "plain close missing root vanished", "plain close missing root present", "rendered body", "rendered body changed text", "rendered body missing payload", "rendered body corrupt payload", "rendered body interior", "rendered body consecutive", "rendered body trailing", "rendered body inserted separator"} {
 		t.Run(scenario, func(t *testing.T) {
 			mode := strings.TrimPrefix(scenario, "plain ")
 			plain := strings.HasPrefix(scenario, "plain ")
@@ -58,6 +58,17 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 			}
 			input := fixtureOutgoingInput()
 			input.Body = "Multiline café 日本語 🚀\nLiteral <angle> & symbols.\n"
+			if strings.HasPrefix(mode, "rendered body") {
+				input.Body = "\n" + input.Body
+			}
+			switch mode {
+			case "rendered body interior", "rendered body inserted separator":
+				input.Body = "First café 日本語\n\nLast 🚀\n"
+			case "rendered body consecutive":
+				input.Body = "First\n\n\nLast\n"
+			case "rendered body trailing":
+				input.Body = "First\n\n"
+			}
 			names := []string{"résumé 世界.txt", "second.bin"}
 			payloads := [][]byte{[]byte("first café 日本語\n"), {0, 1, 2, 255, 4}}
 			if plain {
@@ -196,7 +207,14 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 						return ae.List(ae.Int(99), ae.Int(15)), nil
 					}
 					if prop == "ctnt" && strings.HasPrefix(mode, "rendered body") {
-						return ae.String("\n\u2028" + input.Body), nil
+						rendered, ok := attachmentParagraphReadback(input.Body)
+						if !ok {
+							t.Fatal("fixture body missing terminal LF")
+						}
+						if mode == "rendered body inserted separator" {
+							rendered = strings.Replace(rendered, "First", "Fi\u2028rst", 1)
+						}
+						return ae.String(rendered), nil
 					}
 					if prop == "mbxp" {
 						if mode == "account mismatch" {
@@ -324,7 +342,7 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				return v, stats, err
 			}
 			result, err := c.SendOutgoing(input)
-			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement" || mode == "owned snapshot vanished" || mode == "stored snapshot vanished" || mode == "stored source vanished" || mode == "vanished before delete" || mode == "stale IDs after root vanished" || mode == "close missing root vanished" || mode == "rendered body"
+			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement" || mode == "owned snapshot vanished" || mode == "stored snapshot vanished" || mode == "stored source vanished" || mode == "vanished before delete" || mode == "stale IDs after root vanished" || mode == "close missing root vanished" || mode == "rendered body" || mode == "rendered body interior" || mode == "rendered body consecutive" || mode == "rendered body trailing"
 			pending := mode == "source changed" || mode == "stored recipient changed" || mode == "account drift" || mode == "ID getter failed" || mode == "delete failed" || mode == "account drift after delete" || mode == "source getter failed" || mode == "owned recipient getter failed" || mode == "stored recipient getter failed" || mode == "stale IDs remain" || mode == "close missing root present"
 			if success {
 				wantCloses := 1
@@ -461,6 +479,7 @@ func TestNativeSaveCapturesAndGuardsOwnedAttachmentBody(t *testing.T) {
 		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
 			f := newOutgoingDescriptorFixture()
 			input := fixtureOutgoingInput()
+			input.Body = "\n" + input.Body
 			path := filepath.Join(t.TempDir(), "file.bin")
 			if err := os.WriteFile(path, []byte{0, 1, 255}, 0600); err != nil {
 				t.Fatal(err)
@@ -491,5 +510,73 @@ func TestNativeSaveCapturesAndGuardsOwnedAttachmentBody(t *testing.T) {
 				t.Fatalf("save mapping failed: err=%v closes=%d", err, f.closeCalls)
 			}
 		})
+	}
+}
+
+func TestNativePreparedDraftPresenceUsesStrictDeletedStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		status             ae.Value
+		err                error
+		present, wantError bool
+	}{
+		{name: "active", status: ae.Bool(false), present: true},
+		{name: "listed tombstone", status: ae.Bool(true)},
+		{name: "invalid null", status: ae.Null(), wantError: true},
+		{name: "invalid string", status: ae.String("false"), wantError: true},
+		{name: "invalid integer", status: ae.Int(0), wantError: true},
+		{name: "failed status", err: errors.New("status read failed"), wantError: true},
+		{name: "missing nested status retains presence", err: &ae.Error{Code: -1728, Message: "status missing"}, present: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			box := ruleFixtureRef("owned-drafts")
+			n := &nativeMail{ctx: context.Background(), sender: func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+				if event.Class+event.ID != "coregetd" {
+					t.Fatal("presence check mutated Mail")
+				}
+				ref := event.Params["----"]
+				if descriptorProperty(ref) == "ID  " {
+					return ae.List(ae.Int(900)), ae.Stats{}, nil
+				}
+				if descriptorProperty(ref) != "isdl" || !reflect.DeepEqual(ref.Fields["from"], ae.ByID("mssg", ae.Int(900), box)) {
+					t.Fatalf("wrong status target: %+v", ref)
+				}
+				return tc.status, ae.Stats{}, tc.err
+			}}
+			present, err := preparedDraftPresent(n, box, "900")
+			if present != tc.present || (err != nil) != tc.wantError {
+				t.Fatalf("present=%t err=%v", present, err)
+			}
+		})
+	}
+}
+
+func TestNativeAttachmentParagraphReadback(t *testing.T) {
+	for _, tc := range []struct{ name, body, rendered string }{
+		{"leading", "\nFirst\n", "\n\u2028\nFirst\n"},
+		{"interior", "First\n\nFinal café 日本語 🚀\n", "\nFirst\n\u2028\nFinal café 日本語 🚀\n"},
+		{"consecutive", "First\n\n\nLast\n", "\nFirst\n\u2028\n\u2028\nLast\n"},
+		{"trailing blank", "First\n\n", "\nFirst\n\u2028\n"},
+		{"spaces are text", "First\n  \nLast\n", "\nFirst\n  \nLast\n"},
+		{"CRLF", "First\r\n\r\nLast\r\n", "\nFirst\n\u2028\nLast\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := attachmentParagraphReadback(tc.body)
+			if !ok || got != tc.rendered {
+				t.Fatalf("readback=%q ok=%t", got, ok)
+			}
+			run := nativeOutgoingRun{action: "send", body: tc.body, preSaveOwnedBody: tc.body + "\ufffc\ufffc", input: OutgoingInput{Attachments: []string{"first", "second"}}}
+			if !run.savedDraftBodyMatches(tc.rendered) {
+				t.Fatal("exact paragraph rendering rejected")
+			}
+			for _, changed := range []string{tc.rendered + " ", strings.Replace(tc.rendered, "First", "Fi\u2028rst", 1), tc.rendered + "\u2028"} {
+				if changed != tc.rendered && run.savedDraftBodyMatches(changed) {
+					t.Fatalf("accepted changed text %q", changed)
+				}
+			}
+		})
+	}
+	if _, ok := attachmentParagraphReadback("no terminal LF"); ok {
+		t.Fatal("mapped unproven unterminated paragraph")
 	}
 }
