@@ -38,7 +38,7 @@ func appleRelatedFixture(t *testing.T) *draftSnapshot {
 func TestDraftAppleRelatedPreservesPlainBodyAndExactAttachmentBytes(t *testing.T) {
 	snapshot := appleRelatedFixture(t)
 	body, attachments, err := reconstructibleDraft(snapshot)
-	if err != nil || body != snapshot.Message.Content || len(attachments) != 1 || attachments[0].name != "re\u0301sume\u0301.bin" || string(attachments[0].data) != "\x00\x01\x02\x03" {
+	if err != nil || body != "Plain <line> & symbols.\nUnicode: café 日本語 🚀\n" || len(attachments) != 1 || attachments[0].name != "re\u0301sume\u0301.bin" || string(attachments[0].data) != "\x00\x01\x02\x03" {
 		t.Fatalf("body=%q attachments=%+v err=%v", body, attachments, err)
 	}
 	file := filepath.Join(t.TempDir(), "résumé.bin")
@@ -68,7 +68,7 @@ func TestDraftAppleRelatedMatchesAttachmentsByContentID(t *testing.T) {
 			snapshot.Source = strings.Replace(snapshot.Source, "--related--", second+"--related--", 1)
 		}
 		body, attachments, err := reconstructibleDraft(snapshot)
-		if err != nil || body != snapshot.Message.Content || len(attachments) != 2 {
+		if err != nil || body != "Plain <line> & symbols.\nUnicode: café 日本語 🚀\n" || len(attachments) != 2 {
 			t.Fatalf("reordered=%v body=%q attachments=%+v err=%v", reordered, body, attachments, err)
 		}
 		if attachments[0].name != "re\u0301sume\u0301.bin" || string(attachments[0].data) != "\x00\x01\x02\x03" || attachments[1].name != "second.bin" || string(attachments[1].data) != "second" {
