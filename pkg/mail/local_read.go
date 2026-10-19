@@ -16,8 +16,14 @@ import (
 )
 
 func indexAccountCondition(accountID string) string {
-	prefix := "imap://" + accountID + "/"
-	return fmt.Sprintf("substr(mb.url, 1, %d) = %s", utf8.RuneCountInString(prefix), sqlQuote(prefix))
+	if accountID == "" {
+		return "0"
+	}
+	// Physical owners use the account authority of their indexed URL. Keep
+	// this exact and case-sensitive without assuming the provider's scheme.
+	authority := "substr(mb.url, instr(mb.url, '://') + 3)"
+	return fmt.Sprintf("instr(mb.url, '://') > 1 and substr(%s, 1, instr(%s, '/') - 1) = %s collate binary",
+		authority, authority, sqlQuote(accountID))
 }
 
 // resolveLocalMessageScope checks membership separately from physical ownership.
