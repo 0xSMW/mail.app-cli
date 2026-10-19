@@ -160,6 +160,19 @@ func (c *Client) countMessageIdentityInMailbox(accountName, mailboxName string, 
 	if !identity.hasFallback() {
 		return 0, fmt.Errorf("Envelope Index cannot look up an RFC Message-ID directly")
 	}
+	if validRFCMessageID(identity.RFCMessageID) != "" {
+		// The index has no RFC header column. Never accept its envelope tuple
+		// alone when the caller supplied a stronger identity.
+		if c.nativeEnabled() {
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
+		present, err := c.hasMessageIdentityWithWhoseJXA(accountName, mailboxName, identity)
+		if present {
+			return 1, err
+		}
+		return 0, err
+	}
+
 	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
 	if err != nil {
 		return 0, err
@@ -191,6 +204,14 @@ limit 2;
 }
 
 func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	if !identity.hasFallback() {
+		return false, fmt.Errorf("stable identity lacks complete metadata; refusing mailbox-wide RFC lookup in %s", mailboxName)
+	}
+	identity.RFCMessageID = validRFCMessageID(identity.RFCMessageID)
+	if identity.RFCMessageID != "" && stableSenderAddress(identity.Sender) == "" {
+		return false, fmt.Errorf("RFC stable identity lacks a valid sender address")
+	}
+
 	if c.nativeEnabled() {
 		matches, err := c.nativeIdentityCount(accountName, mailboxName, identity)
 		if err != nil {
@@ -201,7 +222,10 @@ func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string,
 		}
 		return matches == 1, nil
 	}
-	identityJSON, err := json.Marshal(identity)
+	identityJSON, err := json.Marshal(struct {
+		StableIdentity
+		SenderAddress string `json:"senderAddress"`
+	}{identity, stableSenderAddress(identity.Sender)})
 	if err != nil {
 		return false, err
 	}
@@ -216,16 +240,29 @@ acc.name();
 const mbox = %s;
 if (mbox === null) throw new Error('mailbox not found: ' + requestedMailbox);
 mbox.name();
-const candidates = mbox.messages.whose({subject: {_equals: wanted.subject}})();
+const criteria = {subject: {_equals: wanted.subject}, dateSent: {_equals: new Date(wanted.dateSent)}, deletedStatus: false};
+if (!wanted.rfcMessageId) criteria.messageSize = wanted.messageSize;
+const candidates = mbox.messages.whose(criteria)();
+if (candidates.length > 32) throw new Error('stable identity has too many metadata candidates');
 const wantedSent = Date.parse(wanted.dateSent);
 let matches = 0;
 for (let i = 0; i < candidates.length && matches < 2; i++) {
 	const msg = candidates[i];
-	if ((msg.sender() || '').trim() !== wanted.sender) continue;
+    const sender = (msg.sender() || '').trim();
+    if (wanted.rfcMessageId) {
+        let address = sender;
+        if (sender.endsWith('>') && sender.lastIndexOf('<') >= 0) address = sender.slice(sender.lastIndexOf('<') + 1, -1);
+        const canonicalAddress = rfcMessageId({messageId: () => address});
+        if (!canonicalAddress || canonicalAddress.slice(1, -1).toLowerCase() !== wanted.senderAddress) continue;
+    } else if (sender !== wanted.sender) continue;
 	const actualSent = (msg.dateSent() || new Date(0)).getTime();
 	if (!Number.isFinite(wantedSent) || actualSent !== wantedSent) continue;
-	if (msg.messageSize() !== wanted.messageSize) continue;
-	if (wanted.rfcMessageId && rfcMessageId(msg) !== wanted.rfcMessageId) continue;
+    if (!wanted.rfcMessageId && msg.messageSize() !== wanted.messageSize) continue;
+    if (wanted.rfcMessageId) {
+        const actualRFC = rfcMessageId(msg);
+        if (!actualRFC) throw new Error('RFC identity candidate lacks a valid live header');
+        if (actualRFC !== wanted.rfcMessageId) continue;
+    }
 	matches++;
 }
 JSON.stringify(matches);
