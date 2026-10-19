@@ -6,6 +6,12 @@ const config = JSON.parse(process.env.DRAFT_REGRESSION_CONFIG);
 const statePath = process.env.DRAFT_REGRESSION_STATE;
 const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const script = process.argv[process.argv.length - 1];
+state.closed=state.closed || 0;
+state.preparedDeleted=state.preparedDeleted || [];
+state.preparedEnumerated=state.preparedEnumerated || [];
+state.preparedById=state.preparedById || [];
+state.ownedCloseAfterSend=state.ownedCloseAfterSend || 0;
+
 
 function collection(values, name) {
     const getter = () => values;
@@ -15,6 +21,7 @@ function collection(values, name) {
         if (key === 'mailboxes') return {name: () => values.map(v => v.mailboxes().map(b => b.name()))};
         if (key === 'at') return index => values[index];
         if (key === 'byId') return id => {
+            if(String(id)==='700')state.preparedById.push(String(id));
             const value = values.find(v => String(v.id()) === String(id));
             if (!value) throw Error('object not found');
             return value;
@@ -35,7 +42,7 @@ function storedMessage(id, kind, box) {
     return {
         id: () => Number(id), mailbox: () => box,
         subject: () => data.subject, sender: () => data.sender,
-        content: () => data.content, source: () => config.snapshot.source,
+        content: () => data.content, source: () => config.snapshot.source+(kind==='special' && state.sent>0 && config.specialState==='changed-original-after-send' ? '\r\nX-Edited: true\r\n' : ''),
         toRecipients: () => recipients(data.toRecipients),
         ccRecipients: () => recipients(data.ccRecipients),
         bccRecipients: () => recipients(data.bccRecipients),
@@ -55,7 +62,7 @@ function storedMessage(id, kind, box) {
             state.deleted.push(kind);
             if (kind !== 'special') throw Error('deleted unrelated message');
             state.originalRemoved = true;
-            box.messages = collection([], 'messages');
+            box.messages = collection(box.messages().filter(message=>String(message.id())!==String(id)), 'messages');
         }
     };
 }
@@ -78,6 +85,16 @@ const specialBoxes = config.specialState === 'missing' ? [foreign] :
 const accounts = collection([work, other], 'accounts');
 let outgoing = null;
 const inserted = [];
+function preparedMessage(data) {
+ return {id:()=>700,mailbox:()=>special,subject:()=>data.subject,sender:()=>data.sender,content:()=>data.body,
+  source:()=>data.source,toRecipients:()=>recipients(data.to),ccRecipients:()=>recipients(data.cc),bccRecipients:()=>recipients(data.bcc),
+  mailAttachments:()=>{state.preparedEnumerated.push('700');return data.attachments.map(file=>({name:()=>file.name}));},
+  delete:()=>{
+   state.preparedDeleted.push('700');state.preparedRemoved=true;
+   special.messages=collection(special.messages().filter(message=>String(message.id())!=='700'),'messages');
+  }};
+}
+if(state.prepared && !state.preparedRemoved)special.messages.push(preparedMessage(state.prepared));
 const mail = {
     accounts,
     draftsMailbox: () => ({mailboxes: collection(specialBoxes, 'mailboxes')}),
@@ -92,17 +109,41 @@ const mail = {
     ToRecipient: data => ({address: () => data.address}),
     CcRecipient: data => ({address: () => data.address}),
     BccRecipient: data => ({address: () => data.address}),
+    save: message => {
+        if(message!==outgoing)throw Error('saved unrelated outgoing');
+        if(!special.messages().some(value=>String(value.id())==='700')) {
+         const data={subject:message.subject(),sender:message.sender(),body:message.content(),
+          to:message.toRecipients().map(r=>r.address()),cc:message.ccRecipients().map(r=>r.address()),bcc:message.bccRecipients().map(r=>r.address()),
+          source:'X-Prepared-Draft: 700\r\n'+config.snapshot.source,attachments:inserted.slice()};
+         state.prepared=data;state.preparedRemoved=false;
+         special.messages.push(preparedMessage(data));
+        }
+    },
     send: message => {
         if (message !== outgoing) throw Error('wrong outgoing object');
+        if(!state.prepared || state.preparedRemoved)throw Error('send was not prepared');
+        if(state.closed>0)throw Error('owned composition closed before send');
         state.sent++;
         state.sentAttachments = inserted;
         state.sentBody = message.content();
         return true;
     },
-    close: () => {state.closed++;}
+    close: (message,options) => {
+      if(message!==outgoing || options.saving!=='no')throw Error('wrong owned composition cleanup');
+      state.closed++;
+      if(state.sent>0)state.ownedCloseAfterSend++;
+    }
 };
 const foundation = {NSAppleScript: {alloc: {initWithSource: source => ({executeAndReturnError: () => {
     if (!source.includes('tell outgoing message id 7')) throw Error('wrong compose attachment target');
+    if(source.includes('-- mail-app-cli-owned-attachment-snapshot')) {
+      const code=value=>[...value].reduce((number,letter)=>number*256+letter.charCodeAt(0),0);
+      const names=inserted.map(file=>file.name);
+      return {descriptorType:code('list'),numberOfItems:3,descriptorAtIndex:index=>index===1 ?
+       {descriptorType:code('long'),int32Value:names.length} : index===3 ?
+       {descriptorType:code('true')} :
+       {descriptorType:code('list'),numberOfItems:names.length,descriptorAtIndex:item=>({descriptorType:code('utxt'),stringValue:names[item-1]})}};
+    }
     for (const line of source.split('\n')) {
         const match = /^make new attachment with properties \{file name:\(POSIX file (".*")\)\} at after last paragraph$/.exec(line);
         if (match) {
