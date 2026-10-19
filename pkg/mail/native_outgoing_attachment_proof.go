@@ -81,6 +81,22 @@ func proveOutgoingMIMEAttachments(ctx context.Context, source string, expected [
 	return nil
 }
 
+// Mail can render a trailing group of rich-text attachment objects as a
+// leading LF/line-separator pair in the stored message. Admit only that exact
+// observed mapping, with every requested text character preserved. Ordinary
+// saves and normal body matches keep their existing behavior.
+func (r *nativeOutgoingRun) savedDraftBodyMatches(actual string) bool {
+	if outgoingBodyMatches(actual, r.body) {
+		return true
+	}
+	if r.action != "send" || len(r.input.Attachments) == 0 || strings.ContainsRune(r.body, '\ufffc') {
+		return false
+	}
+	normalize := func(value string) string { return strings.ReplaceAll(value, "\r\n", "\n") }
+	body, owned, stored := normalize(r.body), normalize(r.preSaveOwnedBody), normalize(actual)
+	return owned == body+strings.Repeat("\ufffc", len(r.input.Attachments)) && stored == "\n\u2028"+body
+}
+
 // Save and inspect this same owned composition before dispatch. Rich-text
 // element counts and filenames are insertion evidence, never payload proof.
 func (r *nativeOutgoingRun) prepareSendDraft() error {
@@ -89,6 +105,7 @@ func (r *nativeOutgoingRun) prepareSendDraft() error {
 	if err != nil {
 		return err
 	}
+	r.preSaveOwnedBody = original["ctnt"].Text
 	r.step = "attachment_payload_save"
 	if err := r.n.phase("outgoing_attachment_payload_save", func() error {
 		_, err := r.n.command("core", "save", map[string]ae.Value{"----": r.owned})
