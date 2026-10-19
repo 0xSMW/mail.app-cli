@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -439,7 +440,8 @@ func TestNativePreparedAttachmentRenderedBodyFingerprint(t *testing.T) {
 		"extra separator":            {"send", body, body + markers, "\n\u2028\u2028" + body, 2, false},
 		"separator inside text":      {"send", body, body + markers, "\n\u2028" + body + "\u2028", 2, false},
 		"plain send":                 {"send", body, body, "\n\u2028" + body, 0, false},
-		"save only":                  {"save", body, body + markers, "\n\u2028" + body, 2, false},
+		"save captured mapping":      {"save", body, body + markers, "\n\u2028" + body, 2, true},
+		"save without capture":       {"save", body, "", "\n\u2028" + body, 2, false},
 		"literal user object":        {"send", body + "\ufffc", body + "\ufffc" + markers, "\n\u2028" + body + "\ufffc", 2, false},
 		"normal exact remains":       {"save", body, "", body, 0, true},
 		"normal leading LF remains":  {"save", body, "", "\n" + body, 0, true},
@@ -449,6 +451,44 @@ func TestNativePreparedAttachmentRenderedBodyFingerprint(t *testing.T) {
 			run := nativeOutgoingRun{action: tc.action, body: tc.body, preSaveOwnedBody: tc.owned, input: OutgoingInput{Attachments: make([]string, tc.count)}}
 			if got := run.savedDraftBodyMatches(tc.stored); got != tc.want {
 				t.Fatalf("match=%t want=%t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNativeSaveCapturesAndGuardsOwnedAttachmentBody(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed=%t", changed), func(t *testing.T) {
+			f := newOutgoingDescriptorFixture()
+			input := fixtureOutgoingInput()
+			path := filepath.Join(t.TempDir(), "file.bin")
+			if err := os.WriteFile(path, []byte{0, 1, 255}, 0600); err != nil {
+				t.Fatal(err)
+			}
+			input.Attachments = []string{path}
+			f.files = []string{path}
+			f.fields["ctnt"] = ae.String(input.Body + "\ufffc")
+			f.fields["subj"] = ae.String(input.Subject)
+			f.fields["sndr"] = ae.String("alias@example.com")
+			f.recipients = map[string][]string{"trcp": input.To, "crcp": input.Cc, "brcp": input.Bcc}
+			n := &nativeMail{ctx: context.Background(), sender: func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+				value, stats, err := f.send(ctx, event)
+				if changed && event.Class+event.ID == "coresave" {
+					f.fields["ctnt"] = ae.String("changed after save")
+				}
+				return value, stats, err
+			}}
+			run := nativeOutgoingRun{n: n, input: input, action: "save", owned: f.outgoing, body: input.Body, result: &OutgoingResult{}}
+			err := run.dispatch()
+			if run.preSaveOwnedBody != input.Body+"\ufffc" || !run.saved || !run.attempted || f.sendCalls != 0 {
+				t.Fatalf("capture/save state wrong err=%v", err)
+			}
+			if changed {
+				if err == nil || f.closeCalls != 0 {
+					t.Fatalf("changed save closed owned backend: err=%v closes=%d", err, f.closeCalls)
+				}
+			} else if err != nil || f.closeCalls != 1 || !run.savedDraftBodyMatches("\n\u2028"+input.Body) {
+				t.Fatalf("save mapping failed: err=%v closes=%d", err, f.closeCalls)
 			}
 		})
 	}
