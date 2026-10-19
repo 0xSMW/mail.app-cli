@@ -59,7 +59,7 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 	if _, err := reader.NextRawPart(); err != io.EOF || strings.Trim(bodies[0], "\r\n") != "" {
 		return reject()
 	}
-	text, referencedIDs, blankParagraphs, ok := applePlainWrapperContentLayout(bodies[1])
+	text, referencedIDs, canonicalParagraphs, ok := applePlainWrapperContentLayout(bodies[1])
 	if !ok || strings.ContainsRune(snapshot.Message.Content, 0) {
 		return reject()
 	}
@@ -81,10 +81,10 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 		}
 		orderedAttachments = append(orderedAttachments, attachment)
 	}
-	// Exact default blank paragraphs and CID-backed files establish the
-	// paragraph rendering map. Return canonical text only after its complete
-	// rendered form matches, so display separators are not recomposed as text.
-	if blankParagraphs && len(orderedAttachments) > 0 {
+	// Exact default paragraphs and CID-backed files establish the complete
+	// rendering map, including the wrapper LF for nonblank bodies. Recompose
+	// canonical paragraph text so wrapper layout cannot become authored text.
+	if canonicalParagraphs && len(orderedAttachments) > 0 {
 		stored := strings.ReplaceAll(snapshot.Message.Content, "\r\n", "\n")
 		rendered, ok := attachmentParagraphReadback(text)
 		if ok && stored == rendered {
@@ -143,6 +143,7 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 	var contentIDs []string
 	paragraphs := false
 	blankParagraphs := false
+	canonicalParagraphs := true
 	unprovenParagraphBreaks := false
 	bodyParagraph := false
 	for node := quote[0].FirstChild; node != nil; node = node.NextSibling {
@@ -154,8 +155,10 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 			if len(contentIDs) != 0 || paragraphs {
 				return "", nil, false, false
 			}
+			canonicalParagraphs = false
 			text.WriteString(node.Data)
 		case appleWrapperElement(node, "br", nil) && node.FirstChild == nil && !paragraphs && len(contentIDs) == 0:
+			canonicalParagraphs = false
 			text.WriteByte('\n')
 		case len(contentIDs) == 0 && (paragraphs || text.Len() == 0) && appleDefaultBlankParagraph(node):
 			blankParagraphs = true
@@ -196,7 +199,7 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 	if blankParagraphs && (!bodyParagraph || len(contentIDs) == 0 || unprovenParagraphBreaks) {
 		return "", nil, false, false
 	}
-	return text.String(), contentIDs, blankParagraphs, true
+	return text.String(), contentIDs, paragraphs && bodyParagraph && canonicalParagraphs && !unprovenParagraphBreaks, true
 }
 
 func appleDefaultBlankParagraph(node *html.Node) bool {
