@@ -333,7 +333,7 @@ mail-app-cli drafts send <draft-id>
 mail-app-cli drafts delete <draft-id> --dry-run
 ```
 
-Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. `--dry-run` validates paths and previews the requested files without changing Mail.
+Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. Mail controls delivery MIME encoding; text attachments can acquire CRLF line endings in transit. `--dry-run` validates paths and previews the requested files without changing Mail.
 
 `send` and `drafts create` accept `--from <address>` to select an address configured on the account. Without it, they use the first configured address. Both validate the account and read the compose sender back before sending or saving; an unexpected sender or an address shared across accounts stops the operation. Draft updates preserve the original sender. Dry-run receipts include the account ID and selected sender, and validate the configured identity without composing a message. Sender validation does not establish which delivery route Mail will use.
 
