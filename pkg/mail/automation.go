@@ -114,8 +114,15 @@ func jxaRFCMessageIDHelper() string {
 	return `
 function rfcMessageId(msg) {
 	try {
-		const value = String(msg.messageId() || '').trim();
-		return /^<[^<>\\s]+>$/.test(value) ? value : '';
+        const raw = String(msg.messageId() || '');
+        if (/[\x00-\x1f\x7f]/.test(raw)) return '';
+        let value = raw.trim();
+        if (value.startsWith('<') && value.endsWith('>')) value = value.slice(1, -1);
+        const parts = value.split('@');
+        if (parts.length !== 2) return '';
+        const atom = /^[A-Za-z0-9!#$%&'*+\/=?^_\x60{|}~.\-]+$/;
+        if (parts.some(p => !p || p.startsWith('.') || p.endsWith('.') || p.includes('..') || !atom.test(p))) return '';
+        return '<' + value + '>';
 	} catch (e) { return ''; }
 }
 `
