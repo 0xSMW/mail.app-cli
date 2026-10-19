@@ -44,19 +44,25 @@ func attachmentProofMIME(names []string, payloads [][]byte) string {
 }
 
 func TestNativeAttachmentPayloadReadiness(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement"} {
+	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed"} {
 		t.Run(scenario, func(t *testing.T) {
+			mode := strings.TrimPrefix(scenario, "plain ")
+			plain := strings.HasPrefix(scenario, "plain ")
 			f := newOutgoingDescriptorFixture()
-			if scenario == "false acknowledgement" {
+			if mode == "false acknowledgement" {
 				f.sendReply = ae.Bool(false)
 			}
-			if scenario == "lost acknowledgement" {
+			if mode == "lost acknowledgement" {
 				f.sendErr = &ae.Error{Code: -1712, Attempted: true, Message: "lost send acknowledgement"}
 			}
 			input := fixtureOutgoingInput()
 			input.Body = "Multiline café 日本語 🚀\nLiteral <angle> & symbols.\n"
 			names := []string{"résumé 世界.txt", "second.bin"}
 			payloads := [][]byte{[]byte("first café 日本語\n"), {0, 1, 2, 255, 4}}
+			if plain {
+				names = nil
+				payloads = nil
+			}
 			for i, name := range names {
 				path := filepath.Join(t.TempDir(), name)
 				if err := os.WriteFile(path, payloads[i], 0600); err != nil {
@@ -65,7 +71,13 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				input.Attachments = append(input.Attachments, path)
 			}
 			source := attachmentProofMIME(names, payloads)
-			switch scenario {
+			if plain {
+				source = "From: alias@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n" + input.Body
+			}
+			if mode == "inherited attachment" {
+				source = attachmentProofMIME([]string{"unrequested.bin"}, [][]byte{[]byte("unrequested")})
+			}
+			switch mode {
 			case "missing":
 				source = "Content-Type: text/plain\r\n\r\nno payload"
 			case "wrong bytes":
@@ -82,6 +94,9 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 			box := ruleFixtureRef("attachment-proof-drafts")
 			account := ae.ByID("mact", ae.String("account-0"), ae.Null())
 			saved := false
+			removed := false
+			deletes := 0
+			storedRecipientChanged := false
 			saveCalls := 0
 			sourceReads := 0
 			ctx, cancel := context.WithCancel(context.Background())
@@ -114,26 +129,38 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 						return account, nil
 					}
 				}
+				if prop == "radd" && descriptorClass(container.Fields["from"]) == "mssg" && storedRecipientChanged && descriptorClass(container) == "trcp" {
+					return stringsDescriptors([]string{"edited@example.com"}), nil
+				}
 				if descriptorClass(container) == "mssg" {
+					if container.Fields["form"].Code == "ID  " && container.Fields["seld"].Number == 99 {
+						t.Fatal("inspected an unowned stored draft")
+					}
 					if prop == "ID  " {
 						if container.Fields["form"].Code == "ID  " {
 							return container.Fields["seld"], nil
 						}
-						if !saved {
-							return ae.List(), nil
+						if mode == "ID getter failed" && f.sendCalls > 0 {
+							return ae.Value{}, &ae.Error{Code: -1712, Message: "ID enumeration failed"}
 						}
-						if scenario == "ambiguous" {
-							return ae.List(ae.Int(15), ae.Int(16)), nil
+						if !saved || removed {
+							return ae.List(ae.Int(99)), nil
 						}
-						return ae.List(ae.Int(15)), nil
+						if mode == "ambiguous" {
+							return ae.List(ae.Int(99), ae.Int(15), ae.Int(16)), nil
+						}
+						return ae.List(ae.Int(99), ae.Int(15)), nil
 					}
 					if prop == "mbxp" {
-						if scenario == "account mismatch" {
+						if mode == "account mismatch" {
 							return ruleFixtureRef("foreign-box"), nil
 						}
 						return box, nil
 					}
 					if prop == "raso" {
+						if mode == "source getter failed" && f.sendCalls > 0 {
+							return ae.Value{}, &ae.Error{Code: -1728, Message: "stored source unavailable"}
+						}
 						sourceReads++
 						return ae.String(source), nil
 					}
@@ -168,35 +195,83 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 					f.events = append(f.events, event)
 					saveCalls++
 					saved = true
-					if scenario == "cancelled" {
+					if mode == "cancelled" {
 						cancel()
 					}
-					if scenario == "input changed" {
+					if mode == "input changed" {
 						if err := os.WriteFile(input.Attachments[0], []byte("changed"), 0600); err != nil {
 							t.Fatal(err)
 						}
 					}
-					if scenario == "compose changed" {
+					if mode == "compose changed" {
 						f.fields["ctnt"] = ae.String("changed")
 					}
 					return ae.Null(), ae.Stats{Events: 1, Attempted: true}, nil
 				}
-				if event.Class+event.ID == "coreclos" && scenario == "complete" && f.sendCalls == 0 {
+				if event.Class+event.ID == "coreclos" && mode == "complete" && f.sendCalls == 0 {
 					t.Fatal("closed composition before send")
 				}
 				if event.Class+event.ID == "emsgsend" && sourceReads == 0 {
 					t.Fatal("sent before raw MIME payload proof")
 				}
-				return f.send(eventCtx, event)
+				if event.Class+event.ID == "coredelo" {
+					f.events = append(f.events, event)
+					target := event.Params["----"]
+					if descriptorClass(target) != "mssg" || target.Fields["seld"].Number != 15 || !reflect.DeepEqual(target.Fields["from"], box) {
+						t.Fatal("deleted an unowned stored draft")
+					}
+					deletes++
+					if mode == "delete failed" {
+						return ae.Value{}, ae.Stats{Events: 1, Attempted: true}, errors.New("delete failed")
+					}
+					removed = true
+					if mode == "account drift after delete" {
+						f.accountIDs = []string{"replacement-account"}
+					}
+					return ae.Null(), ae.Stats{Events: 1, Attempted: true}, nil
+				}
+				v, stats, err := f.send(eventCtx, event)
+				if event.Class+event.ID == "emsgsend" && f.sendReply.Boolean && err == nil {
+					switch mode {
+					case "source changed":
+						source = "Message-ID: <changed@example.com>\r\n" + source
+					case "stored recipient changed":
+						storedRecipientChanged = true
+					case "account drift":
+						f.accountIDs = []string{"replacement-account"}
+					case "backend absent":
+						f.closed = true
+					case "cancelled after acknowledgement":
+						cancel()
+					}
+				}
+				if event.Class+event.ID == "coreclos" && mode == "absent after close" {
+					removed = true
+				}
+				return v, stats, err
 			}
 			result, err := c.SendOutgoing(input)
-			if scenario == "complete" {
-				if err != nil || !result.Submitted || f.sendCalls != 1 || saveCalls != 1 || f.closeCalls != 1 {
+			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement"
+			pending := mode == "source changed" || mode == "stored recipient changed" || mode == "account drift" || mode == "ID getter failed" || mode == "delete failed" || mode == "account drift after delete" || mode == "source getter failed"
+			if success {
+				wantCloses := 1
+				if mode == "backend absent" {
+					wantCloses = 0
+				}
+				if err != nil || !result.Submitted || f.sendCalls != 1 || saveCalls != 1 || f.closeCalls != wantCloses || !removed {
 					t.Fatalf("result=%+v err=%v sends=%d saves=%d closes=%d", result, err, f.sendCalls, saveCalls, f.closeCalls)
 				}
-			} else if scenario == "false acknowledgement" || scenario == "lost acknowledgement" {
+			} else if pending {
 				var mutation *MutationError
-				if !errors.As(err, &mutation) || !mutation.Attempted || !mutation.Uncertain || mutation.Submitted || !mutation.Saved || result.Submitted || f.sendCalls != 1 || f.closeCalls != 0 {
+				if !errors.As(err, &mutation) || !mutation.Submitted || mutation.Uncertain || result.Status != "submitted_cleanup_pending" || !result.Submitted || f.sendCalls != 1 {
+					t.Fatalf("unsafe cleanup pending result=%+v err=%v sends=%d", result, err, f.sendCalls)
+				}
+				if mode != "delete failed" && mode != "account drift after delete" && deletes != 0 {
+					t.Fatal("deleted changed or inaccessible draft")
+				}
+			} else if mode == "false acknowledgement" || mode == "lost acknowledgement" {
+				var mutation *MutationError
+				if !errors.As(err, &mutation) || !mutation.Attempted || !mutation.Uncertain || mutation.Submitted || !mutation.Saved || result.Submitted || f.sendCalls != 1 || f.closeCalls != 0 || deletes != 0 {
 					t.Fatalf("uncertain attached send result=%+v err=%v sends=%d closes=%d", result, err, f.sendCalls, f.closeCalls)
 				}
 			} else {
