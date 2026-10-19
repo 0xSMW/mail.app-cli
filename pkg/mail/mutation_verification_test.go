@@ -121,7 +121,7 @@ esac
 printf '%s\n' "$4" >> "$MAIL_APP_CLI_SQL_LOG"
 case "$4" in
   *"m.size = 42"*) printf '%s\n' '[{"ID":999}]' ;;
-  *"url = 'imap://ABC/Archive' or"*) printf '%s\n' '[{"ID":7,"URL":"imap://ABC/Archive","TotalCount":1,"UnreadCount":0}]' ;;
+  *"length('ABC/')) = 'Archive'"*) printf '%s\n' '[{"ID":7,"URL":"imap://ABC/Archive","TotalCount":1,"UnreadCount":0}]' ;;
   *) printf '%s\n' '[]' ;;
 esac
 `
@@ -153,11 +153,11 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(sqlCalls), "imap://ABC/Archive") || !strings.Contains(string(sqlCalls), "m.size = 42") {
+	if !strings.Contains(string(sqlCalls), "length('ABC/')) = 'Archive'") || !strings.Contains(string(sqlCalls), "m.size = 42") {
 		t.Fatalf("fallback did not query the literal Archive tuple: %s", sqlCalls)
 	}
-	if strings.Contains(string(sqlCalls), "/%/All%20Mail") {
-		t.Fatalf("literal Archive should resolve before broad All Mail fallback: %s", sqlCalls)
+	if !strings.Contains(string(sqlCalls), "= 'Archive' then 1") {
+		t.Fatalf("literal Archive should rank before broad All Mail fallback: %s", sqlCalls)
 	}
 }
 
