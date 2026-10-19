@@ -150,3 +150,69 @@ func TestDraftAppleRelatedBlankRenderingRejectsUnprovenParagraphBreaks(t *testin
 		}
 	}
 }
+
+func TestDraftAppleRelatedOmittedBodyReconstructionDoesNotAuthorWrapperLF(t *testing.T) {
+	// This is the captured Mail default paragraph/font/CID structure, with
+	// sanitized text and identities. Mail's ctnt adds LF before the first p;
+	// that LF is not a paragraph in the source.
+	const requested = "Plain <line> & symbols.\nUnicode: café 日本語 🚀\n"
+	original := appleRelatedFixture(t)
+	if original.Message.Content != "\n"+requested {
+		t.Fatal("fixture lacks observed Mail wrapper readback")
+	}
+	body, files, err := reconstructibleDraft(original)
+	if err != nil || body != requested || len(files) != 1 {
+		t.Fatalf("initial reconstruction=%q files=%+v err=%v", body, files, err)
+	}
+	// Omitting --body reuses this returned body. Its exact rendered form must
+	// remain the original one-wrapper-LF readback, without a blank paragraph.
+	recreated, ok := attachmentParagraphReadback(body)
+	if !ok || recreated != original.Message.Content {
+		t.Fatalf("omit-body recreation changed readback: %q", recreated)
+	}
+	updated := *original
+	updated.Message = new(Message)
+	*updated.Message = *original.Message
+	updated.Message.Content = recreated
+	body, _, err = reconstructibleDraft(&updated)
+	if err != nil || body != requested {
+		t.Fatalf("send reconstruction added authored blank: body=%q err=%v", body, err)
+	}
+
+	// A deliberate leading blank has an actual exact blank paragraph in the
+	// captured wrapper shape. It remains authored text across the same chain.
+	authored, canonical := appleLeadingBlankFixture(t)
+	body, _, err = reconstructibleDraft(authored)
+	if err != nil || body != canonical || body != "\n"+requested {
+		t.Fatalf("authored leading blank lost: body=%q err=%v", body, err)
+	}
+	recreated, ok = attachmentParagraphReadback(body)
+	if !ok || recreated != authored.Message.Content {
+		t.Fatalf("authored blank recreation changed: %q", recreated)
+	}
+}
+
+func TestDraftAppleRelatedNormalParagraphCanonicalizationRejectsBodyDrift(t *testing.T) {
+	for _, mutation := range []string{"extra leading LF", "extra trailing LF", "missing terminal LF", "separator prefix", "changed text", "changed whitespace"} {
+		t.Run(mutation, func(t *testing.T) {
+			snapshot := appleRelatedFixture(t)
+			switch mutation {
+			case "extra leading LF":
+				snapshot.Message.Content = "\n" + snapshot.Message.Content
+			case "extra trailing LF":
+				snapshot.Message.Content += "\n"
+			case "missing terminal LF":
+				snapshot.Message.Content = strings.TrimSuffix(snapshot.Message.Content, "\n")
+			case "separator prefix":
+				snapshot.Message.Content = "\n\u2028" + snapshot.Message.Content
+			case "changed text":
+				snapshot.Message.Content = strings.Replace(snapshot.Message.Content, "Plain", "Changed", 1)
+			case "changed whitespace":
+				snapshot.Message.Content = strings.Replace(snapshot.Message.Content, "Plain", " Plain", 1)
+			}
+			if _, _, err := reconstructibleDraft(snapshot); err == nil {
+				t.Fatal("accepted incomplete normal paragraph body relationship")
+			}
+		})
+	}
+}
