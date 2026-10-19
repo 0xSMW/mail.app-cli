@@ -31,7 +31,10 @@ create table messages (mailbox integer, subject integer, sender integer, date_se
 create table labels (message_id integer, mailbox_id integer);
 insert into subjects values ('subject'), ('near subject');
 insert into addresses values ('sender@example.com', ''), ('other@example.com', '');
-` + data
+` + data + `
+alter table mailboxes add column total_count integer default 0;
+alter table mailboxes add column unread_count integer default 0;
+`
 	cmd := exec.Command(binary, database)
 	cmd.Stdin = strings.NewReader(schema)
 	if output, err := cmd.CombinedOutput(); err != nil {
