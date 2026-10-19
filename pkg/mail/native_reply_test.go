@@ -39,6 +39,23 @@ func (f *threadedTransport) read(v ae.Value) (ae.Value, error) {
 		}
 		return ae.List(items...), nil
 	}
+	draftsRoot := ruleFixtureRef("threaded-drafts-root")
+	draftsBox := ruleFixtureRef("threaded-drafts")
+	if reflect.DeepEqual(v, ae.Property("drmb", ae.Null())) {
+		return draftsRoot, nil
+	}
+	if reflect.DeepEqual(v, ae.All("mbxp", draftsRoot)) {
+		return ae.List(draftsBox), nil
+	}
+	if reflect.DeepEqual(v, ae.Property("mact", draftsBox)) {
+		return f.account, nil
+	}
+	if reflect.DeepEqual(v, ae.Property("pnam", draftsBox)) {
+		return ae.String("Drafts"), nil
+	}
+	if reflect.DeepEqual(v, ae.Property("ID  ", ae.All("mssg", draftsBox))) {
+		return ae.List(), nil
+	}
 	if reflect.DeepEqual(v, ae.All("mact", ae.Null())) {
 		return ae.List(f.account), nil
 	}
@@ -296,6 +313,17 @@ func TestNativeThreadedOutgoingPreservesEditedFieldsAndRecipients(t *testing.T) 
 					return ae.Int(int64(len(f.files))), ae.Stats{}, nil
 				}
 				if event.Class == "core" && event.ID == "delo" {
+					prepared := ae.ByID("mssg", ae.Int(900), ruleFixtureRef("outgoing-fixture-drafts"))
+					if reflect.DeepEqual(ref, prepared) {
+						if f.sendCalls != 1 || f.sendErr != nil || !f.sendReply.Boolean {
+							t.Fatal("prepared draft deleted before affirmative acknowledgement")
+						}
+						return f.send(ctx, event)
+					}
+					class := descriptorClass(ref)
+					if class != "trcp" && class != "crcp" && class != "brcp" {
+						t.Fatalf("deletion escaped known recipients and prepared draft: %#v", ref)
+					}
 					if !reflect.DeepEqual(ref.Fields["from"], f.outgoing) {
 						t.Fatalf("recipient deletion escaped owned outgoing: %#v", ref)
 					}
@@ -310,7 +338,7 @@ func TestNativeThreadedOutgoingPreservesEditedFieldsAndRecipients(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !result.Submitted || f.sendCalls != 1 || commands != 1 || removed != 3 {
+			if !result.Submitted || f.sendCalls != 1 || commands != 1 || removed != 3 || f.draftDeletes != 1 {
 				t.Fatalf("result=%+v sends=%d commands=%d inherited recipients removed=%d", result, f.sendCalls, commands, removed)
 			}
 			if f.fields["subj"].Text != input.Subject || f.fields["ctnt"].Text != input.Body || f.fields["sndr"].Text != "alias@example.com" {
