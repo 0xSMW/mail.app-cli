@@ -254,19 +254,36 @@ const expected = %s;
 %s
 %s
 const acc = mail.accounts.byName(expected.message.account);
-const mbox = draftMailboxForAccount(mail, acc, false);
-const msg = messageById(mbox,expected.message.id);
-if (msg === null) throw new Error('Original draft unavailable after submission');
-const current = {subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())};
-if (msg.source() !== expected.source || current.subject !== expected.message.subject || current.sender !== expected.message.sender || current.content !== expected.message.content || JSON.stringify(current.toRecipients) !== JSON.stringify(expected.message.toRecipients) || JSON.stringify(current.ccRecipients) !== JSON.stringify(expected.message.ccRecipients) || JSON.stringify(current.bccRecipients) !== JSON.stringify(expected.message.bccRecipients)) throw new Error('Original draft changed after submission; retained');
-msg.delete();
-let removed = false;
-for (let i=0;i<30;i++) {
- if (messageById(mbox,expected.message.id) === null) { removed=true; break; }
- delay(0.1);
+const accountID = acc.id();
+if (typeof accountID !== 'string' || accountID.length === 0) throw new Error('Draft cleanup account identity unavailable');
+function currentDraftBox() {
+ const current = mail.accounts.byName(expected.message.account);
+ if (current.id() !== accountID) throw new Error('Draft cleanup account identity changed');
+ return draftMailboxForAccount(mail,current,false);
 }
-if (!removed) throw new Error('Original draft removal could not be verified after submission');
-JSON.stringify({deleted:true});
+function cleanupOriginalDraft() {
+ const msg = messageById(currentDraftBox(),expected.message.id);
+ if (msg === null) { currentDraftBox(); return true; }
+ const current = {subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())};
+ if (msg.source() !== expected.source || current.subject !== expected.message.subject || current.sender !== expected.message.sender || current.content !== expected.message.content || JSON.stringify(current.toRecipients) !== JSON.stringify(expected.message.toRecipients) || JSON.stringify(current.ccRecipients) !== JSON.stringify(expected.message.ccRecipients) || JSON.stringify(current.bccRecipients) !== JSON.stringify(expected.message.bccRecipients)) throw new Error('Original draft changed after preparation; retained');
+ currentDraftBox();
+ msg.delete();
+ for (let i=0;i<30;i++) {
+  try {
+   if (messageById(currentDraftBox(),expected.message.id) === null) {currentDraftBox(); return true;}
+  } catch(e) {
+   if (e.errorNumber !== -1728) throw e;
+   // A failed nested read is not absence. Fresh strict IDs in the same owned
+   // account may independently establish that the exact deleted ID is gone.
+   const ids=draftIDs(currentDraftBox());
+   currentDraftBox();
+   if (!ids.includes(expected.message.id)) return true;
+  }
+  delay(0.1);
+ }
+ throw new Error('Original draft removal could not be verified after preparation');
+}
+JSON.stringify({deleted:cleanupOriginalDraft()});
 `, string(expected), jxaDraftMailboxHelper(), jxaDraftMessageByIDHelper())
 }
 
@@ -274,16 +291,33 @@ JSON.stringify({deleted:true});
 // mailbox must never be interpreted as absence during destructive cleanup.
 func jxaDraftMessageByIDHelper() string {
 	return `
+function draftIDs(mbox) {
+ const owner=mbox.account().id();
+ if(typeof owner !== 'string' || owner.length === 0)throw new Error('Draft mailbox account identity unavailable');
+ const ids=mbox.messages.id();
+ if(!Array.isArray(ids))throw new Error('Draft mailbox IDs unavailable');
+ const seen={};
+ return ids.map(value=>{
+  let id;
+  if(typeof value==='number' && Number.isSafeInteger(value) && value>0)id=String(value);
+  else if(typeof value==='string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)))id=value;
+  else throw new Error('Draft mailbox contains an invalid ID');
+  if(seen[id])throw new Error('Draft mailbox contains duplicate IDs');
+  seen[id]=true;return id;
+ });
+}
 function messageById(mbox, messageId) {
- const ids = mbox.messages.id();
- if (!Array.isArray(ids)) throw new Error('Draft mailbox IDs unavailable');
- const matches = ids.map((id,index)=>({id:String(id),index:index})).filter(v=>v.id===messageId);
- if (matches.length > 1) throw new Error('Draft ID is ambiguous in mailbox');
- if (matches.length === 0) return null;
- const msg = mbox.messages.at(matches[0].index);
- if (String(msg.id()) !== messageId) throw new Error('Draft ID changed during lookup');
+ if(typeof messageId !== 'string' || !/^[1-9][0-9]*$/.test(messageId) || !Number.isSafeInteger(Number(messageId)))throw new Error('Draft ID is invalid');
+ const ids=draftIDs(mbox);
+ if(!ids.includes(messageId))return null;
+ const msg=mbox.messages.byId(Number(messageId));
+ if(String(msg.id()) !== messageId)throw new Error('Draft ID changed during lookup');
+ const deleted=msg.deletedStatus();
+ if(typeof deleted !== 'boolean')throw new Error('Draft deleted status is not a Boolean');
+ if(deleted===true)return null;
  return msg;
 }
+
 `
 }
 
