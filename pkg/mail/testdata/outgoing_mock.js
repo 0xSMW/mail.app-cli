@@ -5,29 +5,37 @@ const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 const config = request.config || {};
 const input = request.input;
 const events = [];
+const preparedId=request.action==='send'?'900':'stored-900';
+const storedDeleted=[], exactLookups=[];const removed=new Set();let savedComposition=false;
 let outgoing = null, polls = 0, attached = [], composed = 0, sent = 0, closed = 0, deleted = 0, reads = 0, accountReads = 0;
 function collection(values) { const f=()=>values; f.push=x=>values.push(x); return f; }
 function recipients(values) { return values.map(address=>({address:()=>address})); }
 function stored(id, change) {
- const data=Object.assign({},input,change||{});
- return {id:()=>id,mailbox:()=>({name:()=>config.physicalDraftName || config.draftName || 'Drafts'}),source:()=>config.source || '',subject:()=>data.subject,content:()=>data.body,sender:()=>data.sender || (config.accounts || [{addresses:['sender@example.com']}])[0].addresses[0],
+ const after=sent>0 && id===preparedId ? (config.storedAfterSend || {}) : {};
+ const data=Object.assign({},input,change||{},after);
+ const ownerId=after.accountId || (config.accounts || [{id:'id-1'}])[0].id;
+ const box={name:()=>data.mailbox || config.physicalDraftName || config.draftName || 'Drafts',account:()=>({id:()=>ownerId})};
+ function read(name,value){if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
+ return {id:()=>id,mailbox:()=>box,source:()=>read('source',data.source===undefined?(config.source || 'raw source'):data.source),messageId:()=>data.rfcMessageId || 'draft-rfc-id',subject:()=>read('subject',data.subject),content:()=>read('body',data.body),sender:()=>data.sender || (config.accounts || [{addresses:['sender@example.com']}])[0].addresses[0],
  toRecipients:()=>recipients(data.to || []),ccRecipients:()=>recipients(data.cc || []),bccRecipients:()=>recipients(data.bcc || []),
- mailAttachments:()=> (data.attachments||[]).map(path=>({name:()=>path.split('/').pop()}))};
+ mailAttachments:()=> (data.attachments||[]).map((path,index)=>({id:()=>String(index),name:()=>path.split('/').pop(),mimeType:()=>data.mimeType || 'application/octet-stream',fileSize:()=>data.fileSize || 10,downloaded:()=>true})),
+ delete:()=>{if(id!==preparedId)throw new Error('attempt to remove unrelated stored draft');storedDeleted.push(id);if(config.storedDeleteThrows)throw new Error('stored delete failed');if(!config.storedDeleteNoEffect)removed.add(id);}};
 }
 const drafts={name:()=> config.draftName || 'Drafts',account:()=>accounts[0],messages:()=> {
  if(config.snapshotRead) return [stored(String(config.draftId || '42'))];
- if (!closed) return config.preexisting ? [stored('old')] : [];
+ if (!(request.action==='send' ? savedComposition : closed)) return config.preexisting ? [stored('old')] : [];
  polls++;
  if(config.transientLookup && polls===1){const e=new Error('object not ready');e.errorNumber=-1728;throw e;}
  if(config.transportLookup){const e=new Error('transport timeout');e.errorNumber=-1712;throw e;}
  if (config.neverSave || polls < (config.saveDelay || 1)) return config.preexisting ? [stored('old')] : [];
- const values = [stored('stored-900',config.savedChange)];
+ const values = [stored(preparedId,config.savedChange)];
  if (config.ambiguousSave) values.push(stored('stored-901'));
  if (config.preexisting) values.push(stored('old'));
- return values;
+ return values.filter(m=>!removed.has(m.id()) && !(sent>0 && config.storedAbsent && m.id()===preparedId));
 }};
 drafts.messages=new Proxy(drafts.messages,{get:(target,key)=>{
- if(key==='at')return index=>target()[index];
+ if(key==='byId')return id=>{const value=target().find(m=>m.id()===String(id));if(!value){const e=new Error('missing exact draft');e.errorNumber=-1728;throw e;}exactLookups.push(value.id());return value;};
+ if(key==='at')return index=>{const value=config.reorderAfterLookup ? stored('old') : target()[index];if(value)exactLookups.push(value.id());return value;};
  if(key==='id')return ()=>target().map(m=>m.id());
  if(/^[0-9]+$/.test(String(key)))return target()[Number(key)];
  return target[key];
@@ -37,9 +45,16 @@ const accounts=(config.accounts || [{name:'Account',id:'id-1',enabled:true,addre
  emailAddresses:()=>{ if(config.accountGetterThrows) throw new Error('address lookup failed'); return data.addresses; },
  mailboxes:()=>config.missingDrafts ? [] : (config.nestedDrafts ? [{name:()=> '[Gmail]',mailboxes:()=>[drafts]}] : [drafts])
 }));
+function changeOutgoing(message,change) {
+ if(change.subject!==undefined)message.subject=()=>change.subject;
+ if(change.body!==undefined)message.content=change.body;
+ if(change.sender!==undefined)message.sender=change.sender;
+ ['to','cc','bcc'].forEach(kind=>{if(change[kind]!==undefined)message[kind+'Recipients']=()=>recipients(change[kind]);});
+ if(change.attachments!==undefined)attached=change.attachments.map(name=>({fileName:()=>name}));
+}
 const mail={
  draftsMailbox:()=>({mailboxes:()=>config.missingDrafts ? [] : (config.ambiguousDrafts ? [drafts,drafts] : [drafts])}),
- accounts:()=>{accountReads++;if(config.disableBeforeMutation && accountReads>=3) accounts[0].enabled=()=>false;return accounts;},
+ accounts:()=>{accountReads++;if(config.accountIdChangeAtRead && accountReads>=config.accountIdChangeAtRead)accounts[0].id=()=>'changed-owner';if(config.disableBeforeMutation && accountReads>=3) accounts[0].enabled=()=>false;return accounts;},
  outgoingMessages:{push:message=>{ composed++; outgoing=message; }},
  OutgoingMessage:properties=> {
   function property(name, value) {
@@ -60,16 +75,9 @@ const mail={
  ToRecipient:p=>({address:()=>p.address}), CcRecipient:p=>({address:()=>p.address}), BccRecipient:p=>({address:()=>p.address}),
  Attachment:p=>({fileName:()=>p.fileName}),
  send:message=>{if(message!==outgoing) throw new Error('wrong outgoing');sent++;if(config.sendThrows)throw new Error('transport failed');
-  if(config.afterSend){
-   const change=config.afterSend;
-   if(change.subject!==undefined)message.subject=()=>change.subject;
-   if(change.body!==undefined)message.content=change.body;
-   if(change.sender!==undefined)message.sender=change.sender;
-   ['to','cc','bcc'].forEach(kind=>{if(change[kind]!==undefined)message[kind+'Recipients']=()=>recipients(change[kind]);});
-   if(change.attachments!==undefined)attached=change.attachments.map(name=>({fileName:()=>name}));
-  }
+  if(config.afterSend)changeOutgoing(message,config.afterSend);
   return config.sendFalse ? false : true;},
- save:message=>{if(message!==outgoing)throw new Error('invalid save');},
+ save:message=>{if(message!==outgoing)throw new Error('invalid save');savedComposition=true;if(request.action==='send' && config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
  close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
  delete:message=>{if(message!==outgoing)throw new Error('deleting unrelated object');deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');}
 };
@@ -112,4 +120,4 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
 const sandbox={Application:name=>{if(name!=='Mail')throw new Error('wrong app');return mail;},Path:path=>path,delay:seconds=>{events.push(['delay',seconds]);if(config.realDelay)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,seconds*1000);},ObjC:{import:()=>{},deepUnwrap:v=>v},$:foundation,Ref:()=>[],reply:event=>events.push(event)};
 let response=vm.runInNewContext(request.script || request.helper+'\ncomposeOutgoing('+JSON.stringify(input)+','+JSON.stringify(request.action)+')',sandbox);
 if(typeof response==='string')response=JSON.parse(response);
-process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,composedBody:(()=>{try{return outgoing?outgoing.content():null;}catch(e){return null;}})(),transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));
+process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,storedDeleted,exactLookups,composedBody:(()=>{try{return outgoing?outgoing.content():null;}catch(e){return null;}})(),transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));
