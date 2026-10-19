@@ -83,7 +83,7 @@ func proveOutgoingMIMEAttachments(ctx context.Context, source string, expected [
 
 // Save and inspect this same owned composition before dispatch. Rich-text
 // element counts and filenames are insertion evidence, never payload proof.
-func (r *nativeOutgoingRun) proveAttachmentReadiness() error {
+func (r *nativeOutgoingRun) prepareSendDraft() error {
 	r.step = "attachment_payload_snapshot"
 	original, err := r.n.ownedComposeSnapshot(r.owned)
 	if err != nil {
@@ -154,8 +154,128 @@ func (r *nativeOutgoingRun) proveAttachmentReadiness() error {
 		if !reflect.DeepEqual(original, currentOwned) {
 			return fmt.Errorf("owned composition changed during attachment payload verification")
 		}
+		finalSource, err := r.n.stringProperty("raso", ref)
+		if err != nil {
+			return err
+		}
+		if finalSource != raw {
+			return fmt.Errorf("saved draft source changed during payload verification")
+		}
+		r.preparedDraft = &draftSnapshot{Message: current, Source: raw}
+		r.preparedAccountID = r.result.AccountID
 		r.result.Draft = nil
 		r.result.Status = ""
 		return nil
 	})
+}
+
+// Resolve the selected account afresh before touching the recorded ID. No
+// post-send fingerprint search is permitted to select a deletion target.
+func (r *nativeOutgoingRun) preparedDraftBox(n *nativeMail) (ae.Value, error) {
+	if r.preparedDraft == nil || r.preparedDraft.Message == nil || r.preparedAccountID == "" {
+		return ae.Value{}, fmt.Errorf("prepared draft identity unavailable after submission")
+	}
+	account, id, sender, err := n.outgoingSender(r.input)
+	if err != nil {
+		return ae.Value{}, err
+	}
+	if id != r.preparedAccountID || id != r.result.AccountID || sender != r.result.Sender {
+		return ae.Value{}, fmt.Errorf("prepared draft account identity changed; retained")
+	}
+	box, err := n.outgoingDraftMailbox(account)
+	if err != nil {
+		return ae.Value{}, err
+	}
+	name, err := n.stringProperty("pnam", box)
+	if err != nil {
+		return ae.Value{}, err
+	}
+	if name != r.preparedDraft.Message.Mailbox {
+		return ae.Value{}, fmt.Errorf("prepared draft mailbox identity changed; retained")
+	}
+	return box, nil
+}
+
+// Read all IDs strictly to distinguish actual absence from a failed/stale
+// property getter. Other drafts' subjects and contents are never inspected.
+func preparedDraftPresent(n *nativeMail, box ae.Value, id string) (bool, error) {
+	value, err := n.get(ae.Property("ID  ", ae.All("mssg", box)))
+	if err != nil {
+		return false, err
+	}
+	ids, err := nativeList(value, "prepared draft IDs")
+	if err != nil {
+		return false, err
+	}
+	seen := make(map[string]bool, len(ids))
+	found := false
+	for _, value := range ids {
+		if value.Kind != "int" || value.Number <= 0 {
+			return false, fmt.Errorf("prepared draft IDs unavailable")
+		}
+		key := outgoingID(value)
+		if seen[key] {
+			return false, fmt.Errorf("prepared draft ID is ambiguous")
+		}
+		seen[key] = true
+		if key == id {
+			found = true
+		}
+	}
+	return found, nil
+}
+
+func (r *nativeOutgoingRun) cleanupPreparedDraft(n *nativeMail) error {
+	box, err := r.preparedDraftBox(n)
+	if err != nil {
+		return err
+	}
+	id := r.preparedDraft.Message.ID
+	present, err := preparedDraftPresent(n, box, id)
+	if err != nil {
+		return err
+	}
+	if !present {
+		_, err = r.preparedDraftBox(n)
+		return err
+	}
+	number, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || number <= 0 {
+		return fmt.Errorf("prepared draft ID unavailable")
+	}
+	ref := ae.ByID("mssg", ae.Int(number), box)
+	message, err := n.outgoingSnapshotMessage(ref, r.input.Account, box)
+	if err != nil {
+		return err
+	}
+	source, err := n.stringProperty("raso", ref)
+	if err != nil {
+		return err
+	}
+	if !sameDraftSnapshot(r.preparedDraft, &draftSnapshot{Message: message, Source: source}) {
+		return fmt.Errorf("prepared draft changed after submission; retained")
+	}
+	if _, err = r.preparedDraftBox(n); err != nil {
+		return err
+	}
+	if _, err = n.command("core", "delo", map[string]ae.Value{"----": ref}); err != nil {
+		return err
+	}
+	for {
+		box, err = r.preparedDraftBox(n)
+		if err != nil {
+			return err
+		}
+		present, err = preparedDraftPresent(n, box, id)
+		if err != nil {
+			return err
+		}
+		if !present {
+			_, err = r.preparedDraftBox(n)
+			return err
+		}
+		if err = n.outgoingPause(); err != nil {
+			return fmt.Errorf("prepared draft removal could not be verified: %w", err)
+		}
+	}
 }
