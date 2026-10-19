@@ -2,7 +2,15 @@ package mail
 
 import (
 	"fmt"
+
+	"golang.org/x/text/unicode/norm"
 )
+
+// attachmentNamesEqual accepts canonical Unicode spelling variants while
+// preserving case and compatibility distinctions in publisher filenames.
+func attachmentNamesEqual(a, b string) bool {
+	return norm.NFC.String(a) == norm.NFC.String(b)
+}
 
 func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) ([]Attachment, error) {
 	if c.nativeEnabled() {
@@ -75,6 +83,8 @@ const app = Application.currentApplication();
 app.includeStandardAdditions = true;
 const requestedMailbox = '%s';
 const requestedIndex = %d;
+const requestedName = '%s';
+function canonicalName(name) { return String(name).normalize('NFC'); }
 %s
 
 try {
@@ -85,23 +95,27 @@ try {
 		'Error: Message not found';
 	} else {
 		const attachments = msg.mailAttachments();
-		let found = false;
+		let selected = -1;
 		const pathObj = Path('%s');
 		if (requestedIndex >= 0) {
 			if (requestedIndex < attachments.length) {
-				attachments[requestedIndex].save({ in: pathObj });
-				found = true;
+				if (requestedName !== '' && canonicalName(attachments[requestedIndex].name()) !== canonicalName(requestedName)) {
+					throw new Error('Attachment index has unexpected name');
+				}
+				selected = requestedIndex;
 			}
 		} else {
 			for (let a = 0; a < attachments.length; a++) {
-				if (attachments[a].name() === '%s') {
-					attachments[a].save({ in: pathObj });
-					found = true;
-					break;
+				if (canonicalName(attachments[a].name()) === canonicalName(requestedName)) {
+					if (selected >= 0) {
+						throw new Error('Attachment name is ambiguous; select its index');
+					}
+					selected = a;
 				}
 			}
 		}
-		if (found) {
+		if (selected >= 0) {
+			attachments[selected].save({ in: pathObj });
 			'Success';
 		} else {
 			'Error: Attachment not found';
@@ -110,7 +124,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(mailboxName), index, lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
+`, escapeJSString(mailboxName), index, escapeJSString(attachmentName), lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath))
 
 	return c.runJXAStatus(script)
 }
