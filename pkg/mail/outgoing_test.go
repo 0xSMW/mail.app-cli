@@ -202,6 +202,11 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 		{name: "nested attachment missing is not owned absence", config: map[string]any{"fingerprintFailures": []string{"attachments"}, "failAfterSend": true}, submitted: true},
 		{name: "body read failure retains composition", config: map[string]any{"fingerprintFailures": []string{"body"}, "failAfterSend": true}, submitted: true},
 		{name: "owned object already gone", config: map[string]any{"fingerprintFailures": []string{"subject"}, "failAfterSend": true}, submitted: true, ok: true},
+		{name: "intrinsic true availability descriptor", config: map[string]any{"intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic true attachment filenames", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic false unavailable filename descriptor", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"intrinsicBoolean": true, "filenameUnsupported": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic true with unavailable filename list retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"flag": "true"}, "malformedAfterSend": true, "filenameUnsupportedAfterSend": true}, submitted: true},
+		{name: "intrinsic false with inconsistent filename list retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"flag": "fals"}, "malformedAfterSend": true}, submitted: true},
 		{name: "wrong root descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"root": "utxt"}, "malformedAfterSend": true}, submitted: true},
 		{name: "wrong count descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"count": "utxt"}, "malformedAfterSend": true}, submitted: true},
 		{name: "wrong availability descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"flag": "long"}, "malformedAfterSend": true}, submitted: true},
@@ -236,6 +241,9 @@ func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
 				if got.Response.Phase != "submitted_cleanup" || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "" || got.Response.Uncertain {
 					t.Fatalf("lost authoritative ack=%s", raw)
 				}
+			}
+			if tt.name == "wrong availability descriptor retains" && (!strings.Contains(got.Response.Error, `available="long"`) || !strings.Contains(got.Response.Error, "1819242087")) {
+				t.Fatalf("missing descriptor diagnostics: %s", raw)
 			}
 			if !tt.submitted && !got.Response.Uncertain {
 				t.Fatalf("lost send uncertainty=%s", raw)
