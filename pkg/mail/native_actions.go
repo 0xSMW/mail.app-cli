@@ -139,6 +139,54 @@ func (n *nativeMail) attachments(ref appleevents.Value) ([]Attachment, []appleev
 func (n *nativeMail) attachmentMessage(account, mailbox, id string) (appleevents.Value, error) {
 	ref, err := n.scopedMessage(account, mailbox, id)
 	if err == nil {
+		// An explicitly active ordinary message cannot be a deleted Drafts
+		// tombstone and must not depend on special-Drafts discovery.
+		status, statusErr := n.get(appleevents.Property("isdl", ref))
+		if statusErr == nil && status.Kind == "bool" && !status.Boolean {
+			return ref, nil
+		}
+		// Ordinary mailbox resolution retains priority. Only its full owner
+		// and ancestor identity can establish that it is special Drafts.
+		acc, e := n.account(account)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		special, e := n.outgoingDraftMailbox(acc)
+		if IsNotFound(e) {
+			return ref, nil
+		}
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		accountID, e := n.stringProperty("ID  ", acc)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		actualBox := ref.Fields["from"]
+		actualName, e := n.stringProperty("pnam", actualBox)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		specialName, e := n.stringProperty("pnam", special)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		if actualName != specialName {
+			return ref, nil
+		}
+		actualIdentity, _, e := n.canonicalMailbox(nativeMailboxRef{ref: actualBox, name: actualName}, accountID)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		specialIdentity, _, e := n.canonicalMailbox(nativeMailboxRef{ref: special, name: specialName}, accountID)
+		if e != nil {
+			return appleevents.Value{}, e
+		}
+		if actualIdentity == specialIdentity {
+			if e = n.requireActiveDraft(ref); e != nil {
+				return appleevents.Value{}, e
+			}
+		}
 		return ref, nil
 	}
 	var missing *NotFoundError
@@ -163,7 +211,14 @@ func (n *nativeMail) attachmentMessage(account, mailbox, id string) (appleevents
 	if name != mailbox {
 		return appleevents.Value{}, err
 	}
-	return n.message(box, id)
+	ref, lookupErr = n.message(box, id)
+	if lookupErr != nil {
+		return appleevents.Value{}, lookupErr
+	}
+	if lookupErr = n.requireActiveDraft(ref); lookupErr != nil {
+		return appleevents.Value{}, lookupErr
+	}
+	return ref, nil
 }
 
 func (c *Client) nativeAttachments(account, mailbox, id string) ([]Attachment, error) {
