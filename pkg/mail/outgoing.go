@@ -348,6 +348,7 @@ function composeOutgoing(input, action) {
    const number=e && typeof e.errorNumber === 'number' && Number.isInteger(e.errorNumber) ? e.errorNumber : null;
    const error=new Error(name+' failed'+(number === null ? '' : ' (AppleScript error '+number+')')+(e && e.safeDiagnostic ? ': '+e.message : ''));
    if(number !== null)error.errorNumber=number;
+   error.deletedStatusFailure=!!(e && e.deletedStatusFailure);
    error.safeDiagnostic=true;
    throw error;
   }
@@ -377,13 +378,15 @@ function composeOutgoing(input, action) {
   // Mail's persisted rich-text view adds one leading paragraph separator.
   // Do not trim user whitespace or accept arbitrary body differences.
   if(body===input.body.replace(/\r\n/g,'\n') || body===expected || body==='\n'+expected)return true;
-  // Mail can serialize attachment-backed owned text with an extra LF/line
-  // separator prefix. Accept only this exact layout with N trailing owned
-  // object markers proving N requested attachments, preserving all body text.
+  // Mail serializes each empty attachment-backed paragraph as exactly one
+  // line separator, plus one wrapper LF. Preserve every nonempty line and
+  // exactly one terminal LF; this is not arbitrary whitespace normalization.
+  const lines=expected.slice(0,-1).split('\n');
+  const storedLayout='\n'+lines.map(line=>line === '' ? '\u2028' : line).join('\n')+'\n';
   const count=(input.attachments || []).length;
   return count > 0 && input.body.indexOf('\uFFFC') < 0 && ownedBodyProof !== null && ownedBodyProof.attachmentCount === count &&
    (ownedBodyProof.files === null || equal(ownedBodyProof.files,expectedNames)) &&
-   ownedBodyProof.body.replace(/\r\n/g,'\n') === expected+'\uFFFC'.repeat(count) && body==='\n\u2028'+expected;
+   ownedBodyProof.body.replace(/\r\n/g,'\n') === expected+'\uFFFC'.repeat(count) && body===storedLayout;
  }
  // Stored Drafts ownership is established before dispatch, never guessed from
  // a Sent message or a post-send subject search.
@@ -420,6 +423,8 @@ function composeOutgoing(input, action) {
  }
  function preparedById(box,id) {
   if(!/^[0-9]+$/.test(id) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0) fail('Prepared draft ID is not a supported numeric identity');
+  const owner=box.account().id();
+  if(typeof owner !== 'string' || owner !== result.accountId)fail('Prepared Drafts account ownership changed');
   const ids=preparedIds(box.messages.id());
   const matching=ids.filter(value=>value===id);
   if(matching.length === 0) return null;
@@ -427,6 +432,14 @@ function composeOutgoing(input, action) {
   // The destructive reference must remain by-ID even if mailbox order changes.
   const message=box.messages.byId(Number(id));
   if(String(message.id()) !== id) fail('Prepared draft exact-ID readback mismatch');
+  let deleted;
+  try {deleted=message.deletedStatus();} catch(e) {
+   const error=new Error('Prepared draft deleted status unavailable');
+   if(e && typeof e.errorNumber === 'number' && Number.isInteger(e.errorNumber))error.errorNumber=e.errorNumber;
+   error.deletedStatusFailure=true;error.safeDiagnostic=true;throw error;
+  }
+  if(typeof deleted !== 'boolean')fail('Prepared draft deleted status is not a Boolean');
+  if(deleted === true)return null;
   return message;
  }
  function prepareSendDraft(target,before) {
@@ -440,10 +453,12 @@ function composeOutgoing(input, action) {
     for(const message of messages) {
      const id=String(message.id());
      if(before[id]) continue;
-     // Match all requested fields before taking the full immutable snapshot.
-     if(matches(message)) { const exact=preparedById(box,id); if(exact === null) continue; const snapshot=storedSnapshot(exact); if(snapshot.id !== id) fail('Prepared draft identity changed during read'); if(matchesPrepared(snapshot)) candidates.push(snapshot); }
+     // Require an active exact-ID message before reading matching properties.
+     const exact=preparedById(box,id);
+     if(exact === null)continue;
+     if(matches(exact)) { const snapshot=storedSnapshot(exact); if(snapshot.id !== id) fail('Prepared draft identity changed during read'); if(matchesPrepared(snapshot)) candidates.push(snapshot); }
     }
-   } catch(e) { if(e.errorNumber !== -1728) throw e; delay(0.1);continue; }
+   } catch(e) { if(e.deletedStatusFailure || e.errorNumber !== -1728) throw e; delay(0.1);continue; }
    if(candidates.length > 1) fail('Prepared draft identity is ambiguous');
    if(candidates.length === 1) return candidates[0];
    delay(0.1);
@@ -462,8 +477,13 @@ function composeOutgoing(input, action) {
    const ids=cleanupStage('prepared_absence_ids',()=>preparedIds(box.messages.id()));
    const matching=ids.filter(id=>id===expected.id);
    if(matching.length > 1)fail('Prepared draft ID is ambiguous during absence confirmation');
+   let logicalAbsence=false;
+   if(matching.length === 1) {
+    try {logicalAbsence=cleanupStage('prepared_absence_exact_deleted_status',()=>preparedById(box,expected.id)) === null;}
+    catch(e) {if(e.deletedStatusFailure || e.errorNumber !== -1728)throw e;}
+   }
    cleanupStage('prepared_absence_owner_confirmation',()=>currentPreparedBox(expected));
-   if(matching.length === 0)return true;
+   if(matching.length === 0 || logicalAbsence)return true;
    if(Date.now() >= deadline)break;
    delay(0.1);
   }
@@ -488,7 +508,7 @@ function composeOutgoing(input, action) {
   } catch(e) {
    // Only fresh ID enumeration in the guarded account-owned Drafts mailbox
    // establishes disappearance; a missing nested read or by-ID lookup cannot.
-   if(e.errorNumber === -1728 && preparedAbsentAfterRace(expected))return;
+   if(!e.deletedStatusFailure && e.errorNumber === -1728 && preparedAbsentAfterRace(expected))return;
    throw e;
   }
  }
@@ -559,8 +579,17 @@ function composeOutgoing(input, action) {
   for (let i=0;i<80;i++) {
    drafts=draftMailboxForAccount(mail,target.account);
    let candidates=[];
-   try { candidates=drafts.messages().filter(m => !before[String(m.id())] && matches(m)); }
-   catch(e) { if(e.errorNumber !== -1728) throw e; delay(0.1); continue; }
+   try {
+    const messages=drafts.messages();
+    if(!Array.isArray(messages))fail('Saved Drafts messages unavailable');
+    for(const message of messages) {
+     const id=String(message.id());
+     if(before[id])continue;
+     const exact=preparedById(drafts,id);
+     if(exact !== null && matches(exact))candidates.push(exact);
+    }
+   }
+   catch(e) { if(e.deletedStatusFailure || e.errorNumber !== -1728) throw e; delay(0.1); continue; }
    if (candidates.length > 1) fail('Saved draft identity is ambiguous');
    if (candidates.length === 1) {
     const m=candidates[0];
