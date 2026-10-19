@@ -415,7 +415,7 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 		if !strings.HasSuffix(r.body, "\n") {
 			r.body += "\n"
 		}
-		if action == "send" && len(input.Attachments) > 0 {
+		if action == "send" {
 			r.step = "attachment_input_hash"
 			err = n.phase("outgoing_attachment_input_hash", func() error {
 				var hashErr error
@@ -426,7 +426,7 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 				return err
 			}
 		}
-		if action == "save" || (action == "send" && len(input.Attachments) > 0) {
+		if action == "save" || action == "send" {
 			r.step = "draft_resolution"
 			if err = r.draftBaseline(account); err != nil {
 				return err
@@ -436,8 +436,8 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 		if err = n.phase("outgoing_compose", r.compose); err != nil {
 			return err
 		}
-		if action == "send" && len(input.Attachments) > 0 {
-			if err = r.proveAttachmentReadiness(); err != nil {
+		if action == "send" {
+			if err = r.prepareSendDraft(); err != nil {
 				return err
 			}
 		}
