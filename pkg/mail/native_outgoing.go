@@ -335,7 +335,7 @@ func (n *nativeMail) outgoingAttach(object ae.Value, paths []string) error {
 		return nil
 	}
 	// Only this outgoing descriptor is owned. Mail may return missing value
-	// from an accepted rich-text make; the public count proves readiness.
+	// from an accepted rich-text make; count proves insertion, not payload readiness.
 	baseline, e := n.outgoingAttachmentCount(object)
 	if e != nil {
 		return e
@@ -373,7 +373,8 @@ func (n *nativeMail) outgoingAttach(object ae.Value, paths []string) error {
 		}
 		// Current Mail can expose the rich-text element while its atfn getter
 		// remains unsupported. Its public exact count from an empty baseline,
-		// together with acknowledged FileURL insertions, supplies the loading guard.
+		// together with acknowledged FileURL insertions, supplies insertion evidence.
+		// Send additionally verifies persisted MIME attachment payloads.
 		if count == int64(inserted) && (unavailable || (e == nil && outgoingEqual(names, expected))) {
 			return nil
 		}
@@ -414,7 +415,18 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 		if !strings.HasSuffix(r.body, "\n") {
 			r.body += "\n"
 		}
-		if action == "save" {
+		if action == "send" && len(input.Attachments) > 0 {
+			r.step = "attachment_input_hash"
+			err = n.phase("outgoing_attachment_input_hash", func() error {
+				var hashErr error
+				r.attachmentProofs, hashErr = hashOutgoingAttachmentInputs(n.ctx, input.Attachments)
+				return hashErr
+			})
+			if err != nil {
+				return err
+			}
+		}
+		if action == "save" || (action == "send" && len(input.Attachments) > 0) {
 			r.step = "draft_resolution"
 			if err = r.draftBaseline(account); err != nil {
 				return err
@@ -423,6 +435,11 @@ func (c *Client) composeNativeOutgoingOwned(input OutgoingInput, action string, 
 		r.step = "compose"
 		if err = n.phase("outgoing_compose", r.compose); err != nil {
 			return err
+		}
+		if action == "send" && len(input.Attachments) > 0 {
+			if err = r.proveAttachmentReadiness(); err != nil {
+				return err
+			}
 		}
 		r.step = action
 		if err = r.dispatch(); err != nil || action == "send" {
