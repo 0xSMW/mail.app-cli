@@ -64,9 +64,13 @@ func TestLocalReadProviderSchemesUseCachedMessageAndAttachments(t *testing.T) {
 					t.Fatalf("attachment bytes: %v, %v", saved, err)
 				}
 			}
+			if events.Load() != 0 {
+				t.Fatalf("cached provider operations sent %d Mail events", events.Load())
+			}
+			live := localReadLiveFixture(client)
 			for _, id := range []string{"102", "107", "108", "109"} {
 				got, handled, err := client.getMessageDetailsFromDisk("Work", "INBOX", id)
-				if err != nil || !handled || got != nil {
+				if err != nil || handled || got != nil {
 					t.Fatalf("wrong-account body %s: %+v, %v, %v", id, got, handled, err)
 				}
 				got, err = client.GetMessageDetailsJSON("Work", "INBOX", id)
@@ -86,8 +90,8 @@ func TestLocalReadProviderSchemesUseCachedMessageAndAttachments(t *testing.T) {
 					t.Fatalf("wrong-account save published file: %v", err)
 				}
 			}
-			if events.Load() != 0 {
-				t.Fatalf("cached provider operations sent %d Mail events", events.Load())
+			if len(live.events) == 0 {
+				t.Fatal("index misses did not recheck scoped Mail absence")
 			}
 		})
 	}
