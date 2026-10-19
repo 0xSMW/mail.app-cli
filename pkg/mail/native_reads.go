@@ -372,6 +372,7 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 	var message *Message
 	trace := &PhaseTrace{Phases: []AutomationPhase{}}
 	var diskDiagnostics *BodyDiagnostics
+	recheckMembership := false
 	if preferDisk && !verification {
 		started := time.Now()
 		cached, handled, err := c.getMessageDetailsFromDisk(account, mailbox, id)
@@ -389,6 +390,8 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 		}
 		if cached != nil {
 			diskDiagnostics = cached.BodyDiagnostics
+		} else {
+			recheckMembership = true
 		}
 	}
 
@@ -420,6 +423,32 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 			return err
 		}
 		if err := n.phase("lookup_by_id", func() error {
+			if recheckMembership {
+				// Mail can resolve by-ID specifiers globally, ignoring their
+				// mailbox container. Confirm collection membership when the
+				// index supplied no scoped envelope, including Gmail labels
+				// whose physical owner may be a different mailbox.
+				number, err := strconv.ParseInt(id, 10, 64)
+				if err != nil || number <= 0 {
+					return fmt.Errorf("invalid message ID: %q", id)
+				}
+				selector := appleevents.ByTest("mssg", appleevents.Comparison("=   ", appleevents.Property("ID  ", appleevents.Examined()), appleevents.Int(number)), box)
+				value, err := n.get(appleevents.Property("ID  ", selector))
+				if err != nil {
+					return err
+				}
+				ids, err := nativeList(value, "scoped message IDs")
+				if err != nil {
+					return err
+				}
+				if len(ids) == 0 {
+					found = false
+					return nil
+				}
+				if len(ids) != 1 || ids[0].Kind != "int" || ids[0].Number != number {
+					return fmt.Errorf("Mail returned inconsistent scoped message IDs")
+				}
+			}
 			var err error
 			ref, err = n.message(box, id)
 			if errors.Is(err, ErrNotFound) {
