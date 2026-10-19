@@ -112,13 +112,17 @@ func (n *nativeMail) phase(name string, fn func() error) error {
 }
 
 func (n *nativeMail) event(class, id string, params map[string]appleevents.Value) (appleevents.Value, error) {
+	return n.eventWithTimeout(class, id, params, defaultAutomationTimeout)
+}
+
+func (n *nativeMail) eventWithTimeout(class, id string, params map[string]appleevents.Value, timeout time.Duration) (appleevents.Value, error) {
 	if err := n.ctx.Err(); err != nil {
 		return appleevents.Value{}, err
 	}
 	if class == "core" && id == "getd" && requestsNativeContent(params["----"]) {
 		nativeContentRequestCount.Add(1)
 	}
-	v, stats, err := n.sender(n.ctx, appleevents.Event{Class: class, ID: id, Params: params, Timeout: defaultAutomationTimeout})
+	v, stats, err := n.sender(n.ctx, appleevents.Event{Class: class, ID: id, Params: params, Timeout: timeout})
 	recordNativeEvent(stats)
 	return v, err
 }
