@@ -54,7 +54,27 @@ func (n *nativeMail) outgoingDraftMailbox(account ae.Value) (ae.Value, error) {
 	}
 	return found, nil
 }
+
+// A deleted Mail message can remain addressable in Drafts after deletion.
+// Only an explicit false boolean establishes that it is an active draft.
+func (n *nativeMail) requireActiveDraft(ref ae.Value) error {
+	value, err := n.get(ae.Property("isdl", ref))
+	if err != nil {
+		return err
+	}
+	if value.Kind != "bool" {
+		return fmt.Errorf("draft deleted status unavailable")
+	}
+	if value.Boolean {
+		return notFound("draft", "")
+	}
+	return nil
+}
+
 func (n *nativeMail) outgoingSnapshotMessage(ref ae.Value, account string, box ae.Value) (*Message, error) {
+	if err := n.requireActiveDraft(ref); err != nil {
+		return nil, err
+	}
 	f, e := n.getFields(ref, "ID  ", "subj", "sndr", "ctnt", "mbxp")
 	if e != nil {
 		return nil, e
@@ -159,6 +179,9 @@ func (n *nativeMail) outgoingDraftSnapshot(accountName, draftID string) (*draftS
 		}
 		m, e := n.outgoingSnapshotMessage(ref, name, box)
 		if e != nil {
+			if errors.Is(e, ErrNotFound) {
+				continue
+			}
 			return nil, ae.Value{}, e
 		}
 		if m.ID != draftID {
@@ -238,6 +261,34 @@ func (c *Client) deleteNativeUnchangedDraft(snapshot *draftSnapshot) error {
 	return c.withNativeAutomation(0, func(n *nativeMail) error {
 		current, ref, e := n.outgoingDraftSnapshot(snapshot.Message.Account, snapshot.Message.ID)
 		if e != nil {
+			if errors.Is(e, ErrNotFound) {
+				// Accept only an explicitly deleted exact original under freshly
+				// resolved account-owned Drafts, never a broad lookup failure.
+				account, err := n.account(snapshot.Message.Account)
+				if err != nil {
+					return err
+				}
+				box, err := n.outgoingDraftMailbox(account)
+				if err != nil {
+					return err
+				}
+				name, err := n.stringProperty("pnam", box)
+				if err != nil {
+					return err
+				}
+				if name != snapshot.Message.Mailbox {
+					return fmt.Errorf("original draft mailbox identity changed")
+				}
+				original, err := n.message(box, snapshot.Message.ID)
+				if err != nil {
+					return err
+				}
+				if statusErr := n.requireActiveDraft(original); errors.Is(statusErr, ErrNotFound) {
+					return nil
+				} else if statusErr != nil {
+					return statusErr
+				}
+			}
 			return e
 		}
 		if !sameDraftSnapshot(snapshot, current) {
@@ -255,7 +306,11 @@ func (c *Client) deleteNativeUnchangedDraft(snapshot *draftSnapshot) error {
 			return e
 		}
 		for i := 0; i < 30; i++ {
-			_, e = n.message(box, snapshot.Message.ID)
+			var remaining ae.Value
+			remaining, e = n.message(box, snapshot.Message.ID)
+			if e == nil {
+				e = n.requireActiveDraft(remaining)
+			}
 			if errors.Is(e, ErrNotFound) {
 				return nil
 			}
@@ -285,7 +340,14 @@ func (n *nativeMail) scopedDraft(accountName, mailboxName, draftID string) (ae.V
 	if name != mailboxName {
 		return ae.Value{}, fmt.Errorf("draft mailbox identity changed")
 	}
-	return n.message(box, draftID)
+	ref, e := n.message(box, draftID)
+	if e != nil {
+		return ae.Value{}, e
+	}
+	if e = n.requireActiveDraft(ref); e != nil {
+		return ae.Value{}, e
+	}
+	return ref, nil
 }
 
 func (c *Client) deleteNativeDraft(accountName, mailboxName, draftID string) error {
