@@ -24,11 +24,12 @@ var searchCmd = &cobra.Command{
 	Short: "Search messages by subject, sender, and indexed summary",
 	Long: `Search messages. Every term must match somewhere in the subject, sender,
 or Mail's indexed summary. Without --mailbox the search covers every
-non-empty mailbox of each enabled account (or of the one named with
+mailbox with messages or an unknown count, plus Inbox, of each enabled
+account (or of the one named with
 --account); with --mailbox it is limited to that mailbox.`,
 	Args: cobra.ExactArgs(1),
 	Annotations: map[string]string{
-		annotationAgentNotes: "Fails closed with exit 5 when any mailbox could not be searched; add --allow-partial to accept incomplete results, which then arrive as {messages, complete, searchedMailboxes, failedMailboxes}. Needs Envelope Index access (Full Disk Access) for cross-mailbox queries.",
+		annotationAgentNotes: "Fails closed with exit 5 when any mailbox could not be completely searched; add --allow-partial to accept incomplete results, which then arrive as {messages, complete, searchedMailboxes, failedMailboxes}. Needs Envelope Index access (Full Disk Access) for cross-mailbox queries.",
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		account := resolved.Account.Value
@@ -74,7 +75,7 @@ non-empty mailbox of each enabled account (or of the one named with
 			result.Messages = messages
 			var notices []string
 			if !result.Complete {
-				notices = append(notices, fmt.Sprintf("%d mailbox(es) could not be searched", len(result.FailedMailboxes)))
+				notices = append(notices, fmt.Sprintf("%d mailbox(es) could not be completely searched", len(result.FailedMailboxes)))
 			}
 			return writer.Write(output.Result{
 				Data:    partialSearchOutputData(result, writer.Format),
@@ -107,6 +108,6 @@ func init() {
 	searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
 	searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only messages from this exact sender/email")
 	searchCmd.Flags().StringVar(&searchSenderDomain, "sender-domain", "", "Only messages from this sender domain")
-	searchCmd.Flags().BoolVar(&searchAllowPartial, "allow-partial", false, "Return partial cross-mailbox results with completeness metadata")
+	searchCmd.Flags().BoolVar(&searchAllowPartial, "allow-partial", false, "Return partial results with completeness metadata")
 	searchCmd.Flags().BoolVar(&searchNoCache, "no-cache", false, "Do not fall back to the recent-message journal when live search fails")
 }
