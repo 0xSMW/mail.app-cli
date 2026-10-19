@@ -119,20 +119,23 @@ func TestNativeExchangeDraftSnapshotAndSendUseStoredRecipients(t *testing.T) {
 	f := newNativePlainDraftSendFixture()
 	f.draft.source = ae.String(strings.Replace(f.draft.source.Text, "From: alias@example.com", "From: alias@example.com <Alias@Example.Com>", 1))
 	c := f.client()
+	isOriginal := func(ref ae.Value) bool {
+		return descriptorClass(ref) == "mssg" && ref.Fields["form"].Code == "ID  " && ref.Fields["seld"].Number == 15 && ref.Fields["from"].Text == "draftbox"
+	}
 	c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
 		ref := event.Params["----"]
 		if event.Class+event.ID == "coregetd" {
-			if descriptorProperty(ref) == "sndr" && descriptorClass(ref.Fields["from"]) == "mssg" {
+			if descriptorProperty(ref) == "sndr" && isOriginal(ref.Fields["from"]) {
 				return ae.String("alias@example.com <Alias@Example.Com>"), ae.Stats{Events: 1, Attempted: true}, nil
 			}
-			if descriptorProperty(ref) == "radd" && descriptorClass(ref.Fields["from"].Fields["from"]) == "mssg" {
+			if descriptorProperty(ref) == "radd" && isOriginal(ref.Fields["from"].Fields["from"]) {
 				return ae.List(), ae.Stats{Events: 1, Attempted: true}, nil
 			}
 		}
 		value, stats, err := f.send(ctx, event)
 		if err == nil && event.Class+event.ID == "coregetd" && ref.Kind == "list" && value.Kind == "list" {
 			for i, item := range ref.Items {
-				if descriptorProperty(item) == "sndr" && descriptorClass(item.Fields["from"]) == "mssg" {
+				if descriptorProperty(item) == "sndr" && isOriginal(item.Fields["from"]) {
 					value.Items[i] = ae.String("alias@example.com <Alias@Example.Com>")
 				}
 			}
@@ -144,7 +147,7 @@ func TestNativeExchangeDraftSnapshotAndSendUseStoredRecipients(t *testing.T) {
 		t.Fatalf("draft=%+v err=%v", draft, err)
 	}
 	result, err := c.SendDraftResult("Personal", "15")
-	if err != nil || !result.Submitted || result.CleanupPending || f.sendCalls != 1 || f.originalDeletes != 1 || !reflect.DeepEqual(f.outgoing.recipients["trcp"], []string{"to@example.com"}) {
+	if err != nil || !result.Submitted || result.CleanupPending || f.sendCalls != 1 || f.originalDeletes != 1 || f.outgoing.draftDeletes != 1 || !reflect.DeepEqual(f.outgoing.recipients["trcp"], []string{"to@example.com"}) {
 		t.Fatalf("result=%+v err=%v sends=%d deletes=%d outgoing recipients=%+v", result, err, f.sendCalls, f.originalDeletes, f.outgoing.recipients)
 	}
 }
