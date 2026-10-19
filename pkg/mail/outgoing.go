@@ -262,7 +262,7 @@ function composeOutgoing(input, action) {
   // JXA cannot reliably address Mail's rich-text attachments. Use the same
   // public AppleScript content attachment surface used during insertion.
   // The outgoing object is the one created and retained by this invocation.
-  const lines=['-- mail-app-cli-owned-attachment-snapshot','tell application "Mail"','tell outgoing message id '+id,'tell content',
+  const lines=['-- mail-app-cli-owned-attachment-snapshot','try','tell application "Mail"','tell outgoing message id '+id,'tell content',
    'set attachmentCount to count attachments','set attachmentNames to {}',
    'if attachmentCount is 0 then return {attachmentCount, attachmentNames, true}'];
   // Mail can expose a valid count while rejecting the public filename getter.
@@ -272,12 +272,15 @@ function composeOutgoing(input, action) {
   else lines.push('try','repeat with attachmentItem in attachments',
    'set end of attachmentNames to POSIX path of (file name of attachmentItem)','end repeat',
    'on error errorMessage number errorNumber',
-   'if errorNumber is -10000 or errorNumber is -1708 then return {attachmentCount, {}, false}',
+   'if errorNumber is -10000 or errorNumber is -1708 or errorNumber is -1728 then return {attachmentCount, {}, false}',
    'error errorMessage number errorNumber','end try','return {attachmentCount, attachmentNames, true}');
-  lines.push('end tell','end tell','end tell');
+  lines.push('end tell','end tell','end tell','on error errorMessage number errorNumber','return {errorNumber}','end try');
   const error=Ref();
   const value=$.NSAppleScript.alloc.initWithSource(lines.join('\n')).executeAndReturnError(error);
-  if (!value) fail('Owned attachment read failed: '+JSON.stringify(ObjC.deepUnwrap(error[0])));
+  // Foundation can return a truthy JXA ObjC nil wrapper. Inspect only its
+  // descriptor type; unwrapping nil/error-ref internals can crash osascript.
+  // Required AppleScript runtime errors return a typed one-integer tuple.
+  if (!value || !Number.isInteger(Number(value.descriptorType))) fail('Owned attachment read returned an invalid descriptor: root=invalid');
   function typeCode(code) { return code.split('').reduce((value,ch) => value*256+ch.charCodeAt(0),0); }
   function hasType(descriptor, code) { return descriptor && Number(descriptor.descriptorType) === typeCode(code); }
   function descriptorKind(descriptor) {
@@ -286,6 +289,13 @@ function composeOutgoing(input, action) {
    if (!Number.isInteger(kind)) return 'invalid';
    const code=[24,16,8,0].map(shift => String.fromCharCode(Math.floor(kind/Math.pow(2,shift))%256)).join('');
    return JSON.stringify(code)+' ('+kind+')';
+  }
+  if (hasType(value,'list') && Number(value.numberOfItems) === 1) {
+   const failure=value.descriptorAtIndex(1);
+   if (!hasType(failure,'long')) fail('Owned attachment error tuple returned invalid type: error='+descriptorKind(failure));
+   const number=Number(failure.int32Value);
+   if (!Number.isInteger(number)) fail('Owned attachment error tuple returned an invalid error number');
+   fail('Owned attachment read failed: AppleScript error '+number);
   }
   if (!hasType(value,'list') || Number(value.numberOfItems) !== 3) fail('Owned attachment read returned an invalid descriptor: root='+descriptorKind(value));
   const countDescriptor=value.descriptorAtIndex(1);
