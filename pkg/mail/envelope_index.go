@@ -596,12 +596,20 @@ func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
 			continue
 		}
 		seen[key] = true
+		senderCondition := "(case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = " + sqlQuote(identity.Sender)
+		rfc := validRFCMessageID(identity.RFCMessageID)
+		if rfc != "" {
+			address := stableSenderAddress(identity.Sender)
+			if address == "" {
+				return nil, fmt.Errorf("RFC stable identity lacks a valid sender address")
+			}
+			senderCondition = "lower(coalesce(a.address, '')) = " + sqlQuote(address)
+		}
 		condition := fmt.Sprintf(`(coalesce(s.subject, '') = %s
-		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
-		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent))
+        and %s
+        and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s`, sqlQuote(identity.Subject), senderCondition, sqlQuote(canonicalIdentityDate(identity.DateSent)))
 		// A confirmed RFC header tolerates server reserialization changing size.
-		// Without a header the complete four-field fallback remains mandatory.
-		if validRFCMessageID(identity.RFCMessageID) == "" {
+		if rfc == "" {
 			condition += fmt.Sprintf(" and m.size = %d", identity.MessageSize)
 		}
 		conditions = append(conditions, condition+")")
