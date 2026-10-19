@@ -176,7 +176,8 @@ try {
 			const name = fallbackName || mbox.name();
 			if (seen[name]) return;
 			seen[name] = true;
-			let totalCount = 0;
+			// A failed count is unknown; zero is reserved for known empty mailboxes.
+			let totalCount = -1;
 			try { totalCount = mbox.messages.count(); } catch (e) {}
 			result.push({
 				name: name,
