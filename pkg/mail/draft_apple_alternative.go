@@ -59,7 +59,7 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 	if _, err := reader.NextRawPart(); err != io.EOF || strings.Trim(bodies[0], "\r\n") != "" {
 		return reject()
 	}
-	text, referencedIDs, leadingBlank, ok := applePlainWrapperContentLayout(bodies[1])
+	text, referencedIDs, blankParagraphs, ok := applePlainWrapperContentLayout(bodies[1])
 	if !ok || strings.ContainsRune(snapshot.Message.Content, 0) {
 		return reject()
 	}
@@ -81,11 +81,21 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 		}
 		orderedAttachments = append(orderedAttachments, attachment)
 	}
-	// Only the exact proven leading default blank paragraph plus CID-backed
-	// files admits Mail's observed display-only LF/line-separator prefix.
-	// Return the parsed text so that prefix is not recomposed as user content.
-	if leadingBlank && len(orderedAttachments) > 0 && strings.ReplaceAll(snapshot.Message.Content, "\r\n", "\n") == "\n\u2028"+strings.ReplaceAll(text, "\r\n", "\n") {
-		return text, orderedAttachments, nil
+	// Exact default blank paragraphs and CID-backed files establish the
+	// paragraph rendering map. Return canonical text only after its complete
+	// rendered form matches, so display separators are not recomposed as text.
+	if blankParagraphs && len(orderedAttachments) > 0 {
+		stored := strings.ReplaceAll(snapshot.Message.Content, "\r\n", "\n")
+		rendered, ok := attachmentParagraphReadback(text)
+		if ok && stored == rendered {
+			return text, orderedAttachments, nil
+		}
+		// Preserve an exact canonical readback, but do not trim edge blank
+		// paragraphs or accept partially rendered separators.
+		if stored == strings.ReplaceAll(text, "\r\n", "\n") {
+			return snapshot.Message.Content, orderedAttachments, nil
+		}
+		return "", nil, fmt.Errorf("draft body differs from its Apple plain-text wrapper source")
 	}
 	// The leading placeholder and containing paragraphs add edge newlines to
 	// Mail's text readback. Keep that exact readback, after proving all actual
@@ -132,7 +142,8 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 	var text strings.Builder
 	var contentIDs []string
 	paragraphs := false
-	leadingBlank := false
+	blankParagraphs := false
+	unprovenParagraphBreaks := false
 	bodyParagraph := false
 	for node := quote[0].FirstChild; node != nil; node = node.NextSibling {
 		switch {
@@ -146,8 +157,8 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 			text.WriteString(node.Data)
 		case appleWrapperElement(node, "br", nil) && node.FirstChild == nil && !paragraphs && len(contentIDs) == 0:
 			text.WriteByte('\n')
-		case !paragraphs && len(contentIDs) == 0 && text.Len() == 0 && appleDefaultLeadingBlankParagraph(node):
-			leadingBlank = true
+		case len(contentIDs) == 0 && (paragraphs || text.Len() == 0) && appleDefaultBlankParagraph(node):
+			blankParagraphs = true
 			paragraphs = true
 			text.WriteByte('\n')
 		case appleWrapperElement(node, "p", map[string]string{"style": "margin: 0.0px 0.0px 0.0px 0.0px"}) && len(contentIDs) == 0:
@@ -161,6 +172,9 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 			paragraphs = true
 			if paragraph != "" {
 				bodyParagraph = true
+			}
+			if paragraph == "" || strings.ContainsRune(paragraph, '\n') {
+				unprovenParagraphBreaks = true
 			}
 			text.WriteString(paragraph)
 			text.WriteByte('\n')
@@ -179,13 +193,13 @@ func applePlainWrapperContentLayout(source string) (string, []string, bool, bool
 			return "", nil, false, false
 		}
 	}
-	if leadingBlank && (!bodyParagraph || len(contentIDs) == 0) {
+	if blankParagraphs && (!bodyParagraph || len(contentIDs) == 0 || unprovenParagraphBreaks) {
 		return "", nil, false, false
 	}
-	return text.String(), contentIDs, leadingBlank, true
+	return text.String(), contentIDs, blankParagraphs, true
 }
 
-func appleDefaultLeadingBlankParagraph(node *html.Node) bool {
+func appleDefaultBlankParagraph(node *html.Node) bool {
 	if !appleWrapperElement(node, "p", map[string]string{"style": "margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Helvetica; color: #000000; -webkit-text-stroke: #000000; min-height: 14.0px"}) {
 		return false
 	}
