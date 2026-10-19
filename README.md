@@ -93,7 +93,7 @@ Search includes Exchange Inbox and other non-empty mailboxes, recognizes Mail's 
 
 Moves and archive verification follow the RFC Message-ID when Exchange changes the local ID or stored size. The account, source and destination, sender, subject, and sent time remain checked; ambiguous matches stay unverified. Attachment lookup accepts canonically equivalent Unicode filenames. Saved draft attachment reads use the selected account's special Drafts mailbox even before its local index catches up.
 
-Sending and draft updates accept recognized plain content stored inside Mail's generated HTML wrapper when text and attachment preservation can be proved. Rich formatting, unsupported inline content, signing, encryption, and reply-header reconstruction remain guarded; use Mail to send drafts outside the supported forms. Mail must acknowledge submission before the CLI closes its unchanged outgoing composition or removes the unchanged stored draft. An uncertain submission is never automatically retried.
+Sending and draft updates accept recognized plain content stored inside Mail's generated HTML wrapper when text and attachment preservation can be proved. Rich formatting, unsupported inline content, signing, encryption, and reply-header reconstruction remain guarded; use Mail to send drafts outside the supported forms. After acknowledged submission, the CLI closes only its unchanged outgoing composition and removes only the unchanged stored draft. An uncertain submission is never automatically retried.
 
 ## Quick start
 
