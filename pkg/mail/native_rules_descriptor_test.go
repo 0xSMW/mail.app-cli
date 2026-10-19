@@ -471,9 +471,9 @@ func TestNativeDescriptorRuleListColumnsEightyNineRules(t *testing.T) {
 	if err != nil || len(got) != 89 {
 		t.Fatalf("rules=%d err=%v", len(got), err)
 	}
-	// Discovery + six rule columns + 89*(condition collection + three columns).
-	if len(f.events) != 363 {
-		t.Fatalf("events=%d want363 (previous891)", len(f.events))
+	// Discovery + six columns + two order checks + 89*(name + condition collection + three columns).
+	if len(f.events) != 454 {
+		t.Fatalf("events=%d want454 (previous891)", len(f.events))
 	}
 	for _, event := range f.events {
 		if event.ID != "getd" || event.Params["----"].Kind == "list" {
@@ -559,8 +559,8 @@ func TestNativeDescriptorRuleListColumnsWithEightyNineMoveActions(t *testing.T) 
 	}
 	f.conditions = []ae.Value{ruleFixtureRef("condition")}
 	got, err := rulesFixtureClient(f).ListRules()
-	if err != nil || len(got) != 89 || len(f.events) != 541 {
-		t.Fatalf("rules=%d events=%d want541 (previous1069), err=%v", len(got), len(f.events), err)
+	if err != nil || len(got) != 89 || len(f.events) != 632 {
+		t.Fatalf("rules=%d events=%d want632 (previous1069), err=%v", len(got), len(f.events), err)
 	}
 	if !reflect.DeepEqual(got[88].Actions, []string{"move to News"}) {
 		t.Fatalf("move action changed: %+v", got[88])
@@ -591,9 +591,55 @@ func TestNativeDescriptorRuleListEmptyCollectionsSkipPropertyColumns(t *testing.
 				if got == nil || len(got) != 0 || len(f.events) != 1 {
 					t.Fatalf("empty rules=%+v events=%d", got, len(f.events))
 				}
-			} else if len(got) != 1 || len(got[0].Conditions) != 0 || len(f.events) != 8 {
+			} else if len(got) != 1 || len(got[0].Conditions) != 0 || len(f.events) != 11 {
 				t.Fatalf("empty conditions rules=%+v events=%d", got, len(f.events))
 			}
 		})
+	}
+}
+
+func TestNativeDescriptorRuleListSameCountReorderFailsClosed(t *testing.T) {
+	for _, when := range []string{"during columns", "during walk"} {
+		t.Run(when, func(t *testing.T) {
+			f := newRulesDescriptorFixture()
+			fixtureListedRule(f, "first", true)
+			fixtureListedRule(f, "second", false)
+			f.conditions = []ae.Value{ruleFixtureRef("condition")}
+			c := rulesFixtureClient(f)
+			changed := false
+			c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+				v, stats, err := f.send(ctx, event)
+				target := event.Params["----"]
+				code := descriptorProperty(target)
+				class := descriptorClass(target.Fields["from"])
+				trigger := (when == "during columns" && class == "rule" && code == "rmfl") || (when == "during walk" && class == "rucr" && code == "rexp")
+				if !changed && trigger {
+					f.rules[0], f.rules[1] = f.rules[1], f.rules[0]
+					changed = true
+				}
+				return v, stats, err
+			}
+			got, err := c.ListRules()
+			if !changed || err == nil || !strings.Contains(err.Error(), "identity/order changed") || len(got) != 0 {
+				t.Fatalf("reorder emitted rows=%+v changed=%t err=%v", got, changed, err)
+			}
+		})
+	}
+}
+
+func TestNativeDescriptorRuleListBindsDiscoveredReferenceName(t *testing.T) {
+	f := newRulesDescriptorFixture()
+	fixtureListedRule(f, "first", true)
+	c := rulesFixtureClient(f)
+	c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+		target := event.Params["----"]
+		if descriptorProperty(target) == "pnam" && target.Fields["from"].Text == "first" {
+			f.fields["first"]["pnam"] = ae.String("replacement")
+		}
+		return f.send(ctx, event)
+	}
+	got, err := c.ListRules()
+	if err == nil || !strings.Contains(err.Error(), "identity/order changed") || len(got) != 0 {
+		t.Fatalf("replaced reference emitted rows=%+v err=%v", got, err)
 	}
 }
