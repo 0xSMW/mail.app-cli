@@ -366,6 +366,7 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	reader := multipart.NewReader(parsed.Body, params["boundary"])
 	body := ""
 	haveBody := false
+	bodyValidated := false
 	var attachments []draftMIMEAttachment
 	for {
 		part, err := reader.NextRawPart()
@@ -407,6 +408,9 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 				return "", nil, err
 			}
 			haveBody = true
+			// The alternative parser already proved the entire stored/body
+			// relationship, which may canonicalize Mail's wrapper layout.
+			bodyValidated = true
 			attachments = append(attachments, related...)
 			continue
 		}
@@ -426,8 +430,10 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	if !haveBody {
 		return "", nil, fmt.Errorf("plain-text draft body unavailable")
 	}
-	if err := validateDraftBody(snapshot, body); err != nil {
-		return "", nil, err
+	if !bodyValidated {
+		if err := validateDraftBody(snapshot, body); err != nil {
+			return "", nil, err
+		}
 	}
 	return body, attachments, nil
 }
