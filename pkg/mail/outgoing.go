@@ -279,15 +279,34 @@ function composeOutgoing(input, action) {
   if (!value) fail('Owned attachment read failed: '+JSON.stringify(ObjC.deepUnwrap(error[0])));
   function typeCode(code) { return code.split('').reduce((value,ch) => value*256+ch.charCodeAt(0),0); }
   function hasType(descriptor, code) { return descriptor && Number(descriptor.descriptorType) === typeCode(code); }
-  if (!hasType(value,'list') || Number(value.numberOfItems) !== 3) fail('Owned attachment read returned an invalid descriptor');
+  function descriptorKind(descriptor) {
+   if (!descriptor) return 'missing';
+   const kind=Number(descriptor.descriptorType);
+   if (!Number.isInteger(kind)) return 'invalid';
+   const code=[24,16,8,0].map(shift => String.fromCharCode(Math.floor(kind/Math.pow(2,shift))%256)).join('');
+   return JSON.stringify(code)+' ('+kind+')';
+  }
+  if (!hasType(value,'list') || Number(value.numberOfItems) !== 3) fail('Owned attachment read returned an invalid descriptor: root='+descriptorKind(value));
   const countDescriptor=value.descriptorAtIndex(1);
   const names=value.descriptorAtIndex(2);
   const availableDescriptor=value.descriptorAtIndex(3);
   // AppleScript count returns a signed 32-bit integer. NSAppleEventDescriptor
   // accessors coerce other types, so validate each descriptor before reading.
-  if (!hasType(countDescriptor,'long') || !hasType(names,'list') || !hasType(availableDescriptor,'bool')) fail('Owned attachment read returned invalid field types');
+  if (!hasType(countDescriptor,'long') || !hasType(names,'list') || !['bool','true','fals'].some(code => hasType(availableDescriptor,code))) {
+   fail('Owned attachment read returned invalid field types: count='+descriptorKind(countDescriptor)+', names='+descriptorKind(names)+', available='+descriptorKind(availableDescriptor));
+  }
   const count=Number(countDescriptor.int32Value);
-  const namesAvailable=Boolean(availableDescriptor.booleanValue);
+  // Apple Events permits intrinsic true/fals descriptors as well as bool.
+  // Intrinsic descriptors carry their value in the type, without a payload.
+  let namesAvailable;
+  if (hasType(availableDescriptor,'true')) namesAvailable=true;
+  else if (hasType(availableDescriptor,'fals')) namesAvailable=false;
+  else {
+   const flag=availableDescriptor.booleanValue;
+   if (typeof flag === 'boolean') namesAvailable=flag;
+   else if (typeof flag === 'number' && (flag === 0 || flag === 1)) namesAvailable=flag === 1;
+   else fail('Owned attachment read returned an invalid Boolean value: available='+descriptorKind(availableDescriptor));
+  }
   if (!Number.isInteger(count) || count < 0 || (namesAvailable ? Number(names.numberOfItems) !== count : Number(names.numberOfItems) !== 0)) fail('Owned attachment count does not match filenames');
   const files=namesAvailable ? [] : null;
   for (let i=1;namesAvailable && i<=count;i++) {
