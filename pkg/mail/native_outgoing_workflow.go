@@ -26,6 +26,7 @@ type nativeOutgoingRun struct {
 	body, step, cleanup string
 	attempted, saved    bool
 	attachmentProofs    []outgoingAttachmentProof
+	preSaveOwnedBody    string
 	preparedDraft       *draftSnapshot
 	preparedAccountID   string
 }
@@ -320,7 +321,7 @@ func (r *nativeOutgoingRun) verifySavedDraft() error {
 			if e != nil {
 				continue
 			}
-			if m.Subject == r.input.Subject && outgoingBodyMatches(m.Content, r.body) && strings.EqualFold(sender, r.result.Sender) && outgoingEqual(m.ToRecipients, r.input.To) && outgoingEqual(m.CcRecipients, r.input.Cc) && outgoingEqual(m.BccRecipients, r.input.Bcc) && outgoingEqual(names, outgoingExpectedNames(r.input.Attachments)) {
+			if m.Subject == r.input.Subject && r.savedDraftBodyMatches(m.Content) && strings.EqualFold(sender, r.result.Sender) && outgoingEqual(m.ToRecipients, r.input.To) && outgoingEqual(m.CcRecipients, r.input.Cc) && outgoingEqual(m.BccRecipients, r.input.Bcc) && outgoingEqual(names, outgoingExpectedNames(r.input.Attachments)) {
 				candidates = append(candidates, m)
 			}
 		}
