@@ -30,6 +30,8 @@ type draftRegressionState struct {
 	PreparedEnumerated  []string                    `json:"preparedEnumerated"`
 	PreparedByID        []string                    `json:"preparedById"`
 	OwnedCloseAfterSend int                         `json:"ownedCloseAfterSend"`
+	SavedBody           string                      `json:"savedBody"`
+	SavedAttachments    []draftRegressionAttachment `json:"savedAttachments"`
 }
 
 func installDraftRegressionBridge(t *testing.T, snapshot *draftSnapshot, attachments []draftRegressionAttachment, specialState string) string {
