@@ -198,7 +198,7 @@ function composeOutgoing(input, action) {
  let step = 'account_resolution';
  const composeBody=(action === 'save' || action === 'send') && !input.body.endsWith('\n') ? input.body+'\n' : input.body;
  let result = {account: input.account, accountId: '', sender: '', status: '', submitted: false};
- function fail(message) { throw new Error(message); }
+ function fail(message) { const error=new Error(message);error.safeDiagnostic=true;throw error; }
  function address(value) {
   const text = String(value || '').trim();
   const plain = /^[A-Za-z0-9.!#$%&'*+\/=?^_` + "`" + `{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$/;
@@ -308,7 +308,7 @@ function composeOutgoing(input, action) {
    if (!hasType(failure,'long')) fail('Owned attachment error tuple returned invalid type: error='+descriptorKind(failure));
    const number=Number(failure.int32Value);
    if (!Number.isInteger(number)) fail('Owned attachment error tuple returned an invalid error number');
-   fail('Owned attachment read failed: AppleScript error '+number);
+   const readError=new Error('Owned attachment read failed: AppleScript error '+number);readError.errorNumber=number;readError.safeDiagnostic=true;throw readError;
   }
   if (!hasType(value,'list') || Number(value.numberOfItems) !== 3) fail('Owned attachment read returned an invalid descriptor: root='+descriptorKind(value));
   const countDescriptor=value.descriptorAtIndex(1);
@@ -343,12 +343,33 @@ function composeOutgoing(input, action) {
   return {id:id,sender:text(outgoing.sender()),subject:text(outgoing.subject()),body:text(outgoing.content()),
    to:list('toRecipients'),cc:list('ccRecipients'),bcc:list('bccRecipients'),attachmentCount:count,files:files === null ? null : files.sort()};
  }
+ function cleanupStage(name,action) {
+  try {return action();} catch(e) {
+   const number=e && typeof e.errorNumber === 'number' && Number.isInteger(e.errorNumber) ? e.errorNumber : null;
+   const error=new Error(name+' failed'+(number === null ? '' : ' (AppleScript error '+number+')')+(e && e.safeDiagnostic ? ': '+e.message : ''));
+   if(number !== null)error.errorNumber=number;
+   error.safeDiagnostic=true;
+   throw error;
+  }
+ }
+ function ownedRootAbsent() {
+  try {outgoing.subject();return false;} catch(e) {if(e.errorNumber === -1728)return true;throw e;}
+ }
  function cleanupSubmitted(expected) {
-  // Only a missing owned object establishes absence. Missing nested properties
-  // are failures and must preserve the composition for inspection.
-  try { outgoing.subject(); } catch(e) { if (e.errorNumber === -1728) return; throw e; }
-  if (!equal(expected,ownedFingerprint(expected.files !== null))) fail('Submitted composition changed; retained');
-  try { mail.close(outgoing,{saving:'no'}); } catch(e) { if (e.errorNumber !== -1728) throw e; }
+  if(cleanupStage('owned_root_probe',ownedRootAbsent))return;
+  let current;
+  try {current=cleanupStage('owned_snapshot',()=>ownedFingerprint(expected.files !== null));}
+  catch(e) {
+   // A required nested property failure alone proves nothing about the root.
+   if(e.errorNumber === -1728 && cleanupStage('owned_root_reprobe',ownedRootAbsent))return;
+   throw e;
+  }
+  if(!equal(expected,current))fail('Submitted composition changed; retained');
+  try {cleanupStage('owned_close',()=>mail.close(outgoing,{saving:'no'}));}
+  catch(e) {
+   if(e.errorNumber === -1728 && cleanupStage('owned_close_reprobe',ownedRootAbsent))return;
+   throw e;
+  }
  }
  function matchesBody(value) {
   const body=String(value).replace(/\r\n/g,'\n');
@@ -377,11 +398,23 @@ function composeOutgoing(input, action) {
   return snapshot.subject === input.subject && matchesBody(snapshot.body) && address(snapshot.sender).toLowerCase() === result.sender.toLowerCase() &&
    equal(snapshot.to,input.to) && equal(snapshot.cc,input.cc) && equal(snapshot.bcc,input.bcc) && equal(snapshot.files,expectedNames);
  }
+ function preparedIds(values) {
+  if(!Array.isArray(values))fail('Prepared Drafts IDs unavailable');
+  const seen={};
+  return values.map(value=> {
+   let id;
+   if(typeof value === 'number' && Number.isSafeInteger(value) && value > 0)id=String(value);
+   else if(typeof value === 'string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)))id=value;
+   else fail('Prepared Drafts ID list contains an invalid numeric identity');
+   if(seen[id])fail('Prepared Drafts ID list contains duplicate identities');
+   seen[id]=true;
+   return id;
+  });
+ }
  function preparedById(box,id) {
   if(!/^[0-9]+$/.test(id) || !Number.isSafeInteger(Number(id)) || Number(id) <= 0) fail('Prepared draft ID is not a supported numeric identity');
-  const ids=box.messages.id();
-  if(!Array.isArray(ids)) fail('Prepared Drafts IDs unavailable');
-  const matching=ids.filter(value=>String(value)===id);
+  const ids=preparedIds(box.messages.id());
+  const matching=ids.filter(value=>value===id);
   if(matching.length === 0) return null;
   if(matching.length !== 1) fail('Prepared draft ID is ambiguous');
   // The destructive reference must remain by-ID even if mailbox order changes.
@@ -415,22 +448,42 @@ function composeOutgoing(input, action) {
   if(currentAccount.id !== result.accountId || currentAccount.id !== expected.accountId) fail('Prepared draft account identity changed; retained');
   return draftMailboxForAccount(mail,currentAccount.account);
  }
- function cleanupPreparedDraft(expected) {
-  let box=currentPreparedBox(expected);
-  let message=preparedById(box,expected.id);
-  if(message === null) {currentPreparedBox(expected);return;}
-  if(!equal(expected,storedSnapshot(message))) fail('Prepared draft changed after submission; retained');
-  // Re-resolve ownership immediately before the destructive exact-ID read.
-  box=currentPreparedBox(expected);
-  message=preparedById(box,expected.id);
-  if(message === null) {currentPreparedBox(expected);return;}
-  if(!equal(expected,storedSnapshot(message))) fail('Prepared draft changed before removal; retained');
-  message.delete();
+ function preparedAbsentAfterRace(expected) {
+  const deadline=Date.now()+3000;
   for(let i=0;i<30;i++) {
-   if(preparedById(box,expected.id) === null) {currentPreparedBox(expected);return;}
+   const box=cleanupStage('prepared_absence_owner',()=>currentPreparedBox(expected));
+   const ids=cleanupStage('prepared_absence_ids',()=>preparedIds(box.messages.id()));
+   const matching=ids.filter(id=>id===expected.id);
+   if(matching.length > 1)fail('Prepared draft ID is ambiguous during absence confirmation');
+   cleanupStage('prepared_absence_owner_confirmation',()=>currentPreparedBox(expected));
+   if(matching.length === 0)return true;
+   if(Date.now() >= deadline)break;
    delay(0.1);
   }
-  fail('Prepared draft removal could not be verified after submission');
+  return false;
+ }
+ function cleanupPreparedDraft(expected) {
+  try {
+   let box=cleanupStage('prepared_owner',()=>currentPreparedBox(expected));
+   let message=cleanupStage('prepared_exact_lookup',()=>preparedById(box,expected.id));
+   if(message === null) {cleanupStage('prepared_absent_owner_confirmation',()=>currentPreparedBox(expected));return;}
+   if(!equal(expected,cleanupStage('prepared_snapshot',()=>storedSnapshot(message))))fail('Prepared draft changed after submission; retained');
+   box=cleanupStage('prepared_delete_owner',()=>currentPreparedBox(expected));
+   message=cleanupStage('prepared_delete_exact_lookup',()=>preparedById(box,expected.id));
+   if(message === null) {cleanupStage('prepared_absent_owner_confirmation',()=>currentPreparedBox(expected));return;}
+   if(!equal(expected,cleanupStage('prepared_delete_snapshot',()=>storedSnapshot(message))))fail('Prepared draft changed before removal; retained');
+   cleanupStage('prepared_delete',()=>message.delete());
+   for(let i=0;i<30;i++) {
+    if(cleanupStage('prepared_removal_lookup',()=>preparedById(box,expected.id)) === null) {cleanupStage('prepared_removed_owner_confirmation',()=>currentPreparedBox(expected));return;}
+    delay(0.1);
+   }
+   fail('Prepared draft removal could not be verified after submission');
+  } catch(e) {
+   // Only fresh ID enumeration in the guarded account-owned Drafts mailbox
+   // establishes disappearance; a missing nested read or by-ID lookup cannot.
+   if(e.errorNumber === -1728 && preparedAbsentAfterRace(expected))return;
+   throw e;
+  }
  }
  function matches(message) {
   return String(message.subject()) === input.subject && matchesBody(message.content()) &&
@@ -445,9 +498,8 @@ function composeOutgoing(input, action) {
   if (action === 'save' || action === 'send') {
    step='draft_baseline';
    drafts = draftMailboxForAccount(mail,target.account);
-   const baseline=drafts.messages.id();
-   if(!Array.isArray(baseline)) fail('Draft baseline IDs unavailable');
-   baseline.forEach(id => { before[String(id)] = true; });
+   const baseline=preparedIds(drafts.messages.id());
+   baseline.forEach(id => { before[id] = true; });
   }
   phase('outgoing_compose',function() {
   step='compose';
