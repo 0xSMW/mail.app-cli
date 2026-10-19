@@ -35,7 +35,7 @@ insert into mailboxes(ROWID,url,total_count,unread_count) values
 create table subjects(subject text); insert into subjects values ('indexed subject');
 create table addresses(address text,comment text); insert into addresses values ('sender@example.com','Sender');
 create table summaries(summary text); insert into summaries values ('indexed summary');
-create table messages(subject integer,sender integer,summary integer,mailbox integer,date_received integer,date_sent integer,read integer,flagged integer,deleted integer,size integer);
+create table messages(subject integer,sender integer,summary integer,mailbox integer,date_received integer,date_sent integer,read integer,flagged integer,deleted integer,size integer,subject_prefix text default '');
 insert into messages(ROWID,subject,sender,summary,mailbox,date_received,date_sent,read,flagged,deleted,size) values
 (101,1,1,1,1,1690000000,1690000000,0,1,0,1234),
 (102,1,1,1,3,1690000000,1690000000,0,0,0,1234),
