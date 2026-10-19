@@ -30,6 +30,7 @@ type outgoingDescriptorFixture struct {
 	sendReply                  ae.Value
 	corrupt                    string
 	sendCalls, closeCalls      int
+	saved                      bool
 	closed                     bool
 }
 
@@ -103,6 +104,54 @@ func (f *outgoingDescriptorFixture) get(v ae.Value) (ae.Value, error) {
 			items[i] = ae.Index("mact", i+1, ae.Null())
 		}
 		return ae.List(items...), nil
+	}
+	if class == "mbxp" {
+		return ae.List(ruleFixtureRef("outgoing-fixture-drafts")), nil
+	}
+	if property == "drmb" {
+		return ruleFixtureRef("outgoing-fixture-draft-root"), nil
+	}
+	if container.Text == "outgoing-fixture-drafts" {
+		if property == "pnam" {
+			return ae.String("Drafts"), nil
+		}
+		if property == "mact" {
+			return ae.ByID("mact", ae.String(f.accountID(0)), ae.Null()), nil
+		}
+	}
+	if descriptorClass(container) == "mssg" {
+		if property == "ID  " {
+			if container.Fields["form"].Code == "ID  " {
+				return container.Fields["seld"], nil
+			}
+			if f.saved {
+				return ae.List(ae.Int(15)), nil
+			}
+			return ae.List(), nil
+		}
+		if property == "mbxp" {
+			return ruleFixtureRef("outgoing-fixture-drafts"), nil
+		}
+		if property == "raso" {
+			names := make([]string, len(f.files))
+			payloads := make([][]byte, len(f.files))
+			for i, path := range f.files {
+				names[i] = filepath.Base(path)
+				var err error
+				payloads[i], err = os.ReadFile(path)
+				if err != nil {
+					return ae.Value{}, err
+				}
+			}
+			return ae.String(attachmentProofMIME(names, payloads)), nil
+		}
+	}
+	if descriptorClass(container) == "attc" && property == "pnam" {
+		names := make([]string, len(f.files))
+		for i, path := range f.files {
+			names[i] = filepath.Base(path)
+		}
+		return stringsDescriptors(names), nil
 	}
 	if property != "" {
 		if descriptorClass(container) == "mact" && container.Fields["seld"].Kind == "ordinal" && container.Fields["seld"].Code == "all " {
@@ -192,6 +241,12 @@ func (f *outgoingDescriptorFixture) send(ctx context.Context, event ae.Event) (a
 			return ae.Value{}, stats, fmt.Errorf("unexpected attachment count target")
 		}
 		return ae.Int(int64(len(f.files))), stats, nil
+	case "coresave":
+		if !reflect.DeepEqual(event.Params["----"], f.outgoing) {
+			return ae.Value{}, stats, fmt.Errorf("saved an unowned composition")
+		}
+		f.saved = true
+		return ae.Null(), stats, nil
 	case "emsgsend":
 		f.sendCalls++
 		return f.sendReply, stats, f.sendErr
@@ -496,9 +551,9 @@ func TestNativeDescriptorOutgoingAttachmentReadinessPollsTypedMissingFiles(t *te
 			if e != nil {
 				t.Fatal(e)
 			}
-			expectedReads := 4
+			expectedReads := 6
 			if pending.Code == "msng" {
-				expectedReads = 3
+				expectedReads = 5
 			}
 			if reads != expectedReads || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("readiness result=%+v reads=%d sends=%d closes=%d", result, reads, f.sendCalls, f.closeCalls)
@@ -547,7 +602,7 @@ func TestNativeDescriptorOutgoingAttachmentReadinessPollsMissingProperty(t *test
 	if e != nil {
 		t.Fatal(e)
 	}
-	if reads != 3 || !result.Submitted || f.sendCalls != 1 {
+	if reads != 5 || !result.Submitted || f.sendCalls != 1 {
 		t.Fatalf("readiness result=%+v reads=%d sends=%d", result, reads, f.sendCalls)
 	}
 }
@@ -584,7 +639,7 @@ func TestNativeDescriptorOutgoingAttachmentUnsupportedGetterNeedsExactNativeCoun
 			if e != nil {
 				t.Fatal(e)
 			}
-			if counts != 5 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
+			if counts != 7 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("count guard result=%+v counts=%d sends=%d closes=%d", result, counts, f.sendCalls, f.closeCalls)
 			}
 		})
@@ -706,7 +761,7 @@ func TestNativeDescriptorOutgoingAttachmentMissingMakeReceiptAcceptedOnlyWithRea
 			if e != nil {
 				t.Fatal(e)
 			}
-			if counts != 4 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
+			if counts != 6 || f.sendCalls != 1 || !result.Submitted || f.closeCalls != 1 {
 				t.Fatalf("missing receipt readiness result=%+v counts=%d sends=%d closes=%d", result, counts, f.sendCalls, f.closeCalls)
 			}
 		})
