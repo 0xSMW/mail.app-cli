@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -106,10 +107,9 @@ func TestLocalReadScopePartialAndUnicode(t *testing.T) {
 	c, _, events := localReadFixture(t)
 	for _, test := range []struct {
 		mailbox, id string
-		missing     bool
-	}{{"INBOX", "102", true}, {"邮件 café", "101", true}, {"INBOX", "999", true}} {
+	}{{"INBOX", "102"}, {"邮件 café", "101"}, {"INBOX", "999"}} {
 		message, handled, err := c.getMessageDetailsFromDisk("Work", test.mailbox, test.id)
-		if err != nil || !handled || message != nil {
+		if err != nil || handled || message != nil {
 			t.Fatalf("scope %s/%s: %#v %v %v", test.mailbox, test.id, message, handled, err)
 		}
 	}
@@ -137,6 +137,86 @@ func TestLocalReadScopePartialAndUnicode(t *testing.T) {
 	}
 	if message, handled, err := c.getMessageDetailsFromDisk("Work", "INBOX", "101"); err != nil || handled || message != nil {
 		t.Fatalf("forced Mail path = %#v %v %v", message, handled, err)
+	}
+}
+
+func localReadLiveFixture(c *Client) *nativeReadFixture {
+	f := newNativeReadFixture()
+	f.properties["mact:a"]["pnam"] = appleevents.String("Work")
+	f.properties["mact:a"]["ID  "] = appleevents.String("ABC")
+	c.shared.nativeSender = f.sender
+	return f
+}
+
+func TestLocalReadIndexMissRechecksScopedLiveMessage(t *testing.T) {
+	for _, state := range []string{"unindexed", "stale membership", "deleted index row", "wrong indexed owner"} {
+		t.Run(state, func(t *testing.T) {
+			c, _, _ := localReadFixture(t)
+			f := localReadLiveFixture(c)
+			if state != "unindexed" {
+				owner, deleted := 1, 0
+				if state == "deleted index row" {
+					owner, deleted = 2, 1
+				} else if state == "wrong indexed owner" {
+					owner = 3
+				}
+				query := fmt.Sprintf("insert into messages(ROWID,subject,sender,summary,mailbox,date_received,date_sent,read,flagged,deleted,size) values (42,1,1,1,%d,1690000000,1690000000,0,0,%d,100);", owner, deleted)
+				if out, err := exec.Command("sqlite3", os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"), query).CombinedOutput(); err != nil {
+					t.Fatalf("stale index fixture: %v: %s", err, out)
+				}
+			}
+			message, err := c.GetMessageDetailsJSON("Work", "INBOX", "42")
+			if err != nil || message == nil || message.ID != "42" || message.Account != "Work" || message.Mailbox != "INBOX" || message.Content != "Body" || message.ContentSource != BodySourceMail || message.RFCMessageID != "<fixture@example.test>" {
+				t.Fatalf("live detail after %s: %#v, %v", state, message, err)
+			}
+			if len(f.events) == 0 {
+				t.Fatal("index miss did not consult Mail")
+			}
+			for _, event := range f.events {
+				if event.ID != "getd" {
+					t.Fatalf("detail fallback dispatched non-read event %s", event.ID)
+				}
+			}
+		})
+	}
+}
+
+func TestLocalReadIndexMissRetainsLiveAbsenceAndErrors(t *testing.T) {
+	for _, state := range []string{"absent", "wrong mailbox", "permission denied"} {
+		t.Run(state, func(t *testing.T) {
+			c, _, _ := localReadFixture(t)
+			f := localReadLiveFixture(c)
+			denied := &appleevents.Error{Code: -1743, Message: "permission denied"}
+			f.fail = func(event appleevents.Event) error {
+				ref := event.Params["----"]
+				if ref.Kind == "object" && ref.Fields["want"].Code == "prop" && ref.Fields["seld"].Code == "ID  " && ref.Fields["from"].Fields["want"].Code == "mssg" {
+					if state == "permission denied" {
+						return denied
+					}
+					if state == "wrong mailbox" && f.key(ref.Fields["from"].Fields["from"]) != "mbxp:inbox" {
+						return &appleevents.Error{Code: -1728, Message: "no such scoped message"}
+					}
+				}
+				return nil
+			}
+			id, mailbox := "999", "INBOX"
+			if state == "permission denied" {
+				id = "42"
+			} else if state == "wrong mailbox" {
+				id, mailbox = "42", "All Mail"
+			}
+			message, err := c.GetMessageDetailsJSON("Work", mailbox, id)
+			if state == "permission denied" {
+				if !errors.Is(err, denied) || message != nil {
+					t.Fatalf("permission failure became absence: %#v, %v", message, err)
+				}
+			} else if err != nil || message != nil {
+				t.Fatalf("scoped absence: %#v, %v", message, err)
+			}
+			if len(f.events) == 0 {
+				t.Fatal("index miss did not verify live scope")
+			}
+		})
 	}
 }
 
