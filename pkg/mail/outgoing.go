@@ -270,7 +270,9 @@ function composeOutgoing(input, action) {
   // closed, and a later loss of previously readable names retains the object.
   if (readNames === false) lines.push('return {attachmentCount, attachmentNames, false}');
   else lines.push('try','repeat with attachmentItem in attachments',
-   'set end of attachmentNames to POSIX path of (file name of attachmentItem)','end repeat',
+   'set attachmentFile to file name of attachmentItem',
+   'if attachmentFile is missing value then return {attachmentCount, {}, false}',
+   'set end of attachmentNames to POSIX path of attachmentFile','end repeat',
    'on error errorMessage number errorNumber',
    'if errorNumber is -10000 or errorNumber is -1708 or errorNumber is -1728 then return {attachmentCount, {}, false}',
    'error errorMessage number errorNumber','end try','return {attachmentCount, attachmentNames, true}');
