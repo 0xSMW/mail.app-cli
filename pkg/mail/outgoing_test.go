@@ -120,7 +120,7 @@ func TestOutgoingProductionScript(t *testing.T) {
 			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != expectedDeleted || got.Response.Uncertain != tc.uncertain {
 				t.Fatalf("unexpected execution: %s", output)
 			}
-			if got.Sent == 1 && got.ComposedBody != input.Body {
+			if got.Sent == 1 && got.ComposedBody != input.Body+"\n" {
 				t.Fatalf("submission changed body: %s", output)
 			}
 			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "stored-900" {
@@ -335,6 +335,113 @@ printf ready > "$OUTGOING_ACK_READY"
 			}
 			if tt.name == "wrong account receipt after ack" && (result.Account != input.Account || result.AccountID != "" || result.Sender != input.Sender) {
 				t.Fatalf("untrusted receipt identity survived: %+v", result)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	tests := []struct {
+		name          string
+		config        map[string]any
+		sent          int
+		submitted, ok bool
+		deletes       int
+	}{
+		{name: "owned body edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"body": "edited"}}},
+		{name: "owned recipient edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"to": []string{"other@example.com"}}}},
+		{name: "owned attachment edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"attachments": []string{"different.pdf"}}}},
+		{name: "deletes only prepared stored ID and leaves old draft", config: map[string]any{"preexisting": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "stable by-ID reference survives ordinal reorder", config: map[string]any{"preexisting": true, "reorderAfterLookup": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "stored already absent after send", config: map[string]any{"storedAbsent": true, "preexisting": true}, sent: 1, submitted: true, ok: true},
+		{name: "changed raw source retained", config: map[string]any{"storedAfterSend": map[string]any{"source": "edited raw source"}}, sent: 1, submitted: true},
+		{name: "changed body retained", config: map[string]any{"storedAfterSend": map[string]any{"body": "edited"}}, sent: 1, submitted: true},
+		{name: "changed To retained", config: map[string]any{"storedAfterSend": map[string]any{"to": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed Cc retained", config: map[string]any{"storedAfterSend": map[string]any{"cc": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed Bcc retained", config: map[string]any{"storedAfterSend": map[string]any{"bcc": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed filename retained", config: map[string]any{"storedAfterSend": map[string]any{"attachments": []string{"/tmp/other.pdf"}}}, sent: 1, submitted: true},
+		{name: "owner changes immediately before delete", config: map[string]any{"accountIdChangeAtRead": 6}, sent: 1, submitted: true},
+		{name: "owner changes after verified absence", config: map[string]any{"accountIdChangeAtRead": 7}, sent: 1, submitted: true, deletes: 1},
+		{name: "changed owner retained", config: map[string]any{"storedAfterSend": map[string]any{"accountId": "other-account"}}, sent: 1, submitted: true},
+		{name: "changed mailbox retained", config: map[string]any{"storedAfterSend": map[string]any{"mailbox": "Other Drafts"}}, sent: 1, submitted: true},
+		{name: "stored source read failure retains", config: map[string]any{"storedReadThrows": "source"}, sent: 1, submitted: true},
+		{name: "delete failure preserves acknowledgement", config: map[string]any{"storedDeleteThrows": true}, sent: 1, submitted: true, deletes: 1},
+		{name: "delete absence verification failure preserves acknowledgement", config: map[string]any{"storedDeleteNoEffect": true}, sent: 1, submitted: true, deletes: 1},
+		{name: "false send keeps prepared copy", config: map[string]any{"sendFalse": true}, sent: 1},
+		{name: "throwing send keeps prepared copy", config: map[string]any{"sendThrows": true}, sent: 1},
+		{name: "ambiguous prepared copy prevents send", config: map[string]any{"ambiguousSave": true}},
+		{name: "unverified prepared copy prevents send", config: map[string]any{"neverSave": true}},
+		{name: "empty raw source prevents send", config: map[string]any{"savedChange": map[string]any{"source": ""}}},
+		{name: "prepared recipient mismatch prevents send", config: map[string]any{"savedChange": map[string]any{"bcc": []string{"other@example.com"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: []string{"/tmp/report.pdf"}}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "send", "config": tt.config})
+			command := exec.Command(node, "testdata/outgoing_mock.js")
+			command.Stdin = bytes.NewReader(payload)
+			raw, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("production script: %v %s", err, raw)
+			}
+			var got struct {
+				Response                    outgoingEnvelope
+				Sent, Deleted               int
+				StoredDeleted, ExactLookups []string
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != tt.sent || len(got.StoredDeleted) != tt.deletes {
+				t.Fatalf("execution=%s", raw)
+			}
+			for _, id := range got.StoredDeleted {
+				if id != "900" {
+					t.Fatalf("deleted unrelated stored draft: %s", raw)
+				}
+			}
+			for _, id := range got.ExactLookups {
+				if id != "900" {
+					t.Fatalf("read unrelated draft by ID: %s", raw)
+				}
+			}
+			if tt.submitted && !tt.ok && (got.Response.Uncertain || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "") {
+				t.Fatalf("lost acknowledged send: %s", raw)
+			}
+			if tt.sent > 0 && !tt.submitted && (got.Deleted != 0 || !got.Response.Uncertain) {
+				t.Fatalf("uncertain send performed cleanup: %s", raw)
+			}
+			if strings.Contains(tt.name, "during prepare") && got.Response.Phase != "prepared_compose_verification" {
+				t.Fatalf("missed pre-send composition guard: %s", raw)
+			}
+			if tt.sent == 0 && got.Response.Uncertain {
+				t.Fatalf("pre-send preparation reported send uncertainty: %s", raw)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingInterruptedPreparedSave(t *testing.T) {
+	for _, tt := range []struct {
+		name, state string
+		saved       bool
+	}{
+		{name: "prepared save in flight", state: "start"},
+		{name: "prepared save acknowledged", state: "done", saved: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+			script := `printf '%s\n' 'mail-app-cli-phase {"name":"outgoing_compose","state":"done"}' 'mail-app-cli-phase {"name":"outgoing_prepare_save","state":"` + tt.state + `"}' >&2
+exit 1`
+			writeFakeOsaScript(t, script)
+			result, err := NewClient().SendOutgoing(OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}})
+			var mutation *MutationError
+			if result != nil || !errors.As(err, &mutation) || mutation.Attempted || mutation.Submitted || mutation.Uncertain || mutation.Saved != tt.saved || mutation.Cleanup == "" || !strings.Contains(mutation.Cleanup, "inspect Mail before retrying") {
+				t.Fatalf("result=%+v error=%+v", result, err)
 			}
 		})
 	}
