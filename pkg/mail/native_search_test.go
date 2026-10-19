@@ -137,6 +137,11 @@ func TestNativeSearchFailsClosedOnNativeFault(t *testing.T) {
 	f.queryError = context.DeadlineExceeded
 	if _, err := c.nativeSearchMailbox("fixture", "Personal", "INBOX", 1, "", true); !isAutomationTimeout(err) {
 		t.Fatalf("deadline lost: %v", err)
+	} else {
+		var timeout *AutomationTimeoutError
+		if !errors.As(err, &timeout) || timeout.Trace == nil || timeout.Trace.Pending != "search_mailbox" {
+			t.Fatalf("query deadline lost its pending phase: %+v", timeout)
+		}
 	}
 	f.queryError = nil
 	f.invalidReply = true
@@ -416,5 +421,69 @@ func TestNativeSearchInvocationSnapshotClonesAndPreservesOtherAccounts(t *testin
 	accounts, err := c.GetAccountsJSON()
 	if err != nil || len(accounts) != 2 || accounts[0].Name != "Work" || accounts[1].Name != "Other" || accounts[0].EmailAddresses[0] != "a@example.test" || len(f.events) != 11 {
 		t.Fatalf("snapshot poisoned later global cache: accounts=%#v events=%d err=%v", accounts, len(f.events), err)
+	}
+}
+
+func TestNativeSearchConfiguredQueryTimeoutPreservesOtherEventDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name, configured            string
+		queryTimeout, contextBudget time.Duration
+	}{
+		{"extended query", "120", 120 * time.Second, 120 * time.Second},
+		{"short query", "8", 8 * time.Second, 8 * time.Second},
+		{"default query", "", 8 * time.Second, 8 * time.Second},
+		{"caller caps extended query", "120", 120 * time.Second, 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_SEARCH_TIMEOUT", tc.configured)
+			f, c := newNativeSearchFixture(t)
+			forbidNativeScripts(t)
+			if tc.name == "caller caps extended query" {
+				ctx, cancel := context.WithTimeout(context.Background(), tc.contextBudget)
+				defer cancel()
+				c = c.WithContext(ctx)
+			}
+			original := c.shared.nativeSender
+			queryCount, ordinaryCount := 0, 0
+			started := time.Now()
+			c.shared.nativeSender = func(ctx context.Context, event appleevents.Event) (appleevents.Value, appleevents.Stats, error) {
+				selector := event.Params["----"]
+				query := event.Class == "core" && event.ID == "getd" && selector.Kind == "object" && selector.Fields["want"].Code == "mssg" && selector.Fields["form"].Code == "test"
+				if query {
+					queryCount++
+					if event.Timeout != tc.queryTimeout {
+						t.Fatalf("query event timeout=%s, want %s", event.Timeout, tc.queryTimeout)
+					}
+					deadline, ok := ctx.Deadline()
+					if !ok || deadline.After(started.Add(tc.contextBudget+100*time.Millisecond)) || deadline.Before(started.Add(tc.contextBudget-100*time.Millisecond)) {
+						t.Fatalf("query context deadline=%v, present=%v; budget=%s", deadline, ok, tc.contextBudget)
+					}
+				} else {
+					ordinaryCount++
+					if event.Timeout != 30*time.Second {
+						t.Fatalf("ordinary event %s/%s timeout=%s; want unchanged 30s", event.Class, event.ID, event.Timeout)
+					}
+				}
+				return original(ctx, event)
+			}
+			messages, err := c.nativeSearchMailbox("fixture", "Personal", "INBOX", 1, "", true)
+			if err != nil || len(messages) != 1 || queryCount != 1 || ordinaryCount == 0 {
+				t.Fatalf("search=%+v err=%v query=%d ordinary=%d", messages, err, queryCount, ordinaryCount)
+			}
+			assertNoNativeContentRead(t, f.events)
+		})
+	}
+}
+
+func TestNativeSearchEventTimeoutWrapperRejectsCanceledDispatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	called := false
+	n := &nativeMail{ctx: ctx, sender: func(context.Context, appleevents.Event) (appleevents.Value, appleevents.Stats, error) {
+		called = true
+		return appleevents.Null(), appleevents.Stats{}, nil
+	}}
+	if _, err := n.eventWithTimeout("core", "getd", map[string]appleevents.Value{"----": appleevents.Null()}, 120*time.Second); !errors.Is(err, context.Canceled) || called {
+		t.Fatalf("canceled dispatch err=%v called=%v", err, called)
 	}
 }
