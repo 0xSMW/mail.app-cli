@@ -262,6 +262,11 @@ func (r *nativeOutgoingRun) dispatch() error {
 		}
 		return nil
 	}
+	snapshot, err := r.n.ownedComposeSnapshot(r.owned)
+	if err != nil {
+		return err
+	}
+	r.preSaveOwnedBody = snapshot["ctnt"].Text
 	return r.n.phase("outgoing_save", func() error {
 		if e := r.n.ctx.Err(); e != nil {
 			return e
@@ -271,6 +276,16 @@ func (r *nativeOutgoingRun) dispatch() error {
 			return e
 		}
 		r.saved = true
+		current, err := r.n.ownedComposeSnapshot(r.owned)
+		if err != nil {
+			return err
+		}
+		if _, available := snapshot["files"]; !available {
+			delete(current, "files")
+		}
+		if !reflect.DeepEqual(snapshot, current) {
+			return fmt.Errorf("owned composition changed during save; retained")
+		}
 		_, e := r.n.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("yes ")})
 		return e
 	})
