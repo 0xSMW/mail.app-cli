@@ -235,6 +235,12 @@ func (r localContextReader) Read(buffer []byte) (int, error) {
 }
 
 func walkLocalAttachments(ctx context.Context, header func(string) string, body io.Reader, depth int, visit localAttachmentVisitor) error {
+	return walkLocalAttachmentsLimit(ctx, header, body, depth, maxMessageFileSize, visit)
+}
+
+// Callers with an already bounded source may choose its encoded byte length
+// as the decoded-part bound. Cached disk readers retain their original cap.
+func walkLocalAttachmentsLimit(ctx context.Context, header func(string) string, body io.Reader, depth int, decodedPartLimit int64, visit localAttachmentVisitor) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -273,12 +279,12 @@ func walkLocalAttachments(ctx context.Context, header func(string) string, body 
 		if err != nil {
 			return fmt.Errorf("decode attachment filename: %w", err)
 		}
-		bounded := &io.LimitedReader{R: body, N: maxMessageFileSize + 1}
+		bounded := &io.LimitedReader{R: body, N: decodedPartLimit + 1}
 		size, err := visit(Attachment{Name: name, MimeType: mediaType}, bounded)
 		if err != nil {
 			return err
 		}
-		if size > maxMessageFileSize {
+		if size > decodedPartLimit {
 			return fmt.Errorf("decoded attachment exceeds message limit")
 		}
 		if raw := header("X-Apple-Content-Length"); raw != "" {
@@ -302,7 +308,7 @@ func walkLocalAttachments(ctx context.Context, header func(string) string, body 
 			if err != nil {
 				return fmt.Errorf("read attachment MIME part: %w", err)
 			}
-			if err := walkLocalAttachments(ctx, part.Header.Get, part, depth+1, visit); err != nil {
+			if err := walkLocalAttachmentsLimit(ctx, part.Header.Get, part, depth+1, decodedPartLimit, visit); err != nil {
 				part.Close()
 				return err
 			}
@@ -313,6 +319,6 @@ func walkLocalAttachments(ctx context.Context, header func(string) string, body 
 	}
 	// Drain non-attachment leaves as well so malformed encodings or a truncated
 	// closing boundary cannot make an incomplete tree appear complete.
-	_, err = io.Copy(io.Discard, io.LimitReader(body, maxMessageFileSize+1))
+	_, err = io.Copy(io.Discard, io.LimitReader(body, decodedPartLimit+1))
 	return err
 }
