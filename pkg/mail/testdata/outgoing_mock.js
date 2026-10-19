@@ -68,7 +68,7 @@ const mail={
    if ((config.fingerprintFailures || []).includes(name) && (!config.failAfterSend || sent > 0)) {const e=new Error(name+' unavailable');e.errorNumber=-1728;throw e;}
    return value;
   }
-  const message={subject:()=>property('subject',properties.subject),content:()=>property('body',properties.content),id:()=> 7};
+  const message={subject:()=>property('subject',properties.subject),content:()=>property('body',properties.content+(config.ownedBodyExtraBeforeMarkers || '')+(config.ownedAttachmentMarkers ? '\uFFFC'.repeat(config.ownedMarkerCount===undefined?attached.length:config.ownedMarkerCount) : '')),id:()=> 7};
   let sender=properties.sender;
   Object.defineProperty(message,'sender',{get:()=>()=>{ if(config.getterThrows) throw new Error('sender read failed'); property('sender',sender); reads++;if(config.fallbackBeforeMutation && reads>=2) return 'other@example.com'; return config.readback || sender; },set:value=>{ if(config.setterThrows) throw new Error('sender write failed'); if(!config.ignoreSetter) sender=value; }});
   ['to','cc','bcc'].forEach(kind=>{const values=[];const list=()=>property(kind,values);list.push=x=>values.push(x);message[kind+'Recipients']=list;if(config.dropRecipients)list.push=()=>{}});
@@ -84,7 +84,7 @@ const mail={
  send:message=>{if(message!==outgoing) throw new Error('wrong outgoing');sent++;if(config.sendThrows)throw new Error('transport failed');
   if(config.afterSend)changeOutgoing(message,config.afterSend);
   return config.sendFalse ? false : true;},
- save:message=>{if(message!==outgoing)throw new Error('invalid save');savedComposition=true;if(request.action==='send' && config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
+ save:message=>{if(message!==outgoing)throw new Error('invalid save');savedComposition=true;if(config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
  close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.ownedDisappearsAtClose){ownedGone=true;const e=new Error('owned root disappeared');e.errorNumber=-1728;throw e;}if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
  delete:message=>{if(message!==outgoing)throw new Error('deleting unrelated object');deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');}
 };
