@@ -358,8 +358,7 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 		return body, nil, err
 	}
 	if kind == "multipart/alternative" {
-		body, err := applePlainAlternativeBody(snapshot, parsed.Body, params)
-		return body, nil, err
+		return applePlainAlternativeBody(snapshot, parsed.Body, params)
 	}
 	if kind != "multipart/mixed" || params["boundary"] == "" || len(params) != 1 {
 		return "", nil, fmt.Errorf("draft MIME %s cannot be reconstructed without losing formatting; send this draft in Mail", kind)
@@ -402,11 +401,13 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 			continue
 		}
 		if !haveBody && partKind == "multipart/alternative" && disposition == "" {
-			body, err = applePlainAlternativeBody(snapshot, part, partParams)
+			var related []draftMIMEAttachment
+			body, related, err = applePlainAlternativeBody(snapshot, part, partParams)
 			if err != nil {
 				return "", nil, err
 			}
 			haveBody = true
+			attachments = append(attachments, related...)
 			continue
 		}
 		if disposition != "attachment" || strings.HasPrefix(partKind, "multipart/") || partKind == "message/rfc822" || partKind == "message/external-body" || partKind == "application/pkcs7-mime" || partKind == "application/pgp-encrypted" || len(dispositionParams) != 1 {
