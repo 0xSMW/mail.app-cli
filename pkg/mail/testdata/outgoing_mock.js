@@ -82,7 +82,7 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
   const names=attached.map(a=>({descriptorType:typeCode(malformed.name || 'utxt'),stringValue:a.fileName()}));
   if((config.fingerprintFailures || []).includes('attachmentName') && (!config.failAfterSend || sent>0))names.forEach(n=>n.stringValue=null);
   const namesAvailable = names.length===0 || !(config.filenameUnsupported || (config.filenameUnsupportedAfterSend && sent>0) || (code.includes('return {attachmentCount, attachmentNames, false}') && !code.includes('repeat with attachmentItem')));
-  return {descriptorType:typeCode(malformed.root || 'list'),numberOfItems:3,descriptorAtIndex:i=>i===1 ? {descriptorType:typeCode(malformed.count || 'long'),int32Value:names.length} : i===3 ? {descriptorType:typeCode(malformed.flag || 'bool'),booleanValue:namesAvailable} : {descriptorType:typeCode(malformed.names || 'list'),numberOfItems:namesAvailable?names.length:0,descriptorAtIndex:j=>names[j-1]}};
+  return {descriptorType:typeCode(malformed.root || 'list'),numberOfItems:3,descriptorAtIndex:i=>i===1 ? {descriptorType:typeCode(malformed.count || 'long'),int32Value:names.length} : i===3 ? {descriptorType:typeCode(malformed.flag || (config.intrinsicBoolean ? (namesAvailable ? 'true' : 'fals') : 'bool')),booleanValue:namesAvailable} : {descriptorType:typeCode(malformed.names || 'list'),numberOfItems:namesAvailable?names.length:0,descriptorAtIndex:j=>names[j-1]}};
  }
  if(!code.includes('tell outgoing message id 7') || !code.includes('tell content'))throw new Error('invalid native attachment script');
  if(config.attachmentThrows){error[0]={message:'attachment insertion failed'};return null;}
