@@ -107,32 +107,94 @@ func nativeRuleEnum(code string) string {
 	}
 }
 
-// Rule conditions can have inapplicable properties. Read each list field
-// explicitly so a target failure retains its exact rule/property context.
-func (n *nativeMail) outgoingRuleListFields(object ae.Value, label string, codes ...string) (map[string]ae.Value, error) {
-	fields := make(map[string]ae.Value, len(codes))
-	for _, code := range codes {
-		value, e := n.get(ae.Property(code, object))
-		if e != nil {
-			return nil, fmt.Errorf("read %s property %s: %w", label, code, e)
+// Explicit read requests are bounded by descriptor count, not by rule count.
+// A failed batch remains an error with every candidate property identified;
+// it is never retried as separate getters or interpreted as missing data.
+type nativeRuleRead struct {
+	ref   ae.Value
+	label string
+}
+
+func (n *nativeMail) readRuleBatch(requests []nativeRuleRead, phase string) ([]ae.Value, error) {
+	const limit = 32
+	values := make([]ae.Value, 0, len(requests))
+	for start := 0; start < len(requests); start += limit {
+		end := start + limit
+		if end > len(requests) {
+			end = len(requests)
 		}
-		fields[code] = value
+		refs := make([]ae.Value, end-start)
+		labels := make([]string, end-start)
+		for i, request := range requests[start:end] {
+			refs[i] = request.ref
+			labels[i] = request.label
+		}
+		var result ae.Value
+		err := n.phase(fmt.Sprintf("%s_%d", phase, start/limit+1), func() error {
+			var err error
+			result, err = n.get(ae.List(refs...))
+			return err
+		})
+		if err != nil {
+			return nil, fmt.Errorf("read batch [%s]: %w", strings.Join(labels, "; "), err)
+		}
+		if result.Kind != "list" || len(result.Items) != len(refs) {
+			return nil, fmt.Errorf("read batch [%s]: expected %d explicit values (descriptor kind=%q count=%d)", strings.Join(labels, "; "), len(refs), result.Kind, len(result.Items))
+		}
+		values = append(values, result.Items...)
 	}
-	return fields, nil
+	return values, nil
 }
 
 func (c *Client) listNativeRules() ([]Rule, error) {
 	out := []Rule{}
 	err := c.withNativeAutomation(0, func(n *nativeMail) error {
-		refs, e := n.outgoingRuleRefs("")
+		var refs []ae.Value
+		e := n.phase("rules_discovery", func() error {
+			var err error
+			refs, err = n.outgoingRuleRefs("")
+			return err
+		})
+		if e != nil {
+			return e
+		}
+		codes := []string{"pnam", "isac", "rstm", "rdme", "rmre", "rmfl"}
+		requests := make([]nativeRuleRead, 0, len(refs)*7)
+		for i, ref := range refs {
+			label := fmt.Sprintf("rule %d", i+1)
+			for _, code := range codes {
+				requests = append(requests, nativeRuleRead{ae.Property(code, ref), label + " property " + code})
+			}
+			requests = append(requests, nativeRuleRead{ae.All("rucr", ref), label + " conditions"})
+		}
+		values, e := n.readRuleBatch(requests, "rules_projection")
+		if e != nil {
+			return e
+		}
+		conditionsByRule := make([][]ae.Value, len(refs))
+		conditionOffsets := make([]int, len(refs))
+		conditionRequests := []nativeRuleRead{}
+		for i := range refs {
+			conditionsByRule[i], e = nativeList(values[i*7+6], "rule conditions")
+			if e != nil {
+				return fmt.Errorf("read rule %d conditions: %w", i+1, e)
+			}
+			conditionOffsets[i] = len(conditionRequests)
+			for j, condition := range conditionsByRule[i] {
+				for _, code := range []string{"rtyp", "rqua", "rexp"} {
+					conditionRequests = append(conditionRequests, nativeRuleRead{ae.Property(code, condition), fmt.Sprintf("rule %d condition %d property %s", i+1, j+1, code)})
+				}
+			}
+		}
+		conditionValues, e := n.readRuleBatch(conditionRequests, "rules_conditions")
 		if e != nil {
 			return e
 		}
 		for ruleIndex, ref := range refs {
 			label := fmt.Sprintf("rule %d", ruleIndex+1)
-			f, e := n.outgoingRuleListFields(ref, label, "pnam", "isac", "rstm", "rdme", "rmre", "rmfl")
-			if e != nil {
-				return e
+			f := make(map[string]ae.Value, len(codes))
+			for i, code := range codes {
+				f[code] = values[ruleIndex*7+i]
 			}
 			name, e := nativeString(f["pnam"], "rule name")
 			if e != nil {
@@ -144,20 +206,10 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 				}
 			}
 			rule := Rule{Name: name, Enabled: f["isac"].Boolean}
-			v, e := n.get(ae.All("rucr", ref))
-			if e != nil {
-				return fmt.Errorf("read %s conditions: %w", label, e)
-			}
-			conditions, e := nativeList(v, "rule conditions")
-			if e != nil {
-				return e
-			}
-			for conditionIndex, condition := range conditions {
+			for conditionIndex := range conditionsByRule[ruleIndex] {
 				conditionLabel := fmt.Sprintf("%s condition %d", label, conditionIndex+1)
-				cf, e := n.outgoingRuleListFields(condition, conditionLabel, "rtyp", "rqua", "rexp")
-				if e != nil {
-					return e
-				}
+				offset := conditionOffsets[ruleIndex] + conditionIndex*3
+				cf := map[string]ae.Value{"rtyp": conditionValues[offset], "rqua": conditionValues[offset+1], "rexp": conditionValues[offset+2]}
 				for _, code := range []string{"rtyp", "rqua"} {
 					if cf[code].Kind != "enum" || len(cf[code].Code) != 4 {
 						return fmt.Errorf("read %s property %s: expected enumerated value (descriptor kind=%q code=%q)", conditionLabel, code, cf[code].Kind, cf[code].Code)
