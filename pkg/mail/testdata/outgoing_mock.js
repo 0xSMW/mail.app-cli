@@ -6,7 +6,7 @@ const config = request.config || {};
 const input = request.input;
 const events = [];
 const preparedId='900';
-const storedDeleted=[], exactLookups=[];const removed=new Set(),tombstones=new Set();let postSendDeletedReads=0;let savedComposition=false,ownedGone=false,storedRaceTriggered=false,lingeringReads=0;
+const storedDeleted=[], exactLookups=[];const removed=new Set(),tombstones=new Set();let postSendDeletedReads=0,readinessStatusReads=0,saves=0;let savedComposition=false,ownedGone=false,storedRaceTriggered=false,lingeringReads=0;
 let outgoing = null, polls = 0, attached = [], composed = 0, sent = 0, closed = 0, deleted = 0, reads = 0, accountReads = 0;
 function collection(values) { const f=()=>values; f.push=x=>values.push(x); return f; }
 function recipients(values) { return values.map(address=>({address:()=>address})); }
@@ -22,6 +22,13 @@ function stored(id, change) {
   if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
  return {id:()=>id,mailbox:()=>box,deletedStatus:()=>{
   if(sent>0)postSendDeletedReads++;
+  if(savedComposition && sent===0){
+   readinessStatusReads++;
+   if(readinessStatusReads <= (config.readinessMissingReads || 0) || config.readinessMissingPersistent){const e=new Error('newly saved deleted status not ready');e.errorNumber=-1728;throw e;}
+   if(config.readinessOtherError){const e=new Error('non-transient property error');e.errorNumber=-1708;throw e;}
+   if(Object.prototype.hasOwnProperty.call(config,'readinessStatusValue'))return config.readinessStatusValue;
+  }
+
   if(sent>0 && config.deletedStatusDisappears && !storedRaceTriggered){storedRaceTriggered=true;removed.add(id);lingeringReads=config.preparedLingeringIdReads || 0;const e=new Error('stored root disappeared during deleted status read');e.errorNumber=-1728;throw e;}
   if(config.deletedStatusThrows && (sent>0 || config.deletedStatusBeforeSend)) {const e=new Error('deleted getter unavailable');e.errorNumber=-1728;throw e;}
   if(Object.prototype.hasOwnProperty.call(config,'deletedStatusValue') && (sent>0 || config.deletedStatusBeforeSend))return config.deletedStatusValue;
@@ -91,7 +98,7 @@ const mail={
  send:message=>{if(message!==outgoing) throw new Error('wrong outgoing');sent++;if(config.sendThrows)throw new Error('transport failed');
   if(config.afterSend)changeOutgoing(message,config.afterSend);
   return config.sendFalse ? false : true;},
- save:message=>{if(message!==outgoing)throw new Error('invalid save');savedComposition=true;if(config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
+ save:message=>{if(message!==outgoing)throw new Error('invalid save');saves++;savedComposition=true;if(config.duringPrepare)changeOutgoing(message,config.duringPrepare);},
  close:(message,options)=>{if(message!==outgoing)throw new Error('invalid close');if(options.saving==='no'){deleted++;if(config.ownedDisappearsAtClose){ownedGone=true;const e=new Error('owned root disappeared');e.errorNumber=-1728;throw e;}if(config.cleanupThrows)throw new Error('cleanup failed');return;}if(options.saving!=='yes')throw new Error('invalid close');closed++; if(config.closeThrows)throw new Error('save transport failed');},
  delete:message=>{if(message!==outgoing)throw new Error('deleting unrelated object');deleted++;if(config.cleanupThrows)throw new Error('cleanup failed');}
 };
@@ -134,4 +141,4 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
 const sandbox={Application:name=>{if(name!=='Mail')throw new Error('wrong app');return mail;},Path:path=>path,delay:seconds=>{events.push(['delay',seconds]);if(config.realDelay)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,seconds*1000);},ObjC:{import:()=>{},deepUnwrap:v=>v},$:foundation,Ref:()=>[],reply:event=>events.push(event)};
 let response=vm.runInNewContext(request.script || request.helper+'\ncomposeOutgoing('+JSON.stringify(input)+','+JSON.stringify(request.action)+')',sandbox);
 if(typeof response==='string')response=JSON.parse(response);
-process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,storedDeleted,exactLookups,composedBody:(()=>{try{return outgoing?outgoing.content():null;}catch(e){return null;}})(),transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));
+process.stdout.write(JSON.stringify({response,composed,sent,closed,deleted,polls,events,saves,readinessStatusReads,storedDeleted,exactLookups,composedBody:(()=>{try{return outgoing?outgoing.content():null;}catch(e){return null;}})(),transportSender: config.transportSender || (response && response.result ? response.result.sender : '')}));
