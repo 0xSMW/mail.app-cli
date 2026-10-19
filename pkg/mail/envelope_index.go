@@ -172,6 +172,46 @@ func indexMailboxURLPattern(accountID, mailboxName string) string {
 	return fmt.Sprintf("imap://%s/%s", accountID, escapedName)
 }
 
+// Match the complete authority in each indexed URL rather than assuming an
+// account's provider scheme. Comparing the authority with = keeps account IDs
+// case-sensitive and treats LIKE wildcards in an ID literally.
+func indexAccountMailboxCondition(accountID string) string {
+	if accountID == "" {
+		return "0"
+	}
+	authority := "substr(url, instr(url, '://') + 3)"
+	return fmt.Sprintf("instr(url, '://') > 1 and substr(%s, 1, instr(%s, '/') - 1) = %s collate binary",
+		authority, authority, sqlQuote(accountID))
+}
+
+// Use the same ranked selection for normal reads and verification snapshots.
+// The scheme comes from each row, so mixed schemes and subsequent index updates
+// do not require a cached account-to-scheme mapping.
+func indexMailboxSelect(accountID, mailbox string, counts bool) string {
+	path := fmt.Sprintf("substr(url, instr(url, '://') + 3 + length(%s))", sqlQuote(accountID+"/"))
+	exact := strings.TrimPrefix(indexMailboxURLPattern(accountID, mailbox), "imap://"+accountID+"/")
+	exactCondition := path + " = " + sqlQuote(exact)
+	// Mail's special Inbox name varies in case across providers.
+	if strings.EqualFold(mailbox, "INBOX") {
+		exactCondition += " collate nocase"
+	}
+	broad := path + " like " + sqlQuote("%/"+escapeSQLLikePattern(escapedMailboxLeaf(mailbox))) + ` escape '\'`
+	where := exactCondition + " or " + broad
+	order := "case when " + exactCondition + " then 0 else 3 end"
+	if normalizeMailboxAlias(mailbox) == "archive" {
+		literal := path + " = 'Archive'"
+		nested := path + ` like '%/Archive' escape '\'`
+		where += " or " + literal + " or " + nested
+		order = "case when " + exactCondition + " then 0 when " + literal + " then 1 when " + nested + " then 2 else 3 end"
+	}
+	columns := "ROWID as ID, url as URL"
+	if counts {
+		columns += ", total_count, unread_count"
+	}
+	return "select " + columns + " from mailboxes where " + indexAccountMailboxCondition(accountID) +
+		" and (" + where + ") order by " + order + ", ROWID limit 1"
+}
+
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
 	if accountName == "" || mailboxName == "" {
 		return nil, false, nil
@@ -182,74 +222,15 @@ func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMai
 		return nil, false, err
 	}
 
-	urlPattern := indexMailboxURLPattern(account.ID, mailboxName)
-	query := fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s
-limit 1;
-`, sqlQuote(urlPattern))
-
-	var rows []struct {
-		ID          int
-		URL         string
-		TotalCount  int
-		UnreadCount int
-	}
+	query := "select ID, URL, total_count as TotalCount, unread_count as UnreadCount from (" +
+		indexMailboxSelect(account.ID, mailboxName, true) + ");"
+	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		if isEnvelopeIndexUnavailable(err) {
 			c.warnEnvelopeIndexFallback(err)
 			return nil, false, nil
 		}
 		return nil, false, err
-	}
-	// "Archive" is provider-ambiguous. An exact Gmail system mailbox wins,
-	// but a literal Archive must beat the broad nested All Mail fallback so an
-	// iCloud/IMAP account cannot verify against an unrelated mailbox.
-	if len(rows) == 0 && normalizeMailboxAlias(mailboxName) == "archive" {
-		literalURL := "imap://" + account.ID + "/Archive"
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s or url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote(literalURL), sqlQuote("imap://"+account.ID+"/%/Archive"), sqlQuote(literalURL))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
-		}
-	}
-	if len(rows) == 0 {
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote("imap://"+account.ID+"/%/"+escapedMailboxLeaf(mailboxName)), sqlQuote(indexMailboxURLPattern(account.ID, mailboxName)))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
-		}
 	}
 	if len(rows) == 0 {
 		return nil, false, nil
@@ -283,9 +264,9 @@ select
 	total_count as TotalCount,
 	unread_count as UnreadCount
 from mailboxes
-where url like %s
+where %s
 order by url;
-`, sqlQuote("imap://"+account.ID+"/%"))
+`, indexAccountMailboxCondition(account.ID))
 
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
