@@ -455,7 +455,7 @@ func (r *nativeOutgoingRun) verifySavedDraftAttachmentObservation() error {
 	if after == nil || after.ID != before.ID {
 		return errSavedDraftAttachmentPending
 	}
-	if !reflect.DeepEqual(before, after) {
+	if !sameSavedAttachmentSnapshot(before, after) {
 		return fmt.Errorf("saved draft changed during attachment verification")
 	}
 	current, err := r.n.scopedDraft(after.Account, after.Mailbox, after.ID)
@@ -476,7 +476,7 @@ func (r *nativeOutgoingRun) verifySavedDraftAttachmentObservation() error {
 	if final == nil || final.ID != after.ID {
 		return errSavedDraftAttachmentPending
 	}
-	if !reflect.DeepEqual(final, after) {
+	if !sameSavedAttachmentSnapshot(final, after) {
 		return fmt.Errorf("saved draft changed after attachment verification")
 	}
 
@@ -490,4 +490,24 @@ func (r *nativeOutgoingRun) verifySavedDraftAttachmentObservation() error {
 	r.result.Draft = after
 	r.result.Status = "saved"
 	return nil
+}
+
+// Mail can add a display name or change address casing while synchronizing a
+// saved draft. Only the already-validated parsed sender address is canonical;
+// every other snapshot field remains exact for attached-save verification.
+func sameSavedAttachmentSnapshot(a, b *Message) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	senderA, err := draftSenderAddress(a.Sender)
+	if err != nil {
+		return false
+	}
+	senderB, err := draftSenderAddress(b.Sender)
+	if err != nil || !strings.EqualFold(senderA, senderB) {
+		return false
+	}
+	left, right := *a, *b
+	left.Sender, right.Sender = "", ""
+	return reflect.DeepEqual(left, right)
 }
