@@ -6,9 +6,13 @@ const config = JSON.parse(process.env.DRAFT_REGRESSION_CONFIG);
 const statePath = process.env.DRAFT_REGRESSION_STATE;
 const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
 const script = process.argv[process.argv.length - 1];
+const replacementRun=script.includes(', "save"));');
+if(script.includes('const draftSnapshotRead = true;'))state.snapshotReads=(state.snapshotReads || 0)+1;
+
 state.closed=state.closed || 0;
 state.preparedDeleted=state.preparedDeleted || [];
 state.preparedEnumerated=state.preparedEnumerated || [];
+state.preparedExported=state.preparedExported || [];
 state.preparedById=state.preparedById || [];
 state.ownedCloseAfterSend=state.ownedCloseAfterSend || 0;
 
@@ -16,7 +20,13 @@ state.ownedCloseAfterSend=state.ownedCloseAfterSend || 0;
 function collection(values, name) {
     const getter = () => values;
     return new Proxy(getter, {get(target, key) {
-        if (key === 'id') return () => values.map(v => v.id());
+        if (key === 'id') return () => {
+            if(name==='messages' && state.originalDeleteAttempted) {
+             if(config.specialState==='cleanup-malformed-ids')return [null];
+             if(config.specialState==='cleanup-duplicate-ids')return [42,42];
+            }
+            return values.map(v=>v.id());
+        };
         if (key === 'name') return () => values.map(v => v.name());
         if (key === 'mailboxes') return {name: () => values.map(v => v.mailboxes().map(b => b.name()))};
         if (key === 'at') return index => values[index];
@@ -40,9 +50,20 @@ function recipients(values) { return values.map(address => ({address: () => addr
 function storedMessage(id, kind, box) {
     const data = config.snapshot.message;
     return {
-        id: () => Number(id), mailbox: () => box,
+        id: () => Number(id), mailbox: () => box, deletedStatus: () => {
+          if(kind==='special') {
+           if(config.specialState==='inactive-original')return true;
+           if(config.specialState==='invalid-deleted-status')return 1;
+           if(config.specialState==='unreadable-deleted-status' || (state.originalDeleteAttempted && config.specialState.startsWith('cleanup-getter-'))) {
+            if(config.specialState==='cleanup-getter-absence'){box.messages=collection([],'messages');state.originalRemoved=true;}
+            const error=new Error('deleted state unavailable');error.errorNumber=-1728;throw error;
+           }
+           if(state.originalDeleteAttempted && config.specialState==='cleanup-tombstone')return true;
+          }
+          return false;
+        },
         subject: () => data.subject, sender: () => data.sender,
-        content: () => data.content, source: () => config.snapshot.source+(kind==='special' && state.sent>0 && config.specialState==='changed-original-after-send' ? '\r\nX-Edited: true\r\n' : ''),
+        content: () => data.content, source: () => config.snapshot.source+(kind==='special' && ((state.sent>0 && config.specialState==='changed-original-after-send') || (state.prepared && config.specialState==='changed-original-during-replacement') || (state.snapshotReads>1 && config.specialState==='changed-before-replacement')) ? '\r\nX-Edited: true\r\n' : ''),
         toRecipients: () => recipients(data.toRecipients),
         ccRecipients: () => recipients(data.ccRecipients),
         bccRecipients: () => recipients(data.bccRecipients),
@@ -54,14 +75,18 @@ function storedMessage(id, kind, box) {
                 save: options => {
                     state.exported.push(kind);
                     if (kind !== 'special') throw Error('exported unrelated message');
-                    fs.writeFileSync(options.in, Buffer.from(attachment.base64, 'base64'));
+                    fs.writeFileSync(options.in, config.specialState==='mismatched-export' ? Buffer.from('wrong bytes') : Buffer.from(attachment.base64, 'base64'));
                 }
             }));
         },
         delete: () => {
             state.deleted.push(kind);
             if (kind !== 'special') throw Error('deleted unrelated message');
+            state.originalDeleteAttempted=true;
+            if(config.specialState==='cleanup-tombstone'){state.originalRemoved=true;return;}
+            if(config.specialState.startsWith('cleanup-getter-') || config.specialState==='cleanup-malformed-ids' || config.specialState==='cleanup-duplicate-ids')return;
             state.originalRemoved = true;
+            if(config.specialState==='cleanup-account-change')work.id=()=> 'changed-account';
             box.messages = collection(box.messages().filter(message=>String(message.id())!==String(id)), 'messages');
         }
     };
@@ -83,12 +108,12 @@ other.mailboxes = collection([foreign], 'mailboxes');
 const specialBoxes = config.specialState === 'missing' ? [foreign] :
     config.specialState === 'ambiguous' ? [foreign, special, special] : [foreign, special];
 const accounts = collection([work, other], 'accounts');
-let outgoing = null;
+let outgoing = null, composedProperties=null;
 const inserted = [];
 function preparedMessage(data) {
  return {id:()=>700,mailbox:()=>special,deletedStatus:()=>false,subject:()=>data.subject,sender:()=>data.sender,content:()=>data.body,
   source:()=>data.source,toRecipients:()=>recipients(data.to),ccRecipients:()=>recipients(data.cc),bccRecipients:()=>recipients(data.bcc),
-  mailAttachments:()=>{state.preparedEnumerated.push('700');return data.attachments.map(file=>({name:()=>file.name}));},
+  mailAttachments:()=>{state.preparedEnumerated.push('700');return data.attachments.map(file=>({name:()=>file.name,fileSize:()=>Buffer.from(file.base64,'base64').length,save:options=>{state.preparedExported.push('700');fs.writeFileSync(options.in,Buffer.from(file.base64,'base64'));}}));},
   delete:()=>{
    state.preparedDeleted.push('700');state.preparedRemoved=true;
    special.messages=collection(special.messages().filter(message=>String(message.id())!=='700'),'messages');
@@ -100,8 +125,8 @@ const mail = {
     draftsMailbox: () => ({mailboxes: collection(specialBoxes, 'mailboxes')}),
     outgoingMessages: {push: value => {outgoing = value; state.composed++;}},
     OutgoingMessage: properties => {
-        let sender = properties.sender;
-        const message = {id: () => 7, subject: () => properties.subject, content: () => properties.content};
+        let sender = properties.sender;composedProperties=properties;
+        const message = {id: () => 7, subject: () => properties.subject, content: () => properties.content+(replacementRun ? '\uFFFC'.repeat(inserted.length) : '')};
         Object.defineProperty(message, 'sender', {get: () => () => sender, set: value => {sender = value;}});
         for (const kind of ['to', 'cc', 'bcc']) message[kind + 'Recipients'] = collection([], 'recipients');
         return message;
@@ -112,7 +137,9 @@ const mail = {
     save: message => {
         if(message!==outgoing)throw Error('saved unrelated outgoing');
         if(!special.messages().some(value=>String(value.id())==='700')) {
-         const data={subject:message.subject(),sender:message.sender(),body:message.content(),
+         state.savedBody=composedProperties.content;state.savedAttachments=inserted.slice();
+         const rendered='\n'+composedProperties.content.slice(0,-1).split('\n').map(line=>line===''?'\u2028':line).join('\n')+'\n';
+         const data={subject:message.subject(),sender:message.sender(),body:replacementRun ? rendered : message.content(),
           to:message.toRecipients().map(r=>r.address()),cc:message.ccRecipients().map(r=>r.address()),bcc:message.bccRecipients().map(r=>r.address()),
           source:'X-Prepared-Draft: 700\r\n'+config.snapshot.source,attachments:inserted.slice()};
          state.prepared=data;state.preparedRemoved=false;
@@ -129,7 +156,7 @@ const mail = {
         return true;
     },
     close: (message,options) => {
-      if(message!==outgoing || options.saving!=='no')throw Error('wrong owned composition cleanup');
+      if(message!==outgoing || (options.saving!=='no' && !(replacementRun && options.saving==='yes')))throw Error('wrong owned composition cleanup');
       state.closed++;
       if(state.sent>0)state.ownedCloseAfterSend++;
     }
