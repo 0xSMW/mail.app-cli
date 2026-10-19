@@ -44,7 +44,7 @@ func attachmentProofMIME(names []string, payloads [][]byte) string {
 }
 
 func TestNativeAttachmentPayloadReadiness(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed", "plain owned snapshot vanished", "plain owned recipient getter failed", "plain stored snapshot vanished", "plain stored source vanished", "plain stored recipient getter failed", "plain vanished before delete", "plain stale IDs after root vanished", "plain stale IDs remain", "plain close missing root vanished", "plain close missing root present"} {
+	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed", "plain owned snapshot vanished", "plain owned recipient getter failed", "plain stored snapshot vanished", "plain stored source vanished", "plain stored recipient getter failed", "plain vanished before delete", "plain stale IDs after root vanished", "plain stale IDs remain", "plain close missing root vanished", "plain close missing root present", "rendered body", "rendered body changed text", "rendered body missing payload", "rendered body corrupt payload"} {
 		t.Run(scenario, func(t *testing.T) {
 			mode := strings.TrimPrefix(scenario, "plain ")
 			plain := strings.HasPrefix(scenario, "plain ")
@@ -78,6 +78,10 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				source = attachmentProofMIME([]string{"unrequested.bin"}, [][]byte{[]byte("unrequested")})
 			}
 			switch mode {
+			case "rendered body missing payload":
+				source = "Content-Type: text/plain\r\n\r\nno payload"
+			case "rendered body corrupt payload":
+				source = strings.Replace(source, base64.StdEncoding.EncodeToString(payloads[0]), "%%%", 1)
 			case "missing":
 				source = "Content-Type: text/plain\r\n\r\nno payload"
 			case "wrong bytes":
@@ -190,6 +194,9 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 						}
 						return ae.List(ae.Int(99), ae.Int(15)), nil
 					}
+					if prop == "ctnt" && strings.HasPrefix(mode, "rendered body") {
+						return ae.String("\n\u2028" + input.Body), nil
+					}
 					if prop == "mbxp" {
 						if mode == "account mismatch" {
 							return ruleFixtureRef("foreign-box"), nil
@@ -289,6 +296,13 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 					return ae.Null(), ae.Stats{Events: 1, Attempted: true}, nil
 				}
 				v, stats, err := f.send(eventCtx, event)
+				if event.Class+event.ID == "corecrel" && event.Params["kocl"].Code == "atts" && len(f.files) == len(input.Attachments) && strings.HasPrefix(mode, "rendered body") {
+					body := input.Body
+					if mode == "rendered body changed text" {
+						body += "changed"
+					}
+					f.fields["ctnt"] = ae.String(body + strings.Repeat("\ufffc", len(input.Attachments)))
+				}
 				if event.Class+event.ID == "emsgsend" && f.sendReply.Boolean && err == nil {
 					switch mode {
 					case "source changed":
@@ -309,7 +323,7 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				return v, stats, err
 			}
 			result, err := c.SendOutgoing(input)
-			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement" || mode == "owned snapshot vanished" || mode == "stored snapshot vanished" || mode == "stored source vanished" || mode == "vanished before delete" || mode == "stale IDs after root vanished" || mode == "close missing root vanished"
+			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement" || mode == "owned snapshot vanished" || mode == "stored snapshot vanished" || mode == "stored source vanished" || mode == "vanished before delete" || mode == "stale IDs after root vanished" || mode == "close missing root vanished" || mode == "rendered body"
 			pending := mode == "source changed" || mode == "stored recipient changed" || mode == "account drift" || mode == "ID getter failed" || mode == "delete failed" || mode == "account drift after delete" || mode == "source getter failed" || mode == "owned recipient getter failed" || mode == "stored recipient getter failed" || mode == "stale IDs remain" || mode == "close missing root present"
 			if success {
 				wantCloses := 1
@@ -400,5 +414,42 @@ func TestNativeAttachmentPayloadProofPlainTextLFBytes(t *testing.T) {
 	}
 	if err := proveOutgoingMIMEAttachments(context.Background(), strings.ReplaceAll(source, "second line\n", "second line\r\n"), expected); err == nil {
 		t.Fatal("accepted changed text attachment line endings")
+	}
+}
+
+func TestNativePreparedAttachmentRenderedBodyFingerprint(t *testing.T) {
+	body := "\n  first café 日本語\nsecond line  \n"
+	markers := strings.Repeat("\ufffc", 2)
+	type specimen struct {
+		action, body, owned, stored string
+		count                       int
+		want                        bool
+	}
+	cases := map[string]specimen{
+		"observed":                   {"send", body, body + markers, "\n\u2028" + body, 2, true},
+		"wrong count":                {"send", body, body + markers, "\n\u2028" + body, 1, false},
+		"missing marker":             {"send", body, body + "\ufffc", "\n\u2028" + body, 2, false},
+		"wrong location":             {"send", body, markers + body, "\n\u2028" + body, 2, false},
+		"changed owned text":         {"send", body, body + "changed" + markers, "\n\u2028" + body, 2, false},
+		"changed owned whitespace":   {"send", body, strings.TrimLeft(body, "\n ") + markers, "\n\u2028" + body, 2, false},
+		"changed stored leading LF":  {"send", body, body + markers, "\n\u2028" + strings.TrimPrefix(body, "\n"), 2, false},
+		"changed stored trailing LF": {"send", body, body + markers, "\n\u2028" + strings.TrimSuffix(body, "\n"), 2, false},
+		"extra stored whitespace":    {"send", body, body + markers, "\n\u2028" + body + " ", 2, false},
+		"different separator":        {"send", body, body + markers, "\n\u2029" + body, 2, false},
+		"extra separator":            {"send", body, body + markers, "\n\u2028\u2028" + body, 2, false},
+		"separator inside text":      {"send", body, body + markers, "\n\u2028" + body + "\u2028", 2, false},
+		"plain send":                 {"send", body, body, "\n\u2028" + body, 0, false},
+		"save only":                  {"save", body, body + markers, "\n\u2028" + body, 2, false},
+		"literal user object":        {"send", body + "\ufffc", body + "\ufffc" + markers, "\n\u2028" + body + "\ufffc", 2, false},
+		"normal exact remains":       {"save", body, "", body, 0, true},
+		"normal leading LF remains":  {"save", body, "", "\n" + body, 0, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			run := nativeOutgoingRun{action: tc.action, body: tc.body, preSaveOwnedBody: tc.owned, input: OutgoingInput{Attachments: make([]string, tc.count)}}
+			if got := run.savedDraftBodyMatches(tc.stored); got != tc.want {
+				t.Fatalf("match=%t want=%t", got, tc.want)
+			}
+		})
 	}
 }
