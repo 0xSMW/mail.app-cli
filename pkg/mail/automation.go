@@ -323,7 +323,12 @@ function isInboxName(name) {
 
 function findMailbox(acc, requestedName, names) {
 	if (isInboxName(requestedName)) {
-		try { return acc.inbox(); } catch (e) { if (isTransportError(e)) throw e; }
+		try {
+			const inbox = acc.inbox();
+			if (inbox !== null && inbox !== undefined && inbox.name()) return inbox;
+		} catch (e) { if (isTransportError(e)) throw e; }
+		// Exchange can expose a null inbox accessor while listing Inbox normally.
+		names = names.concat(['Inbox', 'INBOX']);
 	}
 	let found;
 	try {
