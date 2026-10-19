@@ -77,11 +77,21 @@ const foundation={NSAppleScript:{alloc:{initWithSource:code=>({executeAndReturnE
  if(code.includes('-- mail-app-cli-owned-attachment-snapshot')) {
   if(!code.includes('tell outgoing message id 7') || !code.includes('tell content')) throw new Error('invalid owned attachment snapshot');
   if((config.fingerprintFailures || []).includes('attachments') && (!config.failAfterSend || sent>0)){error[0]={message:'attachment read failed'};return null;}
+  if(config.snapshotNil && (!config.failAfterSend || sent>0)) return {__objcNil:true};
   const typeCode=code=>[...code].reduce((value,ch)=>value*256+ch.charCodeAt(0),0);
+  if(config.snapshotCountMissing && (!config.failAfterSend || sent>0)){
+   if(!code.includes('on error errorMessage number errorNumber\nreturn {errorNumber}')) throw new Error('required count errors need outer typed error tuple');
+   return {descriptorType:typeCode('list'),numberOfItems:1,descriptorAtIndex:()=>({descriptorType:typeCode('long'),int32Value:-1728})};
+  }
   const malformed=(!config.malformedAfterSend || sent>0) ? (config.malformedSnapshot || {}) : {};
   const names=attached.map(a=>({descriptorType:typeCode(malformed.name || 'utxt'),stringValue:a.fileName()}));
   if((config.fingerprintFailures || []).includes('attachmentName') && (!config.failAfterSend || sent>0))names.forEach(n=>n.stringValue=null);
-  const namesAvailable = names.length===0 || !(config.filenameUnsupported || (config.filenameUnsupportedAfterSend && sent>0) || (code.includes('return {attachmentCount, attachmentNames, false}') && !code.includes('repeat with attachmentItem')));
+  const filenameMissing = (config.filenameMissing || (config.filenameMissingAfterSend && sent>0));
+  if(filenameMissing && code.includes('repeat with attachmentItem') && !code.includes('or errorNumber is -1728 then')){
+   error[0]={NSAppleScriptErrorNumber:-1728,NSAppleScriptErrorBriefMessage:'Filename getter unavailable'};
+   return {__objcNil:true};
+  }
+  const namesAvailable = names.length===0 || !(filenameMissing || config.filenameUnsupported || (config.filenameUnsupportedAfterSend && sent>0) || (code.includes('return {attachmentCount, attachmentNames, false}') && !code.includes('repeat with attachmentItem')));
   return {descriptorType:typeCode(malformed.root || 'list'),numberOfItems:3,descriptorAtIndex:i=>i===1 ? {descriptorType:typeCode(malformed.count || 'long'),int32Value:names.length} : i===3 ? {descriptorType:typeCode(malformed.flag || (config.intrinsicBoolean ? (namesAvailable ? 'true' : 'fals') : 'bool')),booleanValue:namesAvailable} : {descriptorType:typeCode(malformed.names || 'list'),numberOfItems:namesAvailable?names.length:0,descriptorAtIndex:j=>names[j-1]}};
  }
  if(!code.includes('tell outgoing message id 7') || !code.includes('tell content'))throw new Error('invalid native attachment script');
