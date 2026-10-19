@@ -238,3 +238,29 @@ func TestRFCRelocationSnapshotAmbiguityIsFinal(t *testing.T) {
 		t.Fatalf("RFC snapshot ambiguity was retried or accepted: %+v", got)
 	}
 }
+
+func TestStableSenderAddressExchangeDuplicateDisplay(t *testing.T) {
+	identity := StableIdentity{RFCMessageID: "<stable@example.com>", Sender: "sender@example.test", Subject: "subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}
+	for _, sender := range []string{"sender@example.test", "Sender Name <sender@example.test>", "sender@example.test <Sender@Example.Test>", "  sender@example.test <Sender@Example.Test>  "} {
+		t.Run(sender, func(t *testing.T) {
+			if got := stableSenderAddress(sender); got != "sender@example.test" {
+				t.Fatalf("normalized sender=%q", got)
+			}
+			message := Message{RFCMessageID: identity.RFCMessageID, Sender: sender, Subject: identity.Subject, DateSent: identity.DateSent, MessageSize: 50}
+			if !identity.matchesEnvelope(message) {
+				t.Fatal("equivalent Exchange sender did not match guarded RFC identity")
+			}
+		})
+	}
+	for _, sender := range []string{"sender@example.test <other@example.test>", "sender@example.test <<sender@example.test>>", "sender@example.test <sender@example.test> trailing", "sender@example.test <sender@example.test>, other@example.test", "sender@example.test\r\n <sender@example.test>"} {
+		t.Run("reject "+sender, func(t *testing.T) {
+			if got := stableSenderAddress(sender); got != "" {
+				t.Fatalf("malformed sender accepted as %q", got)
+			}
+			message := Message{RFCMessageID: identity.RFCMessageID, Sender: sender, Subject: identity.Subject, DateSent: identity.DateSent, MessageSize: 50}
+			if identity.matchesEnvelope(message) {
+				t.Fatal("malformed sender weakened RFC identity guard")
+			}
+		})
+	}
+}
