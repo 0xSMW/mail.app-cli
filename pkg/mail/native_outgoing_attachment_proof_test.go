@@ -44,7 +44,7 @@ func attachmentProofMIME(names []string, payloads [][]byte) string {
 }
 
 func TestNativeAttachmentPayloadReadiness(t *testing.T) {
-	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed"} {
+	for _, scenario := range []string{"complete", "missing", "wrong bytes", "extra file", "corrupt encoding", "truncated", "placeholder", "ambiguous", "account mismatch", "cancelled", "input changed", "compose changed", "false acknowledgement", "lost acknowledgement", "plain complete", "plain absent after close", "plain backend absent", "plain source changed", "plain stored recipient changed", "plain account drift", "plain ID getter failed", "plain cancelled after acknowledgement", "plain false acknowledgement", "plain inherited attachment", "plain delete failed", "plain account drift after delete", "plain source getter failed", "plain owned snapshot vanished", "plain owned recipient getter failed", "plain stored snapshot vanished", "plain stored source vanished", "plain stored recipient getter failed", "plain vanished before delete", "plain stale IDs after root vanished", "plain stale IDs remain", "plain close missing root vanished", "plain close missing root present"} {
 		t.Run(scenario, func(t *testing.T) {
 			mode := strings.TrimPrefix(scenario, "plain ")
 			plain := strings.HasPrefix(scenario, "plain ")
@@ -97,6 +97,9 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 			removed := false
 			deletes := 0
 			storedRecipientChanged := false
+			rootGone := false
+			staleReads := 0
+			vanished := false
 			saveCalls := 0
 			sourceReads := 0
 			ctx, cancel := context.WithCancel(context.Background())
@@ -115,6 +118,18 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 					return ae.List(values...), nil
 				}
 				class, prop, container := descriptorClass(v), descriptorProperty(v), v.Fields["from"]
+				if f.sendCalls > 0 && reflect.DeepEqual(container, f.outgoing) && prop == "ctnt" && mode == "owned snapshot vanished" {
+					f.closed = true
+					removed = true
+					return ae.Value{}, &ae.Error{Code: -1728, Message: "owned root vanished"}
+				}
+				if f.sendCalls > 0 && prop == "radd" && reflect.DeepEqual(container.Fields["from"], f.outgoing) && mode == "owned recipient getter failed" {
+					return ae.Value{}, &ae.Error{Code: -1728, Message: "owned recipient unavailable"}
+				}
+				if f.sendCalls > 0 && prop == "radd" && descriptorClass(container.Fields["from"]) == "mssg" && mode == "stored recipient getter failed" {
+					return ae.Value{}, &ae.Error{Code: -1728, Message: "stored recipient unavailable"}
+				}
+
 				if class == "mbxp" {
 					return ae.List(box), nil
 				}
@@ -136,9 +151,33 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 					if container.Fields["form"].Code == "ID  " && container.Fields["seld"].Number == 99 {
 						t.Fatal("inspected an unowned stored draft")
 					}
+					if f.sendCalls > 0 && container.Fields["form"].Code == "ID  " {
+						if rootGone {
+							return ae.Value{}, &ae.Error{Code: -1728, Message: "stored root vanished"}
+						}
+						if !vanished && prop == "sndr" && (mode == "stored snapshot vanished" || mode == "stale IDs after root vanished" || mode == "stale IDs remain") {
+							vanished = true
+							rootGone = true
+							if mode == "stored snapshot vanished" {
+								removed = true
+							} else if mode == "stale IDs remain" {
+								staleReads = -1
+							} else {
+								staleReads = 2
+							}
+							return ae.Value{}, &ae.Error{Code: -1728, Message: "stored root vanished during snapshot"}
+						}
+					}
 					if prop == "ID  " {
 						if container.Fields["form"].Code == "ID  " {
 							return container.Fields["seld"], nil
+						}
+						if rootGone {
+							if staleReads == 0 {
+								removed = true
+							} else if staleReads > 0 {
+								staleReads--
+							}
 						}
 						if mode == "ID getter failed" && f.sendCalls > 0 {
 							return ae.Value{}, &ae.Error{Code: -1712, Message: "ID enumeration failed"}
@@ -158,6 +197,11 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 						return box, nil
 					}
 					if prop == "raso" {
+						if f.sendCalls > 0 && mode == "stored source vanished" {
+							rootGone = true
+							removed = true
+							return ae.Value{}, &ae.Error{Code: -1728, Message: "stored source vanished"}
+						}
 						if mode == "source getter failed" && f.sendCalls > 0 {
 							return ae.Value{}, &ae.Error{Code: -1728, Message: "stored source unavailable"}
 						}
@@ -208,6 +252,15 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 					}
 					return ae.Null(), ae.Stats{Events: 1, Attempted: true}, nil
 				}
+				if event.Class+event.ID == "coreclos" && f.sendCalls > 0 && (mode == "close missing root vanished" || mode == "close missing root present") {
+					f.events = append(f.events, event)
+					f.closeCalls++
+					if mode == "close missing root vanished" {
+						f.closed = true
+						removed = true
+					}
+					return ae.Value{}, ae.Stats{Events: 1, Attempted: true}, &ae.Error{Code: -1728, Message: "close could not resolve object"}
+				}
 				if event.Class+event.ID == "coreclos" && mode == "complete" && f.sendCalls == 0 {
 					t.Fatal("closed composition before send")
 				}
@@ -221,6 +274,11 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 						t.Fatal("deleted an unowned stored draft")
 					}
 					deletes++
+					if mode == "vanished before delete" {
+						removed = true
+						rootGone = true
+						return ae.Value{}, ae.Stats{Events: 1, Attempted: true}, &ae.Error{Code: -1728, Message: "stored draft vanished before delete"}
+					}
 					if mode == "delete failed" {
 						return ae.Value{}, ae.Stats{Events: 1, Attempted: true}, errors.New("delete failed")
 					}
@@ -251,11 +309,11 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				return v, stats, err
 			}
 			result, err := c.SendOutgoing(input)
-			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement"
-			pending := mode == "source changed" || mode == "stored recipient changed" || mode == "account drift" || mode == "ID getter failed" || mode == "delete failed" || mode == "account drift after delete" || mode == "source getter failed"
+			success := mode == "complete" || mode == "absent after close" || mode == "backend absent" || mode == "cancelled after acknowledgement" || mode == "owned snapshot vanished" || mode == "stored snapshot vanished" || mode == "stored source vanished" || mode == "vanished before delete" || mode == "stale IDs after root vanished" || mode == "close missing root vanished"
+			pending := mode == "source changed" || mode == "stored recipient changed" || mode == "account drift" || mode == "ID getter failed" || mode == "delete failed" || mode == "account drift after delete" || mode == "source getter failed" || mode == "owned recipient getter failed" || mode == "stored recipient getter failed" || mode == "stale IDs remain" || mode == "close missing root present"
 			if success {
 				wantCloses := 1
-				if mode == "backend absent" {
+				if mode == "backend absent" || mode == "owned snapshot vanished" {
 					wantCloses = 0
 				}
 				if err != nil || !result.Submitted || f.sendCalls != 1 || saveCalls != 1 || f.closeCalls != wantCloses || !removed {
@@ -279,6 +337,12 @@ func TestNativeAttachmentPayloadReadiness(t *testing.T) {
 				if !errors.As(err, &mutation) || mutation.Attempted || mutation.Uncertain || !mutation.Saved || err == nil || result.Submitted || f.sendCalls != 0 {
 					t.Fatalf("unsafe preflight scenario=%s result=%+v err=%v sends=%d", scenario, result, err, f.sendCalls)
 				}
+			}
+			if deletes > 1 {
+				t.Fatal("repeated stored draft deletion")
+			}
+			if mode == "owned recipient getter failed" && f.closeCalls != 0 {
+				t.Fatal("closed owned root after nested getter failure")
 			}
 			for _, event := range f.events {
 				if event.ID == "clos" && !reflect.DeepEqual(event.Params["----"], f.outgoing) {
