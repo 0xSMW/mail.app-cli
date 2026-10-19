@@ -5,8 +5,8 @@ const request = JSON.parse(fs.readFileSync(0, 'utf8'));
 const config = request.config || {};
 const input = request.input;
 const events = [];
-const preparedId=request.action==='send'?'900':'stored-900';
-const storedDeleted=[], exactLookups=[];const removed=new Set();let savedComposition=false,ownedGone=false,storedRaceTriggered=false,lingeringReads=0;
+const preparedId='900';
+const storedDeleted=[], exactLookups=[];const removed=new Set(),tombstones=new Set();let postSendDeletedReads=0;let savedComposition=false,ownedGone=false,storedRaceTriggered=false,lingeringReads=0;
 let outgoing = null, polls = 0, attached = [], composed = 0, sent = 0, closed = 0, deleted = 0, reads = 0, accountReads = 0;
 function collection(values) { const f=()=>values; f.push=x=>values.push(x); return f; }
 function recipients(values) { return values.map(address=>({address:()=>address})); }
@@ -16,13 +16,19 @@ function stored(id, change) {
  const ownerId=after.accountId || (config.accounts || [{id:'id-1'}])[0].id;
  const box={name:()=>data.mailbox || config.physicalDraftName || config.draftName || 'Drafts',account:()=>({id:()=>ownerId})};
  function read(name,value){
+  if(config.tombstoneContentThrows && (tombstones.has(id) || (sent>0 && config.preparedDeletedAfterSend)))throw new Error('tombstone content must not be read');
   if(sent>0 && name==='source' && config.preparedDisappearsDuringSnapshot && !storedRaceTriggered){storedRaceTriggered=true;removed.add(id);lingeringReads=config.preparedLingeringIdReads || 0;const e=new Error('stored root disappeared');e.errorNumber=-1728;throw e;}
   if(sent>0 && config.storedNestedMissing===name){const e=new Error('stored nested unavailable');e.errorNumber=-1728;throw e;}
   if(sent>0 && config.storedReadThrows===name)throw new Error('stored '+name+' read failed');return value;}
- return {id:()=>id,mailbox:()=>box,source:()=>read('source',data.source===undefined?(config.source || 'raw source'):data.source),messageId:()=>data.rfcMessageId || 'draft-rfc-id',subject:()=>read('subject',data.subject),content:()=>read('body',data.body),sender:()=>data.sender || (config.accounts || [{addresses:['sender@example.com']}])[0].addresses[0],
+ return {id:()=>id,mailbox:()=>box,deletedStatus:()=>{
+  if(sent>0)postSendDeletedReads++;
+  if(config.deletedStatusThrows && (sent>0 || config.deletedStatusBeforeSend)) {const e=new Error('deleted getter unavailable');e.errorNumber=-1728;throw e;}
+  if(Object.prototype.hasOwnProperty.call(config,'deletedStatusValue') && (sent>0 || config.deletedStatusBeforeSend))return config.deletedStatusValue;
+  return tombstones.has(id) || !!config.preparedInitiallyDeleted || (sent>0 && !!config.preparedDeletedAfterSend) || (sent>0 && !!config.preparedDeletedBeforeDelete && postSendDeletedReads>=2);
+ },source:()=>read('source',data.source===undefined?(config.source || 'raw source'):data.source),messageId:()=>data.rfcMessageId || 'draft-rfc-id',subject:()=>read('subject',data.subject),content:()=>read('body',data.body),sender:()=>data.sender || (config.accounts || [{addresses:['sender@example.com']}])[0].addresses[0],
  toRecipients:()=>recipients(data.to || []),ccRecipients:()=>recipients(data.cc || []),bccRecipients:()=>recipients(data.bcc || []),
  mailAttachments:()=> (data.attachments||[]).map((path,index)=>({id:()=>String(index),name:()=>path.split('/').pop(),mimeType:()=>data.mimeType || 'application/octet-stream',fileSize:()=>data.fileSize || 10,downloaded:()=>true})),
- delete:()=>{if(id!==preparedId)throw new Error('attempt to remove unrelated stored draft');storedDeleted.push(id);if(config.storedDeleteThrows)throw new Error('stored delete failed');if(!config.storedDeleteNoEffect)removed.add(id);}};
+ delete:()=>{if(id!==preparedId)throw new Error('attempt to remove unrelated stored draft');storedDeleted.push(id);if(config.storedDeleteThrows)throw new Error('stored delete failed');if(config.storedDeleteLeavesTombstone)tombstones.add(id);else if(!config.storedDeleteNoEffect)removed.add(id);}};
 }
 const drafts={name:()=> config.draftName || 'Drafts',account:()=>accounts[0],messages:()=> {
  if(config.snapshotRead) return [stored(String(config.draftId || '42'))];
@@ -32,7 +38,7 @@ const drafts={name:()=> config.draftName || 'Drafts',account:()=>accounts[0],mes
  if(config.transportLookup){const e=new Error('transport timeout');e.errorNumber=-1712;throw e;}
  if (config.neverSave || polls < (config.saveDelay || 1)) return config.preexisting ? [stored('100')] : [];
  const values = [stored(preparedId,config.savedChange)];
- if (config.ambiguousSave) values.push(stored(request.action==='send'?'901':'stored-901'));
+ if (config.ambiguousSave) values.push(stored('901'));
  if (config.preexisting) values.push(stored('100'));
  return values.filter(m=>!removed.has(m.id()) && !(sent>0 && config.storedAbsent && m.id()===preparedId));
 }};
