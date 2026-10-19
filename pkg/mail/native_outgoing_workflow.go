@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -37,6 +38,79 @@ func (r *nativeOutgoingRun) cleanupOwned(err error) {
 	if _, e := clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); e != nil {
 		r.cleanup = e.Error()
 	}
+}
+
+// submittedCleanup closes only the exact composition Mail returned to this run.
+// A send acknowledgement remains authoritative even if cleanup cannot complete.
+func (r *nativeOutgoingRun) submittedCleanup(expected map[string]ae.Value) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.n.ctx), 5*time.Second)
+	defer cancel()
+	clean := *r.n
+	clean.ctx = ctx
+	// Only a read of the owned object itself may establish absence. A missing
+	// recipient or attachment during snapshot readback is a cleanup failure.
+	_, err := clean.get(ae.Property("subj", r.owned))
+	if nativeMissing(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	current, err := clean.ownedComposeSnapshot(r.owned)
+	if err != nil {
+		return err
+	}
+	if _, available := expected["files"]; !available {
+		delete(current, "files")
+	}
+	if !reflect.DeepEqual(expected, current) {
+		return fmt.Errorf("submitted composition changed; retained")
+	}
+	if _, err = clean.command("core", "clos", map[string]ae.Value{"----": r.owned, "savo": ae.Enum("no  ")}); err != nil && !nativeMissing(err) {
+		return err
+	}
+	// Mail can retain a readable outgoing descriptor after acknowledging close.
+	// The acknowledgement completes this command; server Drafts synchronization
+	// is a separate observation and cannot be inferred from descriptor liveness.
+	return nil
+}
+
+func (n *nativeMail) ownedComposeSnapshot(owned ae.Value) (map[string]ae.Value, error) {
+	fields, err := n.getFields(owned, "sndr", "subj", "ctnt")
+	if err != nil {
+		return nil, err
+	}
+	for _, code := range []string{"sndr", "subj", "ctnt"} {
+		if _, err = nativeString(fields[code], "owned compose "+code); err != nil {
+			return nil, err
+		}
+	}
+	for _, class := range []string{"trcp", "crcp", "brcp"} {
+		recipients, err := n.outgoingRecipients(owned, class)
+		if err != nil {
+			return nil, err
+		}
+		values := make([]ae.Value, len(recipients))
+		for i, address := range recipients {
+			values[i] = ae.String(address)
+		}
+		fields[class] = ae.List(values...)
+	}
+	count, err := n.outgoingAttachmentCount(owned)
+	if err != nil {
+		return nil, err
+	}
+	fields["atts"] = ae.Int(count)
+	// Mail does not expose attachment filenames on every outgoing backend.
+	// Where available, retain them too so same-count replacements are guarded.
+	if names, nameErr := n.outgoingAttachmentNames(owned, false); nameErr == nil && int64(len(names)) == count {
+		values := make([]ae.Value, len(names))
+		for i, name := range names {
+			values[i] = ae.String(name)
+		}
+		fields["files"] = ae.List(values...)
+	}
+	return fields, nil
 }
 
 func (r *nativeOutgoingRun) draftBaseline(account ae.Value) error {
@@ -140,7 +214,11 @@ func (r *nativeOutgoingRun) compose() error {
 
 func (r *nativeOutgoingRun) dispatch() error {
 	if r.action == "send" {
-		return r.n.phase("outgoing_send", func() error {
+		expected, err := r.n.ownedComposeSnapshot(r.owned)
+		if err != nil {
+			return err
+		}
+		err = r.n.phase("outgoing_send", func() error {
 			if e := r.n.ctx.Err(); e != nil {
 				return e
 			}
@@ -156,6 +234,16 @@ func (r *nativeOutgoingRun) dispatch() error {
 			r.result.Status = "submitted"
 			return nil
 		})
+		if err != nil {
+			return err
+		}
+		r.step = "submitted_cleanup"
+		if err = r.submittedCleanup(expected); err != nil {
+			r.result.Status = "submitted_cleanup_pending"
+			r.cleanup = err.Error()
+			return err
+		}
+		return nil
 	}
 	return r.n.phase("outgoing_save", func() error {
 		if e := r.n.ctx.Err(); e != nil {
