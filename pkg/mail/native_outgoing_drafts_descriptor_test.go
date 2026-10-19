@@ -12,11 +12,14 @@ import (
 )
 
 type nativeDraftDescriptorFixture struct {
-	events  []ae.Event
-	source  ae.Value
-	changed bool
-	removed bool
-	subject string
+	events             []ae.Event
+	source             ae.Value
+	changed            bool
+	removed            bool
+	deleted            bool
+	deleteMarksDeleted bool
+	deleteStatus       ae.Value
+	subject            string
 }
 
 func newNativeDraftDescriptorFixture() *nativeDraftDescriptorFixture {
@@ -72,6 +75,11 @@ func (f *nativeDraftDescriptorFixture) get(v ae.Value) (ae.Value, error) {
 				return ae.Value{}, &ae.Error{Code: -1728, Message: "missing"}
 			}
 			switch prop {
+			case "isdl":
+				if f.deleteStatus.Kind != "" {
+					return f.deleteStatus, nil
+				}
+				return ae.Bool(f.deleted), nil
 			case "ID  ":
 				return ae.Int(15), nil
 			case "subj":
@@ -100,7 +108,11 @@ func (f *nativeDraftDescriptorFixture) send(ctx context.Context, event ae.Event)
 		v, e := f.get(event.Params["----"])
 		return v, stats, e
 	case "coredelo":
-		f.removed = true
+		if f.deleteMarksDeleted {
+			f.deleted = true
+		} else {
+			f.removed = true
+		}
 		return ae.Null(), stats, nil
 	}
 	return ae.Value{}, stats, fmt.Errorf("unexpected draft mutation %+v", event)
@@ -407,4 +419,108 @@ func TestNativeDescriptorPlainDraftChangedAfterSendRetainsOriginalWithoutResendi
 		t.Fatalf("prepared draft deletes=%d want1", f.outgoing.draftDeletes)
 	}
 
+}
+
+func TestNativeDescriptorDeletedDraftIsNotActive(t *testing.T) {
+	for _, operation := range []string{"show", "preview", "send", "update", "delete", "attachments"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newNativeDraftDescriptorFixture()
+			f.deleted = true // ID, container, and source still resolve normally.
+			c := nativeDraftFixtureClient(f)
+			var err error
+			switch operation {
+			case "show":
+				_, err = c.GetDraft("Personal", "15")
+			case "preview":
+				_, err = c.PreviewDraftSend("Personal", "15")
+			case "send":
+				_, err = c.SendDraftResult("Personal", "15")
+			case "update":
+				_, err = c.UpdateDraft("Personal", "15", DraftInput{Subject: "Updated", SubjectSet: true})
+			case "delete":
+				err = c.DeleteDraft("Personal", "15")
+			case "attachments":
+				_, err = c.nativeDraftAttachments(&Message{Account: "Personal", Mailbox: "Drafts", ID: "15"})
+			}
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("deleted draft operation error=%v, want not found", err)
+			}
+			for _, event := range f.events {
+				if event.ID != "getd" {
+					t.Fatalf("tombstone caused mutation: %+v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeDescriptorDraftDeletedStatusFailsClosed(t *testing.T) {
+	for _, status := range []ae.Value{ae.Null(), ae.String("false"), ae.Int(0)} {
+		f := newNativeDraftDescriptorFixture()
+		f.deleteStatus = status
+		c := nativeDraftFixtureClient(f)
+		if _, err := c.GetDraft("Personal", "15"); err == nil || errors.Is(err, ErrNotFound) {
+			t.Fatalf("invalid status %+v: error=%v", status, err)
+		}
+		if err := c.deleteNativeDraft("Personal", "Drafts", "15"); err == nil {
+			t.Fatalf("invalid status %+v permitted delete", status)
+		}
+		if f.removed {
+			t.Fatal("invalid deleted status caused mutation")
+		}
+	}
+	f := newNativeDraftDescriptorFixture()
+	c := nativeDraftFixtureClient(f)
+	c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+		if event.Class+event.ID == "coregetd" && descriptorProperty(event.Params["----"]) == "isdl" {
+			return ae.Value{}, ae.Stats{}, &ae.Error{Code: -1728, Message: "status unavailable"}
+		}
+		return f.send(ctx, event)
+	}
+	if _, err := c.GetDraft("Personal", "15"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed deleted-status getter was accepted as absence: %v", err)
+	}
+}
+
+func TestNativeDescriptorDraftCleanupAcceptsDeletedTombstone(t *testing.T) {
+	f := newNativeDraftDescriptorFixture()
+	f.deleteMarksDeleted = true
+	c := nativeDraftFixtureClient(f)
+	snapshot, err := c.readDraftSnapshot("Personal", "15")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.deleteUnchangedDraft(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if !f.deleted || f.removed {
+		t.Fatal("fixture did not retain addressable deleted tombstone")
+	}
+	deletes := 0
+	for _, event := range f.events {
+		if event.Class+event.ID == "coredelo" {
+			deletes++
+		}
+	}
+	if deletes != 1 {
+		t.Fatalf("delete count=%d", deletes)
+	}
+}
+
+func TestNativeDescriptorOriginalTombstoneBeforeCleanupNeedsNoDelete(t *testing.T) {
+	f := newNativeDraftDescriptorFixture()
+	c := nativeDraftFixtureClient(f)
+	snapshot, err := c.readDraftSnapshot("Personal", "15")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.deleted = true
+	if err := c.deleteUnchangedDraft(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range f.events {
+		if event.ID != "getd" {
+			t.Fatalf("already deleted original caused mutation: %+v", event)
+		}
+	}
 }
