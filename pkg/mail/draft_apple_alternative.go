@@ -59,7 +59,7 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 	if _, err := reader.NextRawPart(); err != io.EOF || strings.Trim(bodies[0], "\r\n") != "" {
 		return reject()
 	}
-	text, referencedIDs, ok := applePlainWrapperContent(bodies[1])
+	text, referencedIDs, leadingBlank, ok := applePlainWrapperContentLayout(bodies[1])
 	if !ok || strings.ContainsRune(snapshot.Message.Content, 0) {
 		return reject()
 	}
@@ -81,6 +81,12 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 		}
 		orderedAttachments = append(orderedAttachments, attachment)
 	}
+	// Only the exact proven leading default blank paragraph plus CID-backed
+	// files admits Mail's observed display-only LF/line-separator prefix.
+	// Return the parsed text so that prefix is not recomposed as user content.
+	if leadingBlank && len(orderedAttachments) > 0 && strings.ReplaceAll(snapshot.Message.Content, "\r\n", "\n") == "\n\u2028"+strings.ReplaceAll(text, "\r\n", "\n") {
+		return text, orderedAttachments, nil
+	}
 	// The leading placeholder and containing paragraphs add edge newlines to
 	// Mail's text readback. Keep that exact readback, after proving all actual
 	// body text and internal line breaks against the HTML source.
@@ -94,33 +100,40 @@ func applePlainAlternativeBody(snapshot *draftSnapshot, source io.Reader, params
 }
 
 func applePlainWrapperContent(source string) (string, []string, bool) {
+	text, ids, _, ok := applePlainWrapperContentLayout(source)
+	return text, ids, ok
+}
+
+func applePlainWrapperContentLayout(source string) (string, []string, bool, bool) {
 	doc, err := html.Parse(strings.NewReader(source))
 	if err != nil {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	root := appleWrapperElements(doc)
 	if len(root) != 1 || !appleWrapperElement(root[0], "html", nil) {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	parts := appleWrapperElements(root[0])
 	if len(parts) != 2 || !appleWrapperElement(parts[0], "head", nil) || len(appleWrapperElements(parts[0])) != 0 || !appleWrapperElement(parts[1], "body", map[string]string{"dir": "auto", "style": "overflow-wrap: break-word; -webkit-nbsp-mode: space; line-break: after-white-space;"}) {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	parts = appleWrapperElements(parts[1])
 	if len(parts) != 2 || !appleWrapperElement(parts[0], "div", map[string]string{"class": "Apple-Mail-URLShareUserContentTopClass"}) || !appleWrapperElement(parts[1], "div", map[string]string{"class": "Apple-Mail-URLShareWrapperClass", "style": "position: relative !important;"}) {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	top := appleWrapperElements(parts[0])
 	if len(top) != 1 || !appleWrapperElement(top[0], "br", nil) || top[0].FirstChild != nil {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	quote := appleWrapperElements(parts[1])
 	if len(quote) != 1 || !appleWrapperElement(quote[0], "blockquote", map[string]string{"type": "cite", "style": "border-left-style: none; color: inherit; padding: inherit; margin: inherit;"}) {
-		return "", nil, false
+		return "", nil, false, false
 	}
 	var text strings.Builder
 	var contentIDs []string
 	paragraphs := false
+	leadingBlank := false
+	bodyParagraph := false
 	for node := quote[0].FirstChild; node != nil; node = node.NextSibling {
 		switch {
 		case node.Type == html.TextNode:
@@ -128,38 +141,60 @@ func applePlainWrapperContent(source string) (string, []string, bool) {
 				continue
 			}
 			if len(contentIDs) != 0 || paragraphs {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			text.WriteString(node.Data)
 		case appleWrapperElement(node, "br", nil) && node.FirstChild == nil && !paragraphs && len(contentIDs) == 0:
 			text.WriteByte('\n')
+		case !paragraphs && len(contentIDs) == 0 && text.Len() == 0 && appleDefaultLeadingBlankParagraph(node):
+			leadingBlank = true
+			paragraphs = true
+			text.WriteByte('\n')
 		case appleWrapperElement(node, "p", map[string]string{"style": "margin: 0.0px 0.0px 0.0px 0.0px"}) && len(contentIDs) == 0:
 			if !paragraphs && strings.Trim(text.String(), "\r\n") != "" {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			paragraph, ok := appleDefaultParagraphText(node)
 			if !ok {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			paragraphs = true
+			if paragraph != "" {
+				bodyParagraph = true
+			}
 			text.WriteString(paragraph)
 			text.WriteByte('\n')
 		case appleWrapperElement(node, "span", map[string]string{"class": "Apple-string-attachment"}):
 			id, ok := appleAttachmentObjectID(node)
 			if !ok || !paragraphs {
-				return "", nil, false
+				return "", nil, false, false
 			}
 			for _, previous := range contentIDs {
 				if previous == id {
-					return "", nil, false
+					return "", nil, false, false
 				}
 			}
 			contentIDs = append(contentIDs, id)
 		default:
-			return "", nil, false
+			return "", nil, false, false
 		}
 	}
-	return text.String(), contentIDs, true
+	if leadingBlank && (!bodyParagraph || len(contentIDs) == 0) {
+		return "", nil, false, false
+	}
+	return text.String(), contentIDs, leadingBlank, true
+}
+
+func appleDefaultLeadingBlankParagraph(node *html.Node) bool {
+	if !appleWrapperElement(node, "p", map[string]string{"style": "margin: 0.0px 0.0px 0.0px 0.0px; font: 12.0px Helvetica; color: #000000; -webkit-text-stroke: #000000; min-height: 14.0px"}) {
+		return false
+	}
+	font := node.FirstChild
+	if font == nil || !appleWrapperElement(font, "font", map[string]string{"style": "font-kerning: none"}) || font.FirstChild != nil {
+		return false
+	}
+	br := font.NextSibling
+	return br != nil && appleWrapperElement(br, "br", nil) && br.FirstChild == nil && br.NextSibling == nil
 }
 
 func appleDefaultParagraphText(paragraph *html.Node) (string, bool) {
