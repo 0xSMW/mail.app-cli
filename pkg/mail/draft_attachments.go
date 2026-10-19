@@ -95,8 +95,14 @@ func (c *Client) exportDraftAttachments(draft *Message, dir string) ([]string, e
 			return nil, err
 		}
 		path := filepath.Join(folder, name)
-		if err := c.saveAttachmentByIndex(draft.Account, draft.Mailbox, draft.ID, name, attachment.Index, path, jxaDraftMailboxHelper()+jxaDraftMessageByIDHelper(), "draftMailboxForAccount(mail, acc, false)"); err != nil {
-			return nil, err
+		var saveErr error
+		if c.nativeEnabled() {
+			saveErr = c.nativeDraftSaveAttachment(draft.Account, draft.Mailbox, draft.ID, name, attachment.Index, path)
+		} else {
+			saveErr = c.saveAttachmentByIndex(draft.Account, draft.Mailbox, draft.ID, name, attachment.Index, path, jxaDraftMailboxHelper()+jxaDraftMessageByIDHelper(), "draftMailboxForAccount(mail, acc, false)")
+		}
+		if saveErr != nil {
+			return nil, saveErr
 		}
 		info, err := os.Stat(path)
 		if err != nil {
