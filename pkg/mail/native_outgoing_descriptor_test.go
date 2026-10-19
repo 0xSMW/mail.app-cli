@@ -122,6 +122,9 @@ func (f *outgoingDescriptorFixture) get(v ae.Value) (ae.Value, error) {
 		}
 	}
 	if descriptorClass(container) == "mssg" {
+		if property == "isdl" {
+			return ae.Bool(false), nil
+		}
 		if property == "ID  " {
 			if container.Fields["form"].Code == "ID  " {
 				return container.Fields["seld"], nil
