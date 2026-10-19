@@ -132,6 +132,25 @@ func (n *nativeMail) ruleColumns(collection ae.Value, count int, label, phase st
 	return columns, nil
 }
 
+// Ordered names detect observed collection drift; separate Apple Events are not
+// an atomic snapshot. Each discovered reference is also checked before use.
+func (n *nativeMail) guardRuleOrder(expected []string, phase string) error {
+	columns, err := n.ruleColumns(ae.All("rule", ae.Null()), len(expected), "rules order", phase, "pnam")
+	if err != nil {
+		return err
+	}
+	for i, value := range columns["pnam"] {
+		name, err := nativeString(value, "rule name")
+		if err != nil {
+			return err
+		}
+		if name != expected[i] {
+			return fmt.Errorf("rules identity/order changed during listing")
+		}
+	}
+	return nil
+}
+
 func (c *Client) listNativeRules() ([]Rule, error) {
 	out := []Rule{}
 	err := c.withNativeAutomation(0, func(n *nativeMail) error {
@@ -149,6 +168,16 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 		if e != nil {
 			return e
 		}
+		names := make([]string, len(refs))
+		for i, value := range columns["pnam"] {
+			names[i], e = nativeString(value, "rule name")
+			if e != nil {
+				return e
+			}
+		}
+		if e = n.guardRuleOrder(names, "rules_order_after_columns"); e != nil {
+			return e
+		}
 		for ruleIndex, ref := range refs {
 			label := fmt.Sprintf("rule %d", ruleIndex+1)
 			f := make(map[string]ae.Value, len(codes))
@@ -163,6 +192,14 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 				if f[code].Kind != "bool" {
 					return fmt.Errorf("rule property %s unavailable", code)
 				}
+			}
+			actualName, e := n.stringProperty("pnam", ref)
+			if e != nil {
+				return fmt.Errorf("read %s identity: %w", label, e)
+			}
+			if actualName != name {
+				out = nil
+				return fmt.Errorf("%s identity/order changed during listing", label)
 			}
 			rule := Rule{Name: name, Enabled: f["isac"].Boolean}
 			var conditionList ae.Value
@@ -228,6 +265,10 @@ func (c *Client) listNativeRules() ([]Rule, error) {
 				rule.Actions = append(rule.Actions, "mark flagged")
 			}
 			out = append(out, rule)
+		}
+		if e = n.guardRuleOrder(names, "rules_order_after_walk"); e != nil {
+			out = nil
+			return e
 		}
 		return nil
 	})
