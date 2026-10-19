@@ -642,3 +642,59 @@ func TestLegacyOutgoingSaveRejectsDeletedCandidates(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyOutgoingPreparedReadinessRetriesOnlyReads(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	for _, action := range []string{"save", "send"} {
+		for _, tt := range []struct {
+			name   string
+			config map[string]any
+			ok     bool
+			reads  int
+		}{
+			{name: "transient missing deleted property recovers", config: map[string]any{"readinessMissingReads": 2}, ok: true, reads: 3},
+			{name: "persistent missing property fails closed", config: map[string]any{"readinessMissingPersistent": true}, reads: 80},
+			{name: "nonboolean after transient failure fails closed", config: map[string]any{"readinessMissingReads": 2, "readinessStatusValue": 1}, reads: 3},
+			{name: "null property is not transient absence", config: map[string]any{"readinessStatusValue": nil}, reads: 1},
+			{name: "other property error is not retried", config: map[string]any{"readinessOtherError": true}, reads: 1},
+		} {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+				payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": action, "config": tt.config})
+				command := exec.Command(node, "testdata/outgoing_mock.js")
+				command.Stdin = bytes.NewReader(payload)
+				raw, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("production script: %v %s", err, raw)
+				}
+				var got struct {
+					Response                          outgoingEnvelope
+					Saves, Sent, ReadinessStatusReads int
+					StoredDeleted                     []string
+				}
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				wantSends := 0
+				if action == "send" && tt.ok {
+					wantSends = 1
+				}
+				if got.Response.OK != tt.ok || got.Saves != 1 || got.Sent != wantSends || got.ReadinessStatusReads != tt.reads {
+					t.Fatalf("readiness retried a mutation or accepted unknown state: %s", raw)
+				}
+				if !tt.ok && (!got.Response.Saved || got.Response.Result.Submitted || len(got.StoredDeleted) > 0) {
+					t.Fatalf("unverified saved copy was not retained: %s", raw)
+				}
+				if action == "save" && tt.ok && (got.Response.Result.Draft == nil || got.Response.Result.Status != "saved") {
+					t.Fatalf("recovered saved receipt missing: %s", raw)
+				}
+				if action == "send" && tt.ok && !got.Response.Result.Submitted {
+					t.Fatalf("recovered send receipt missing: %s", raw)
+				}
+			})
+		}
+	}
+}
