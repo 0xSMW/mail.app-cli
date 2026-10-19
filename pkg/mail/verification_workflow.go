@@ -178,7 +178,7 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 				item := verified[ref.index]
 				present := false
 				err := groupErr
-				found := matches[item.Identity.fallbackKey()]
+				found := matches[item.Identity.verificationKey()]
 				if err == nil {
 					count := len(found)
 					switch count {
@@ -186,7 +186,14 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 					case 1:
 						present = true
 					default:
-						present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
+						if validRFCMessageID(item.Identity.RFCMessageID) != "" {
+							// The snapshot already checked each candidate's
+							// live header. A later singleton must not erase
+							// the ambiguity observed in this snapshot.
+							err = fmt.Errorf("stable identity is ambiguous in %s", key.mailbox)
+						} else {
+							present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
+						}
 					}
 				} else if !isVerificationTimeout(err) {
 					present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
