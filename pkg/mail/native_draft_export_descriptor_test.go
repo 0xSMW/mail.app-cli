@@ -3,6 +3,7 @@ package mail
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -158,5 +159,111 @@ func TestNativeDescriptorDraftExportPrivateHelperUsesNativeSaveAndVerifiesBytes(
 		if event.Class != "core" || (event.ID != "getd" && event.ID != "save") {
 			t.Fatalf("unexpected export mutation: %s/%s", event.Class, event.ID)
 		}
+	}
+}
+
+func TestNativeDescriptorSpecialDraftOrdinaryLookupRejectsTombstone(t *testing.T) {
+	for _, operation := range []string{"list", "save"} {
+		t.Run(operation, func(t *testing.T) {
+			f := newNativeDraftExportFixture()
+			f.draft.deleted = true
+			c, _ := nativeDraftExportClient(t, f)
+			var err error
+			if operation == "list" {
+				_, err = c.nativeAttachments("Personal", "Drafts", "15")
+			} else {
+				err = c.nativeSaveAttachment("Personal", "Drafts", "15", f.name, -1, filepath.Join(t.TempDir(), "export.bin"))
+			}
+			if !errors.Is(err, ErrNotFound) || f.saves != 0 {
+				t.Fatalf("deleted special draft accepted: err=%v saves=%d", err, f.saves)
+			}
+			for _, event := range f.events {
+				if event.ID != "getd" {
+					t.Fatalf("tombstone caused mutation: %+v", event)
+				}
+			}
+		})
+	}
+}
+
+func TestNativeDescriptorAttachmentOrdinarySameLeafRetainsPriority(t *testing.T) {
+	f := newNativeDraftExportFixture()
+	f.draft.deleted = true
+	n := &nativeMail{ctx: context.Background(), sender: func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+		ref := event.Params["----"]
+		container := ref.Fields["from"]
+		if event.Class+event.ID == "coregetd" {
+			// Resolve the ordinary indexed mailbox to its own stable reference,
+			// not the separate account-owned special Drafts reference.
+			if descriptorClass(ref) == "mbxp" && ref.Fields["seld"].Kind == "int" {
+				return ruleFixtureRef("ordinary-draftbox"), ae.Stats{}, nil
+			}
+			if container.Text == "ordinary-draftbox" {
+				switch descriptorProperty(ref) {
+				case "pnam":
+					return ae.String("Drafts"), ae.Stats{}, nil
+				case "mact":
+					return ruleFixtureRef("account"), ae.Stats{}, nil
+				case "mbxc":
+					return ruleFixtureRef("ordinary-parent"), ae.Stats{}, nil
+				}
+			}
+			if descriptorProperty(ref) == "mbxc" && descriptorClass(container) == "mbxp" && container.Fields["seld"].Kind == "int" {
+				return ruleFixtureRef("ordinary-parent"), ae.Stats{}, nil
+			}
+			if container.Text == "ordinary-parent" {
+				switch descriptorProperty(ref) {
+				case "pnam":
+					return ae.String("Archive"), ae.Stats{}, nil
+				case "mbxc":
+					return ae.Null(), ae.Stats{}, nil
+				}
+			}
+		}
+		return f.send(ctx, event)
+	}}
+	if _, err := n.attachmentMessage("Personal", "Drafts", "15"); err != nil {
+		t.Fatalf("distinct Archive/Drafts ordinary lookup lost priority: %v", err)
+	}
+	statusReads := 0
+	for _, event := range f.events {
+		if descriptorProperty(event.Params["----"]) == "isdl" {
+			statusReads++
+		}
+	}
+	if statusReads != 1 {
+		t.Fatalf("ordinary lookup applied additional special-Drafts guard: status reads=%d", statusReads)
+	}
+}
+
+func TestNativeDescriptorActiveInboxAttachmentsDoNotResolveDrafts(t *testing.T) {
+	for _, brokenDrafts := range []string{"unavailable", "ambiguous"} {
+		t.Run(brokenDrafts, func(t *testing.T) {
+			f := newNativeDraftExportFixture()
+			draftsReads := 0
+			n := &nativeMail{ctx: context.Background(), sender: func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
+				ref := event.Params["----"]
+				if event.Class+event.ID == "coregetd" && descriptorProperty(ref) == "drmb" {
+					draftsReads++
+					return ae.Value{}, ae.Stats{}, fmt.Errorf("Drafts %s", brokenDrafts)
+				}
+				value, stats, err := f.send(ctx, event)
+				if err == nil && event.Class+event.ID == "coregetd" && descriptorProperty(ref) == "pnam" {
+					if value.Kind == "string" && value.Text == "Drafts" {
+						value = ae.String("Inbox")
+					}
+					if value.Kind == "list" && len(value.Items) == 1 && value.Items[0].Kind == "string" && value.Items[0].Text == "Drafts" {
+						value = ae.List(ae.String("Inbox"))
+					}
+				}
+				return value, stats, err
+			}}
+			if _, err := n.attachmentMessage("Personal", "Inbox", "15"); err != nil {
+				t.Fatal(err)
+			}
+			if draftsReads != 0 {
+				t.Fatalf("active Inbox depended on Drafts: reads=%d", draftsReads)
+			}
+		})
 	}
 }
