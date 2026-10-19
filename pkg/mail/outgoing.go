@@ -480,7 +480,9 @@ function composeOutgoing(input, action) {
    let logicalAbsence=false;
    if(matching.length === 1) {
     try {logicalAbsence=cleanupStage('prepared_absence_exact_deleted_status',()=>preparedById(box,expected.id)) === null;}
-    catch(e) {if(e.deletedStatusFailure || e.errorNumber !== -1728)throw e;}
+    // Missing deletedStatus is not logical absence. A fresh strict ID list
+    // or a later Boolean true may still establish disappearance independently.
+    catch(e) {if(e.errorNumber !== -1728)throw e;}
    }
    cleanupStage('prepared_absence_owner_confirmation',()=>currentPreparedBox(expected));
    if(matching.length === 0 || logicalAbsence)return true;
@@ -508,7 +510,7 @@ function composeOutgoing(input, action) {
   } catch(e) {
    // Only fresh ID enumeration in the guarded account-owned Drafts mailbox
    // establishes disappearance; a missing nested read or by-ID lookup cannot.
-   if(!e.deletedStatusFailure && e.errorNumber === -1728 && preparedAbsentAfterRace(expected))return;
+   if(e.errorNumber === -1728 && preparedAbsentAfterRace(expected))return;
    throw e;
   }
  }
