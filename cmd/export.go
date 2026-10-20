@@ -42,7 +42,7 @@ func (a *application) exportMessagesWritesFile() bool {
 	return a.exportOutput != "" && a.exportOutput != "-"
 }
 
-func attachmentExportResult(saved []savedAttachment, exportOutput string, failed int, rows [][]string) output.Result {
+func attachmentExportResult(saved []savedAttachment, exportOutput string, failed int) output.Result {
 	var failure error
 	if attachmentExportFailed(failed) {
 		failure = clierr.New(clierr.CodeMutationFailed, fmt.Sprintf("failed to export %d attachment item(s)", failed))
@@ -50,8 +50,14 @@ func attachmentExportResult(saved []savedAttachment, exportOutput string, failed
 	return output.Result{
 		Data:    saved,
 		Summary: fmt.Sprintf("Saved %d attachment(s) to %s, %d failed", len(saved)-failed, exportOutput, failed),
-		Plain:   renderTable([]string{"MESSAGE", "NAME", "STATUS", "PATH"}, rows, "no attachments"),
-		Err:     clierr.Classify(failure),
+		Plain: func(p *output.Printer) {
+			rows := make([][]string, 0, len(saved))
+			for _, item := range saved {
+				rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
+			}
+			renderTable([]string{"MESSAGE", "NAME", "STATUS", "PATH"}, rows, "no attachments")(p)
+		},
+		Err: clierr.Classify(failure),
 	}
 }
 
@@ -198,11 +204,7 @@ func (a *application) buildExportCommands() {
 					saved = append(saved, item)
 				}
 			}
-			rows := make([][]string, 0, len(saved))
-			for _, item := range saved {
-				rows = append(rows, []string{item.MessageID, item.Name, item.Status, firstNonEmpty(item.Error, item.Path)})
-			}
-			return a.writer.Write(attachmentExportResult(saved, a.exportOutput, failed, rows))
+			return a.writer.Write(attachmentExportResult(saved, a.exportOutput, failed))
 		},
 	}
 
