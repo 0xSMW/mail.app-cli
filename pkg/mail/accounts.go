@@ -102,19 +102,12 @@ func (c *Client) GetAccountsJSON() ([]Account, error) {
 	}
 	c.shared.accountsMu.Unlock()
 
+	var accounts []Account
+	var err error
 	if c.nativeEnabled() {
-		accounts, err := c.nativeAccounts()
-		if err != nil {
-			return nil, err
-		}
-		c.shared.accountsMu.Lock()
-		c.shared.accounts = cloneAccounts(accounts)
-		c.shared.accountsLoaded = true
-		c.shared.accountsMu.Unlock()
-		return cloneAccounts(accounts), nil
-	}
-
-	script := `
+		accounts, err = c.nativeAccounts()
+	} else {
+		script := `
 const mail = Application('Mail');
 const accounts = mail.accounts();
 const result = [];
@@ -135,8 +128,9 @@ for (let i = 0; i < accounts.length; i++) {
 
 JSON.stringify(result);
 `
-	var accounts []Account
-	if err := c.runJXAJSON(script, defaultAutomationTimeout, "accounts", &accounts); err != nil {
+		err = c.runJXAJSON(script, defaultAutomationTimeout, "accounts", &accounts)
+	}
+	if err != nil {
 		return nil, err
 	}
 
