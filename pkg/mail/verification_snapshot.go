@@ -121,13 +121,17 @@ func (c *Client) matchVerificationSnapshot(scope identityVerificationScope, mail
 	candidates := make(map[string][]Message)
 	rfcCandidates := make(map[string][]Message)
 	for _, message := range messages {
-		if message.ID == "0" || !StableIdentityFromMessage(message).hasFallback() {
+		if message.ID == "0" {
+			return nil, fmt.Errorf("verification snapshot message lacks indexed identity")
+		}
+		identity := StableIdentityFromMessage(message)
+		if !identity.hasFallback() {
 			return nil, fmt.Errorf("verification snapshot message lacks indexed identity")
 		}
 		message.Account, message.Mailbox = scope.key.account, mailboxLeafFromURL(mailboxURL)
-		key := StableIdentityFromMessage(message).envelopeKey()
+		key := identity.envelopeKey()
 		candidates[key] = append(candidates[key], message)
-		rfcKey := StableIdentityFromMessage(message).rfcEnvelopeKey()
+		rfcKey := identity.rfcEnvelopeKey()
 		if rfcKey != "" {
 			rfcCandidates[rfcKey] = append(rfcCandidates[rfcKey], message)
 		}
