@@ -13,26 +13,18 @@ import (
 )
 
 type directArchiveAX struct {
-	trustedErr, prepareErr, archiveErr, pressErr, focusErr       error
-	guardErrAt                                                   int
-	guards, selections, presses, released, restored, focusChecks int
-	attempted, focused                                           bool
-	selectNext                                                   func(int) bool
-	onArchive, onPress                                           func()
-	onPrepare                                                    func(int64) error
-	ownedID                                                      int64
+	trustedErr, prepareErr, archiveErr, pressErr error
+	guardErrAt                                   int
+	guards, selections, presses, released        int
+	attempted                                    bool
+	selectNext                                   func(int) bool
+	onArchive, onPress                           func()
+	onPrepare                                    func(int64) error
+	ownedID                                      int64
 }
 
-func (a *directArchiveAX) Trusted() error                    { return a.trustedErr }
-func (a *directArchiveAX) FrontApplication() (string, error) { return "com.example.editor", nil }
-func (a *directArchiveAX) Restore(string) error              { a.restored++; return nil }
-func (a *directArchiveAX) OwnedFocus(id int64) (bool, error) {
-	a.ownedID = id
-	a.focusChecks++
-	return a.focused, a.focusErr
-}
+func (a *directArchiveAX) Trusted() error { return a.trustedErr }
 
-// Session's OwnedFocus method cannot overload Driver's OwnedFocus, so wrap it.
 type directArchiveSession struct{ ax *directArchiveAX }
 
 func (a *directArchiveAX) sessionPrepare(ctx context.Context, id int64) (mailax.Session, error) {
@@ -66,7 +58,7 @@ func (s *directArchiveSession) SelectNext(ctx context.Context, subject string) (
 func (s *directArchiveSession) Guard() error {
 	s.ax.guards++
 	if s.ax.guardErrAt == s.ax.guards {
-		return fmt.Errorf("Mail focus or individual selection changed")
+		return fmt.Errorf("Owned Mail tree or individual selection changed")
 	}
 	return nil
 }
@@ -84,10 +76,6 @@ func (s *directArchiveSession) Press() (bool, error) {
 		s.ax.onPress()
 	}
 	return s.ax.attempted, s.ax.pressErr
-}
-func (s *directArchiveSession) OwnedFocus() (bool, error) {
-	s.ax.focusChecks++
-	return s.ax.focused, s.ax.focusErr
 }
 func (s *directArchiveSession) Release() { s.ax.released++ }
 
@@ -244,10 +232,7 @@ func (m *directArchiveMail) send(ctx context.Context, e appleevents.Event) (appl
 	case "setd":
 		return appleevents.Null(), stats, m.setErr
 	case "actv":
-		if e.Class != "misc" || len(e.Params) != 0 {
-			return appleevents.Value{}, stats, fmt.Errorf("Mail activation must use kAEMiscStandards/kAEActivate")
-		}
-		return appleevents.Null(), stats, nil
+		return appleevents.Value{}, stats, fmt.Errorf("background archive must never activate Mail")
 	case "clos":
 		m.closed++
 		window := e.Params["----"]
@@ -282,13 +267,13 @@ func directArchiveClient(t *testing.T, m *directArchiveMail, a *directArchiveAX)
 
 func TestNativeArchiveDirectGuardsAndCleanup(t *testing.T) {
 	for _, tt := range []struct {
-		name                               string
-		setup                              func(*directArchiveMail, *directArchiveAX)
-		apply, wantError, uncertain        bool
-		created, presses, closed, restored int
+		name                        string
+		setup                       func(*directArchiveMail, *directArchiveAX)
+		apply, wantError, uncertain bool
+		created, presses, closed    int
 	}{
-		{name: "apply", apply: true, created: 1, presses: 1, closed: 1, restored: 1},
-		{name: "prepare", created: 1, closed: 1, restored: 1},
+		{name: "apply", apply: true, created: 1, presses: 1, closed: 1},
+		{name: "prepare", created: 1, closed: 1},
 		{name: "accessibility-denied", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.trustedErr = errors.New("denied") }, wantError: true},
 		{name: "non-gmail", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.host = "imap.example.test" }, wantError: true},
 		{name: "gmail-lookalike", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.host = "imap.gmail.com.example.test" }, wantError: true},
@@ -300,16 +285,16 @@ func TestNativeArchiveDirectGuardsAndCleanup(t *testing.T) {
 		}, wantError: true, uncertain: true, created: 1},
 		{name: "creation-no-dispatch", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.createErr = &appleevents.Error{Code: -1743} }, wantError: true, created: 1},
 		{name: "creation-malformed", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.malformedOwner = true }, wantError: true, uncertain: true, created: 1},
-		{name: "prepare-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.prepareErr = errors.New("owned list not ready") }, wantError: true, created: 1, closed: 1, restored: 1},
-		{name: "configuration-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.setErr = errors.New("selection unavailable") }, wantError: true, created: 1, closed: 1, restored: 1},
-		{name: "preview-visible", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.preview = true }, wantError: true, created: 1, closed: 1, restored: 1},
-		{name: "wrong-account", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.selectedAccount = "other" }, wantError: true, created: 1, closed: 1, restored: 1},
+		{name: "prepare-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.prepareErr = errors.New("owned list not ready") }, wantError: true, created: 1, closed: 1},
+		{name: "configuration-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.setErr = errors.New("selection unavailable") }, wantError: true, created: 1, closed: 1},
+		{name: "preview-visible", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.preview = true }, wantError: true, created: 1, closed: 1},
+		{name: "wrong-account", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.selectedAccount = "other" }, wantError: true, created: 1, closed: 1},
 		{name: "wrong-mailbox", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			a.selectNext = func(i int) bool { m.selectedMailbox = "Archive"; return true }
-		}, wantError: true, created: 1, closed: 1, restored: 1},
+		}, wantError: true, created: 1, closed: 1},
 		{name: "wrong-message", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			m.selected = appleevents.ByID("mssg", appleevents.Int(8), m.box)
-		}, wantError: true, created: 1, closed: 1, restored: 1},
+		}, wantError: true, created: 1, closed: 1},
 		{name: "same-subject-candidate", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			a.selectNext = func(i int) bool {
 				if i == 1 {
@@ -319,28 +304,26 @@ func TestNativeArchiveDirectGuardsAndCleanup(t *testing.T) {
 				}
 				return i <= 2
 			}
-		}, created: 1, presses: 1, closed: 1, restored: 1},
-		{name: "conversation-or-focus", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.guardErrAt = 1 }, wantError: true, created: 1, closed: 1, restored: 1},
-		{name: "late-focus", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.guardErrAt = 4 }, wantError: true, created: 1, closed: 1, restored: 1},
+		}, created: 1, presses: 1, closed: 1},
+		{name: "conversation-or-ownership", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.guardErrAt = 1 }, wantError: true, created: 1, closed: 1},
+		{name: "late-ownership", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.guardErrAt = 4 }, wantError: true, created: 1, closed: 1},
 		{name: "late-selection", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			a.onArchive = func() { m.selected = appleevents.ByID("mssg", appleevents.Int(8), m.box) }
-		}, wantError: true, created: 1, closed: 1, restored: 1},
+		}, wantError: true, created: 1, closed: 1},
 		{name: "ambiguous-or-disabled-control", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			a.archiveErr = errors.New("ambiguous Archive AXIdentifier")
-		}, wantError: true, created: 1, closed: 1, restored: 1},
+		}, wantError: true, created: 1, closed: 1},
 		{name: "press-guard-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) {
 			a.attempted = false
-			a.pressErr = errors.New("focus changed")
-		}, wantError: true, created: 1, closed: 1, restored: 1},
-		{name: "press-uncertain", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.pressErr = errors.New("AXPress failed") }, wantError: true, uncertain: true, created: 1, presses: 1, closed: 1, restored: 1},
+			a.pressErr = errors.New("owned Mail control changed")
+		}, wantError: true, created: 1, closed: 1},
+		{name: "press-uncertain", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.pressErr = errors.New("AXPress failed") }, wantError: true, uncertain: true, created: 1, presses: 1, closed: 1},
 		{name: "cleanup-failure", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { m.closeErr = errors.New("close failed") }, wantError: true, uncertain: true, created: 1, presses: 1, closed: 1},
 		{name: "cleanup-still-open", setup: func(m *directArchiveMail, a *directArchiveAX) { m.remains = true }, wantError: true, uncertain: true, created: 1, closed: 1},
-		{name: "focus-check-failure-still-closes", setup: func(m *directArchiveMail, a *directArchiveAX) { a.focusErr = errors.New("AX no longer available") }, wantError: true, uncertain: true, created: 1, closed: 1},
-		{name: "user-changed-focus", apply: true, setup: func(m *directArchiveMail, a *directArchiveAX) { a.focused = false }, created: 1, presses: 1, closed: 1},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			m := newDirectArchiveMail()
-			a := &directArchiveAX{attempted: true, focused: true}
+			a := &directArchiveAX{attempted: true}
 			if tt.setup != nil {
 				tt.setup(m, a)
 			}
@@ -349,8 +332,8 @@ func TestNativeArchiveDirectGuardsAndCleanup(t *testing.T) {
 			if (err != nil) != tt.wantError || errors.As(err, &uncertain) != tt.uncertain {
 				t.Fatalf("error=%v uncertain=%v, want error=%v uncertain=%v", err, uncertain, tt.wantError, tt.uncertain)
 			}
-			if m.created != tt.created || a.presses != tt.presses || m.closed != tt.closed || a.restored != tt.restored {
-				t.Fatalf("created/pressed/closed/restored=%d/%d/%d/%d, want %d/%d/%d/%d", m.created, a.presses, m.closed, a.restored, tt.created, tt.presses, tt.closed, tt.restored)
+			if m.created != tt.created || a.presses != tt.presses || m.closed != tt.closed {
+				t.Fatalf("created/pressed/closed=%d/%d/%d, want %d/%d/%d", m.created, a.presses, m.closed, tt.created, tt.presses, tt.closed)
 			}
 			if m.closed > 0 && m.closedID != 42 {
 				t.Fatalf("cleanup touched unowned viewer %d", m.closedID)
@@ -371,7 +354,7 @@ func TestNativeArchiveDirectCancellationNeverReplays(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			m := newDirectArchiveMail()
-			a := &directArchiveAX{attempted: true, focused: true}
+			a := &directArchiveAX{attempted: true}
 			if afterPress {
 				a.onPress = cancel
 			} else {
@@ -427,7 +410,7 @@ func TestNativeArchiveDirectAccountProbeAndPreflight(t *testing.T) {
 
 func TestNativeArchiveDirectPressDeadlinePreservesUncertainty(t *testing.T) {
 	m := newDirectArchiveMail()
-	a := &directArchiveAX{attempted: true, focused: true, pressErr: context.DeadlineExceeded}
+	a := &directArchiveAX{attempted: true, pressErr: context.DeadlineExceeded}
 	err := directArchiveClient(t, m, a).runNativeArchive("Test", "7", true)
 	var uncertain *NativeArchiveError
 	if !errors.Is(err, context.DeadlineExceeded) || !errors.As(err, &uncertain) {
@@ -438,28 +421,29 @@ func TestNativeArchiveDirectPressDeadlinePreservesUncertainty(t *testing.T) {
 	}
 }
 
-func TestNativeArchiveDirectActivationPrecedesOwnedAXPreparation(t *testing.T) {
+func TestNativeArchiveDirectPreparesOwnedViewerWithoutActivation(t *testing.T) {
 	m := newDirectArchiveMail()
-	a := &directArchiveAX{attempted: true, focused: true}
+	a := &directArchiveAX{attempted: true}
 	prepared := false
 	a.onPrepare = func(id int64) error {
 		prepared = true
 		if id != 42 || len(m.events) < 2 {
 			return fmt.Errorf("AX preparation lacks an owned visible viewer")
 		}
-		activate := m.events[len(m.events)-1]
-		visible := m.events[len(m.events)-2]
-		if activate.Class != "misc" || activate.ID != "actv" || len(activate.Params) != 0 {
-			return fmt.Errorf("AX preparation preceded raw Mail activation")
-		}
+		visible := m.events[len(m.events)-1]
 		property := visible.Params["----"]
 		if visible.Class != "core" || visible.ID != "setd" || property.Fields["seld"].Code != "pvis" || !visible.Params["data"].Boolean || property.Fields["from"].Fields["from"].Fields["seld"].Number != 42 {
-			return fmt.Errorf("activation did not follow owned window visibility")
+			return fmt.Errorf("AX preparation did not follow owned window visibility")
 		}
 		return nil
 	}
 	if err := directArchiveClient(t, m, a).runNativeArchive("Test", "7", false); err != nil {
 		t.Fatal(err)
+	}
+	for _, event := range m.events {
+		if event.Class == "misc" && event.ID == "actv" {
+			t.Fatal("background archive activated Mail")
+		}
 	}
 	if !prepared || a.presses != 0 || m.closedID != 42 {
 		t.Fatalf("prepared=%v presses=%d closedID=%d", prepared, a.presses, m.closedID)
