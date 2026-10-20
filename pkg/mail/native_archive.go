@@ -321,7 +321,9 @@ function archiveButton() {
     collectButtons(toolbars[0],0);
     if (buttons.length !== 1 || ax(buttons[0],'AXEnabled') !== true) throw Error('Owned Mail Archive button is unavailable');
     const actions = Ref();
-    if ($.AXUIElementCopyActionNames(buttons[0],actions) !== 0 || !(ObjC.unwrap(actions[0]) || []).includes('AXPress')) throw Error('Owned Mail Archive button cannot be pressed');
+    const actionStatus = $.AXUIElementCopyActionNames(buttons[0],actions);
+    const actionNames = actionStatus === 0 ? ObjC.deepUnwrap(actions[0]) : null;
+    if (!Array.isArray(actionNames) || !actionNames.includes('AXPress')) throw Error('Owned Mail Archive button cannot be pressed');
     return buttons[0];
 }
 const button = archiveButton();
