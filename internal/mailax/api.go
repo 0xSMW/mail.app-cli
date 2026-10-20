@@ -4,14 +4,11 @@ package mailax
 
 import "context"
 
-// Driver is injectable so selection, focus changes, and uncertain presses can be
+// Driver is injectable so selection, ownership changes, and uncertain presses can be
 // exercised without opening Mail or performing an archive action.
 type Driver interface {
 	Trusted() error
-	FrontApplication() (string, error)
 	Prepare(context.Context, int64) (Session, error)
-	OwnedFocus(int64) (bool, error)
-	Restore(string) error
 }
 
 // Session retains only the owned viewer and its message list. SelectNext chooses
@@ -24,6 +21,5 @@ type Session interface {
 	// Press returns true only after AXPress may have been dispatched. A failure
 	// after that point requires reconciliation and must never be retried.
 	Press() (attempted bool, err error)
-	OwnedFocus() (bool, error)
 	Release()
 }
