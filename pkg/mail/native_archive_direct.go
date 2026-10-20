@@ -184,13 +184,6 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 	if err != nil {
 		return err
 	}
-	previous, err := driver.FrontApplication()
-	if err != nil {
-		return err
-	}
-	if previous == "" {
-		return fmt.Errorf("cannot identify the previous foreground application")
-	}
 	if err = n.ctx.Err(); err != nil {
 		return err
 	}
@@ -220,7 +213,7 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 		defer cancel()
 		cleanup := *n
 		cleanup.ctx = ctx
-		cleanupErr := cleanup.cleanupArchiveViewer(viewerID, viewer, session, driver, previous)
+		cleanupErr := cleanup.cleanupArchiveViewer(viewerID, viewer)
 		if session != nil {
 			session.Release()
 		}
@@ -237,11 +230,6 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 		return err
 	}
 	if err = n.set(appleevents.Property("pvis", appleevents.Property("cwin", viewer)), appleevents.Bool(true)); err != nil {
-		return err
-	}
-	// Public kAEMiscStandards/kAEActivate activates Mail before the AX bridge
-	// waits for this viewer's exact window to become stably focused.
-	if _, err = n.command("misc", "actv", nil); err != nil {
 		return err
 	}
 	session, err = driver.Prepare(n.ctx, viewerID)
@@ -320,7 +308,7 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 	return nil
 }
 
-func (n *nativeMail) cleanupArchiveViewer(viewerID int64, viewer appleevents.Value, session mailax.Session, driver mailax.Driver, previous string) error {
+func (n *nativeMail) cleanupArchiveViewer(viewerID int64, viewer appleevents.Value) error {
 	ids, err := n.archiveViewerIDs()
 	if err != nil {
 		return err
@@ -328,25 +316,15 @@ func (n *nativeMail) cleanupArchiveViewer(viewerID int64, viewer appleevents.Val
 	if !ids[viewerID] {
 		return nil
 	}
-	ownedFocus := false
-	var focusErr error
-	if session != nil {
-		ownedFocus, focusErr = session.OwnedFocus()
-	} else {
-		ownedFocus, focusErr = driver.OwnedFocus(viewerID)
-	}
 	if _, err = n.command("core", "clos", map[string]appleevents.Value{"----": appleevents.Property("cwin", viewer), "savo": appleevents.Enum("no  ")}); err != nil {
-		return errors.Join(focusErr, err)
+		return err
 	}
 	ids, err = n.archiveViewerIDs()
 	if err != nil {
-		return errors.Join(focusErr, err)
+		return err
 	}
 	if ids[viewerID] {
-		return errors.Join(focusErr, fmt.Errorf("owned Mail viewer remains open"))
+		return fmt.Errorf("owned Mail viewer remains open")
 	}
-	if focusErr == nil && ownedFocus && previous != "com.apple.mail" {
-		return errors.Join(focusErr, driver.Restore(previous))
-	}
-	return focusErr
+	return nil
 }
