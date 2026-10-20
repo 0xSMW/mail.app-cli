@@ -472,10 +472,11 @@ cover Mail's local state; they do not certify server-side labels or future state
 
 Archiving from a Gmail Inbox to All Mail uses Mail's native Archive control.
 Grant Accessibility access to the application running `mail-app-cli` in macOS
-System Settings. The command briefly opens a separate Mail window with its
-preview hidden, selects and checks the individual message, then closes that
-window. If it cannot establish the exact selection or Mail's focus changes,
-the command stops before archiving. Conversation rows that cannot be selected
+System Settings. The command briefly opens a separate Mail window in the
+background with its preview hidden, selects and checks the individual message,
+then closes that window. It does not activate Mail or restore another app's
+focus afterward. If it cannot establish the exact owned window, selection, and
+Archive button, the command stops before archiving. Conversation rows that cannot be selected
 as an individual message require archiving in Mail directly. An uncertain
 Archive response stops the batch; reconcile its receipt before taking further
 action. All mailbox changes continue to go through Mail.
