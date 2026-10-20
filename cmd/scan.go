@@ -26,22 +26,22 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 			if limit < 0 {
 				return clierr.Usage("--limit must be non-negative")
 			}
-			preflightScopes := make([]mail.SearchMailbox, len(args))
+			scopes := make([]mail.SearchMailbox, len(args))
 			for i, box := range args {
-				preflightScopes[i] = mail.SearchMailbox{Account: "validation", Mailbox: box}
+				scopes[i] = mail.SearchMailbox{Account: "validation", Mailbox: box}
 			}
-			if err := mail.ValidateScanRequest(mail.ScanRequest{Scopes: preflightScopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint}); err != nil {
+			request := mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint}
+			if err := mail.ValidateScanRequest(request); err != nil {
 				return clierr.Usage(err.Error())
 			}
 			account, err := a.requireAccount()
 			if err != nil {
 				return err
 			}
-			scopes := make([]mail.SearchMailbox, len(args))
-			for i, mailbox := range args {
-				scopes[i] = mail.SearchMailbox{Account: account, Mailbox: mailbox}
+			for i := range request.Scopes {
+				request.Scopes[i].Account = account
 			}
-			result, err := a.mailClient.ScanMessages(mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint})
+			result, err := a.mailClient.ScanMessages(request)
 			if errors.Is(err, mail.ErrInvalidScanCursor) || errors.Is(err, mail.ErrInvalidScanCheckpoint) {
 				return clierr.Usage(err.Error())
 			}
