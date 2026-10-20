@@ -3,13 +3,18 @@ package mail
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/0xSMW/mail.app-cli/v3/internal/mailindex"
 )
 
 type indexMailbox struct {
@@ -41,12 +46,66 @@ type indexMessage struct {
 }
 
 func mailEnvelopeIndexPath() (string, error) {
+	if override := os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"); override != "" {
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("MAIL_APP_CLI_ENVELOPE_INDEX_PATH must be absolute")
+		}
+		return override, nil
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, "Library", "Mail", "V10", "MailData", "Envelope Index"), nil
+	return discoverEnvelopeIndexPath(filepath.Join(home, "Library", "Mail"))
 }
+
+func discoverEnvelopeIndexPath(root string) (string, error) {
+	fallback := filepath.Join(root, "V10", "MailData", "Envelope Index")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fallback, nil
+		}
+		return "", fmt.Errorf("discover Mail index: %w", err)
+	}
+	type version struct {
+		number int
+		name   string
+	}
+	var versions []version
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "V") {
+			continue
+		}
+		digits := strings.TrimPrefix(entry.Name(), "V")
+		n, err := strconv.Atoi(digits)
+		if err == nil && n > 0 && strconv.Itoa(n) == digits {
+			versions = append(versions, version{n, entry.Name()})
+		}
+	}
+	sort.Slice(versions, func(i, j int) bool { return versions[i].number > versions[j].number })
+	for _, v := range versions {
+		path := filepath.Join(root, v.name, "MailData", "Envelope Index")
+		info, err := os.Stat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", fmt.Errorf("inspect Mail index: %w", err)
+		}
+		if info.Mode().IsRegular() {
+			return path, nil
+		}
+	}
+	return fallback, nil
+}
+
+// Native errors must retain their cause without triggering the historical
+// automation fallback for permissions or a damaged/unsupported schema.
+type nativeIndexError struct{ err error }
+
+func (e *nativeIndexError) Error() string { return e.err.Error() }
+func (e *nativeIndexError) Unwrap() error { return e.err }
 
 func sqlQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
@@ -67,9 +126,9 @@ func mailboxLeafFromURL(rawURL string) string {
 	if idx := strings.LastIndex(leaf, "/"); idx >= 0 {
 		leaf = leaf[idx+1:]
 	}
-	leaf = strings.ReplaceAll(leaf, "%20", " ")
-	leaf = strings.ReplaceAll(leaf, "%5B", "[")
-	leaf = strings.ReplaceAll(leaf, "%5D", "]")
+	if decoded, err := url.PathUnescape(leaf); err == nil {
+		leaf = decoded
+	}
 	return leaf
 }
 
@@ -100,6 +159,10 @@ func isEnvelopeIndexUnavailable(err error) bool {
 	if err == nil {
 		return false
 	}
+	var nativeErr *nativeIndexError
+	if errors.As(err, &nativeErr) {
+		return errors.Is(nativeErr.err, os.ErrNotExist)
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "executable file not found") ||
 		strings.Contains(msg, "no such file") ||
@@ -119,6 +182,16 @@ func (c *Client) warnEnvelopeIndexFallback(err error) {
 	})
 }
 
+// envelopeIndexReadError applies the historical read fallback only to eligible
+// failures; native permission and schema errors retain their original cause.
+func (c *Client) envelopeIndexReadError(err error) error {
+	if isEnvelopeIndexUnavailable(err) {
+		c.warnEnvelopeIndexFallback(err)
+		return nil
+	}
+	return err
+}
+
 func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	if os.Getenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX") != "" {
 		return fmt.Errorf("envelope index disabled")
@@ -126,7 +199,20 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 
 	indexPath, err := mailEnvelopeIndexPath()
 	if err != nil {
+		if c.nativeEnabled() {
+			return &nativeIndexError{err}
+		}
 		return err
+	}
+	if c.nativeEnabled() {
+		out, err := mailindex.Query(c.Context(), indexPath, query)
+		if err != nil {
+			return &nativeIndexError{err}
+		}
+		if err := json.Unmarshal(out, v); err != nil {
+			return &nativeIndexError{fmt.Errorf("failed to parse envelope index JSON: %w", err)}
+		}
+		return nil
 	}
 	cmd := exec.CommandContext(c.Context(), "sqlite3", "-readonly", "-json", indexPath, query)
 	// Combined verification scopes can exceed the OS argument-size limit.
@@ -139,6 +225,8 @@ func (c *Client) runEnvelopeIndexQuery(query string, v any) error {
 	var stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
+	started := time.Now()
+	defer func() { recordLegacySQLiteProcess(time.Since(started)) }()
 	if err := cmd.Run(); err != nil {
 		if ctxErr := c.Context().Err(); ctxErr != nil {
 			// The caller's context ended the query; keep that classifiable.
@@ -163,13 +251,46 @@ func (c *Client) CheckEnvelopeIndex() error {
 }
 
 func indexMailboxURLPattern(accountID, mailboxName string) string {
-	escapedName := strings.ReplaceAll(mailboxName, " ", "%20")
-	escapedName = strings.ReplaceAll(escapedName, "[", "%5B")
-	escapedName = strings.ReplaceAll(escapedName, "]", "%5D")
+	escapedName := escapeMailboxURLPath(mailboxName)
 	if isArchiveAlias(mailboxName) {
 		escapedName = "%5BGmail%5D/All%20Mail"
 	}
 	return fmt.Sprintf("imap://%s/%s", accountID, escapedName)
+}
+
+// Match the complete authority in each indexed URL rather than assuming an
+// account's provider scheme. Comparing the authority with = keeps account IDs
+// case-sensitive and treats LIKE wildcards in an ID literally.
+func indexAccountMailboxCondition(accountID string) string {
+	if accountID == "" {
+		return "0"
+	}
+	authority := "substr(url, instr(url, '://') + 3)"
+	return fmt.Sprintf("instr(url, '://') > 1 and substr(%s, 1, instr(%s, '/') - 1) = %s collate binary",
+		authority, authority, sqlQuote(accountID))
+}
+
+// Use the same ranked selection for normal reads and verification snapshots.
+// The scheme comes from each row, so mixed schemes and subsequent index updates
+// do not require a cached account-to-scheme mapping.
+func indexMailboxSelect(accountID, mailbox string, counts bool) string {
+	projection := "ROWID as ID, url as URL"
+	if counts {
+		projection += ", total_count, unread_count"
+	}
+	return indexMailboxCandidateSelect(accountID, mailbox, projection)
+}
+
+func indexMailboxPath(accountID string) string {
+	return fmt.Sprintf("substr(url, instr(url, '://') + 3 + length(%s))", sqlQuote(accountID+"/"))
+}
+
+func escapeMailboxURLPath(name string) string {
+	components := strings.Split(name, "/")
+	for i := range components {
+		components[i] = url.PathEscape(components[i])
+	}
+	return strings.Join(components, "/")
 }
 
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
@@ -182,73 +303,22 @@ func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMai
 		return nil, false, err
 	}
 
-	urlPattern := indexMailboxURLPattern(account.ID, mailboxName)
-	query := fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s
-limit 1;
-`, sqlQuote(urlPattern))
-
-	var rows []struct {
-		ID          int
-		URL         string
-		TotalCount  int
-		UnreadCount int
+	exact := indexMailboxExactCondition(account.ID, mailboxName)
+	var rows []indexMailbox
+	if err := c.queryIndexMailboxCandidate(exact, &rows); err != nil {
+		return nil, false, c.envelopeIndexReadError(err)
 	}
-	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if isEnvelopeIndexUnavailable(err) {
-			c.warnEnvelopeIndexFallback(err)
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	// "Archive" is provider-ambiguous. An exact Gmail system mailbox wins,
-	// but a literal Archive must beat the broad nested All Mail fallback so an
-	// iCloud/IMAP account cannot verify against an unrelated mailbox.
 	if len(rows) == 0 && normalizeMailboxAlias(mailboxName) == "archive" {
-		literalURL := "imap://" + account.ID + "/Archive"
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url = %s or url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote(literalURL), sqlQuote("imap://"+account.ID+"/%/Archive"), sqlQuote(literalURL))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
+		literal, nested := indexMailboxArchiveConditions(account.ID)
+		predicate := literal + " or " + nested + "\norder by case when " + literal + " then 0 else 1 end, ROWID"
+		if err := c.queryIndexMailboxCandidate(predicate, &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
 		}
 	}
 	if len(rows) == 0 {
-		query = fmt.Sprintf(`
-select
-	ROWID as ID,
-	url as URL,
-	total_count as TotalCount,
-	unread_count as UnreadCount
-from mailboxes
-where url like %s
-order by case when url = %s then 0 else 1 end, ROWID
-limit 1;
-`, sqlQuote("imap://"+account.ID+"/%/"+escapedMailboxLeaf(mailboxName)), sqlQuote(indexMailboxURLPattern(account.ID, mailboxName)))
-		if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-			if isEnvelopeIndexUnavailable(err) {
-				c.warnEnvelopeIndexFallback(err)
-				return nil, false, nil
-			}
-			return nil, false, err
+		predicate := indexMailboxBroadCondition(account.ID, mailboxName) + "\norder by case when " + exact + " then 0 else 1 end, ROWID"
+		if err := c.queryIndexMailboxCandidate(predicate, &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
 		}
 	}
 	if len(rows) == 0 {
@@ -265,10 +335,22 @@ limit 1;
 	return mbox, true, nil
 }
 
+func (c *Client) queryIndexMailboxCandidate(predicate string, rows *[]indexMailbox) error {
+	query := fmt.Sprintf(`
+select
+	ROWID as ID,
+	url as URL,
+	total_count as TotalCount,
+	unread_count as UnreadCount
+from mailboxes
+where %s
+limit 1;
+`, predicate)
+	return c.runEnvelopeIndexQuery(query, rows)
+}
+
 func escapedMailboxLeaf(mailboxName string) string {
-	escapedName := strings.ReplaceAll(mailboxName, " ", "%20")
-	escapedName = strings.ReplaceAll(escapedName, "[", "%5B")
-	escapedName = strings.ReplaceAll(escapedName, "]", "%5D")
+	escapedName := escapeMailboxURLPath(mailboxName)
 	if isArchiveAlias(mailboxName) {
 		return "All%20Mail"
 	}
@@ -283,17 +365,13 @@ select
 	total_count as TotalCount,
 	unread_count as UnreadCount
 from mailboxes
-where url like %s
+where %s
 order by url;
-`, sqlQuote("imap://"+account.ID+"/%"))
+`, indexAccountMailboxCondition(account.ID))
 
 	var rows []indexMailbox
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		if isEnvelopeIndexUnavailable(err) {
-			c.warnEnvelopeIndexFallback(err)
-			return nil, false, nil
-		}
-		return nil, false, err
+		return nil, false, c.envelopeIndexReadError(err)
 	}
 	if len(rows) == 0 {
 		return nil, false, nil
@@ -315,24 +393,28 @@ order by url;
 	return mailboxes, true, nil
 }
 
+func (row indexMessage) message() Message {
+	return Message{
+		ID:           strconv.FormatInt(row.ID, 10),
+		Subject:      row.Subject,
+		Sender:       row.Sender,
+		DateSent:     row.DateSent,
+		DateReceived: row.DateReceived,
+		Read:         row.Read != 0,
+		Flagged:      row.Flagged != 0,
+		Deleted:      row.Deleted != 0,
+		MessageSize:  row.MessageSize,
+		Content:      row.Content,
+		Snippet:      row.Snippet,
+		Mailbox:      row.Mailbox,
+		Account:      row.Account,
+	}
+}
+
 func indexMessagesToMessages(rows []indexMessage) []Message {
 	messages := make([]Message, 0, len(rows))
 	for _, row := range rows {
-		messages = append(messages, Message{
-			ID:           strconv.FormatInt(row.ID, 10),
-			Subject:      row.Subject,
-			Sender:       row.Sender,
-			DateSent:     row.DateSent,
-			DateReceived: row.DateReceived,
-			Read:         row.Read != 0,
-			Flagged:      row.Flagged != 0,
-			Deleted:      row.Deleted != 0,
-			MessageSize:  row.MessageSize,
-			Content:      row.Content,
-			Snippet:      row.Snippet,
-			Mailbox:      row.Mailbox,
-			Account:      row.Account,
-		})
+		messages = append(messages, row.message())
 	}
 	return messages
 }
@@ -355,6 +437,10 @@ func parseSinceUnix(since string) (int64, bool, error) {
 	return 0, false, fmt.Errorf("invalid --since date %q", since)
 }
 
+// Mail stores the literal reply/forward prefix separately from the base
+// subject. Preserve its exact text everywhere an indexed subject is observed.
+const indexSubjectExpression = "(coalesce(m.subject_prefix, '') || coalesce(s.subject, ''))"
+
 const indexMessageFrom = `
 from messages m
 join subjects s on s.ROWID = m.subject
@@ -368,7 +454,7 @@ func buildIndexMessageSelect(accountName, mailboxName string) string {
 select
 	m.ROWID as ID,
 	coalesce(m.date_received, 0) as ReceivedUnix,
-	coalesce(s.subject, '') as Subject,
+	`+indexSubjectExpression+` as Subject,
 	case
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
 		else a.comment || ' <' || a.address || '>'
@@ -393,25 +479,37 @@ func indexMailboxMembershipCondition(mbox *indexMailbox) string {
 		return "m.mailbox = " + strconv.Itoa(mbox.ID)
 	}
 	mailboxID := strconv.Itoa(mbox.ID)
-	return "(m.mailbox = " + mailboxID + " or exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + mailboxID + "))"
+	return "(m.mailbox = " + mailboxID + " or " + indexLabelMembershipCondition(mailboxID) + ")"
 }
 
-func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+func indexLabelMembershipCondition(mailboxID string) string {
+	return "exists (select 1 from labels l where l.message_id = m.ROWID and l.mailbox_id = " + mailboxID + ")"
+}
+
+func indexMessageFilterConditions(unread, flagged bool, since string) ([]string, error) {
 	sinceUnix, hasSince, err := parseSinceUnix(since)
 	if err != nil {
 		return nil, err
 	}
 	var where []string
-	where = append(where, "m.deleted = 0", indexMailboxMembershipCondition(mbox))
-	if unreadOnly {
+	if unread {
 		where = append(where, "m.read = 0")
 	}
-	if flaggedOnly {
+	if flagged {
 		where = append(where, "m.flagged != 0")
 	}
 	if hasSince {
 		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
 	}
+	return where, nil
+}
+
+func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, limit, offset int, unreadOnly, flaggedOnly bool, since string) ([]Message, error) {
+	where, err := indexMessageFilterConditions(unreadOnly, flaggedOnly, since)
+	if err != nil {
+		return nil, err
+	}
+	where = append([]string{"m.deleted = 0", indexMailboxMembershipCondition(mbox)}, where...)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + "\nwhere " + strings.Join(where, " and ") + "\norder by m.date_received desc"
 	if limit > 0 {
 		query += "\nlimit " + strconv.Itoa(limit)
@@ -446,11 +544,11 @@ limit 1;
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	messages := indexMessagesToMessages(rows)
-	if len(messages) == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
-	return &messages[0], nil
+	message := rows[0].message()
+	return &message, nil
 }
 
 // getMessageEnvelopesForVerification reads every requested local message ID
@@ -482,47 +580,12 @@ where %s
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	messages := indexMessagesToMessages(rows)
-	byID := make(map[string]Message, len(messages))
-	for _, message := range messages {
+	byID := make(map[string]Message, len(rows))
+	for _, row := range rows {
+		message := row.message()
 		byID[message.ID] = message
 	}
 	return byID, nil
-}
-
-// getIdentityMatchesForVerification finds the live rows matching each stable
-// identity in one mailbox, keyed by the identity's fallback key. A message
-// regenerated under a new local ID is found by this lookup.
-func (c *Client) getIdentityMatchesForVerification(accountName, mailboxName string, identities []StableIdentity) (map[string][]Message, error) {
-	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, fmt.Errorf("mailbox unavailable in Envelope Index: %s", mailboxName)
-	}
-	conditions, err := indexIdentityConditions(identities)
-	if err != nil {
-		return nil, err
-	}
-	if len(conditions) == 0 {
-		return map[string][]Message{}, nil
-	}
-	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
-where %s
-	and m.deleted = 0
-	and (%s);
-`, indexMailboxMembershipCondition(mbox), strings.Join(conditions, " or "))
-	var rows []indexMessage
-	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
-		return nil, err
-	}
-	matches := make(map[string][]Message, len(rows))
-	for _, message := range indexMessagesToMessages(rows) {
-		key := StableIdentityFromMessage(message).fallbackKey()
-		matches[key] = append(matches[key], message)
-	}
-	return matches, nil
 }
 
 func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
@@ -532,15 +595,28 @@ func indexIdentityConditions(identities []StableIdentity) ([]string, error) {
 		if !identity.hasFallback() {
 			return nil, fmt.Errorf("stable identity lacks complete indexed metadata")
 		}
-		key := identity.fallbackKey()
+		key := identity.verificationKey()
 		if seen[key] {
 			continue
 		}
 		seen[key] = true
-		conditions = append(conditions, fmt.Sprintf(`(coalesce(s.subject, '') = %s
-		and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
-		and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
-		and m.size = %d)`, sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize))
+		senderCondition := "(case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = " + sqlQuote(identity.Sender)
+		rfc := validRFCMessageID(identity.RFCMessageID)
+		if rfc != "" {
+			address := stableSenderAddress(identity.Sender)
+			if address == "" {
+				return nil, fmt.Errorf("RFC stable identity lacks a valid sender address")
+			}
+			senderCondition = "lower(coalesce(a.address, '')) = " + sqlQuote(address)
+		}
+		condition := fmt.Sprintf(`(`+indexSubjectExpression+` = %s
+        and %s
+        and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s`, sqlQuote(identity.Subject), senderCondition, sqlQuote(canonicalIdentityDate(identity.DateSent)))
+		// A confirmed RFC header tolerates server reserialization changing size.
+		if rfc == "" {
+			condition += fmt.Sprintf(" and m.size = %d", identity.MessageSize)
+		}
+		conditions = append(conditions, condition+")")
 	}
 	return conditions, nil
 }
@@ -550,7 +626,7 @@ func indexSearchTermConditions(terms []string) []string {
 	for _, term := range terms {
 		needle := sqlQuote(escapeSQLLikePattern(term))
 		conditions = append(conditions, fmt.Sprintf(`(
-		lower(coalesce(s.subject, '')) like '%%' || %s || '%%' escape '\'
+		lower(`+indexSubjectExpression+`) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.comment, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(a.address, '')) like '%%' || %s || '%%' escape '\'
 		or lower(coalesce(su.summary, '')) like '%%' || %s || '%%' escape '\'
@@ -564,17 +640,11 @@ func indexSearchTermConditions(terms []string) []string {
 // resumes the traversal without an offset, so mail arriving between pages
 // cannot shift a row across a page boundary.
 func (c *Client) scanMessagesFromIndex(accountName string, mbox *indexMailbox, req ScanRequest, limit int, after *ScanPosition) (scanPage, error) {
-	sinceUnix, hasSince, err := parseSinceUnix(req.Since)
+	where, err := indexMessageFilterConditions(req.Unread, false, req.Since)
 	if err != nil {
 		return scanPage{}, err
 	}
-	where := []string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}
-	if req.Unread {
-		where = append(where, "m.read = 0")
-	}
-	if hasSince {
-		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
-	}
+	where = append([]string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}, where...)
 	where = append(where, indexSearchTermConditions(searchTerms(req.Query))...)
 	if after != nil {
 		where = append(where, fmt.Sprintf("(coalesce(m.date_received, 0) < %d or (coalesce(m.date_received, 0) = %d and m.ROWID < %d))", after.ReceivedUnix, after.ReceivedUnix, after.ID))
@@ -619,16 +689,11 @@ func (c *Client) searchMessagesFromIndex(queryText, accountName string, mbox *in
 	if len(terms) == 0 {
 		return []Message{}, nil
 	}
-	sinceUnix, hasSince, err := parseSinceUnix(since)
+	where, err := indexMessageFilterConditions(false, false, since)
 	if err != nil {
 		return nil, err
 	}
-	membership := indexMailboxMembershipCondition(mbox)
-	var where []string
-	where = append(where, membership, "m.deleted = 0")
-	if hasSince {
-		where = append(where, "m.date_received >= "+strconv.FormatInt(sinceUnix, 10))
-	}
+	where = append([]string{indexMailboxMembershipCondition(mbox), "m.deleted = 0"}, where...)
 	where = append(where, indexSearchTermConditions(terms)...)
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
@@ -641,4 +706,48 @@ limit %d;
 		return nil, err
 	}
 	return indexMessagesToMessages(rows), nil
+}
+
+type indexMailboxCandidates struct{ exact, literal, nested, broad string }
+
+// indexMailboxPreference keeps Archive's provider ambiguity explicit. An exact
+// Gmail mailbox wins, then literal/nested Archive, then the broad nested leaf.
+func indexMailboxPreference(accountID, mailbox string) indexMailboxCandidates {
+	preference := indexMailboxCandidates{
+		exact: indexMailboxExactCondition(accountID, mailbox),
+		broad: indexMailboxBroadCondition(accountID, mailbox),
+	}
+	if normalizeMailboxAlias(mailbox) == "archive" {
+		preference.literal, preference.nested = indexMailboxArchiveConditions(accountID)
+	}
+	return preference
+}
+
+func indexMailboxExactCondition(accountID, mailbox string) string {
+	exact := strings.TrimPrefix(indexMailboxURLPattern(accountID, mailbox), "imap://"+accountID+"/")
+	comparison := indexMailboxPath(accountID) + " = " + sqlQuote(exact)
+	if strings.EqualFold(mailbox, "INBOX") {
+		comparison += " collate nocase"
+	}
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + comparison + ")"
+}
+
+func indexMailboxBroadCondition(accountID, mailbox string) string {
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(escapedMailboxLeaf(mailbox))) + ` escape '\')`
+}
+
+func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
+	prefix := "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID)
+	return prefix + " = 'Archive')", prefix + ` like '%/Archive' escape '\')`
+}
+
+func indexMailboxCandidateSelect(accountID, mailbox, projection string) string {
+	preference := indexMailboxPreference(accountID, mailbox)
+	where := preference.exact + " or " + preference.broad
+	order := "case when " + preference.exact + " then 0 else 3 end"
+	if preference.literal != "" {
+		where += " or " + preference.literal + " or " + preference.nested
+		order = "case when " + preference.exact + " then 0 when " + preference.literal + " then 1 when " + preference.nested + " then 2 else 3 end"
+	}
+	return "select " + projection + " from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
 }

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestAttachmentExportResultWritesFailedJSONEnvelopeWithReceipt(t *testing.T) {
@@ -22,14 +22,13 @@ func TestAttachmentExportResultWritesFailedJSONEnvelopeWithReceipt(t *testing.T)
 		Status:    "failed",
 		Error:     "save failed",
 	}}
-	rows := [][]string{{"42", "invoice.pdf", "failed", "save failed"}}
 	var stdout, stderr bytes.Buffer
 	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "export attachments", mail.SchemaVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = w.Write(attachmentExportResult(saved, "/tmp", 1, rows))
+	err = w.Write(attachmentExportResult(saved, "/tmp", 1))
 	var failure *clierr.Error
 	if !errors.As(err, &failure) {
 		t.Fatalf("Write error = %v, want classified failure", err)
@@ -63,21 +62,26 @@ func TestAttachmentExportResultWritesFailedJSONEnvelopeWithReceipt(t *testing.T)
 }
 
 func TestAttachmentExportResultPreservesPlainReceiptAndFailure(t *testing.T) {
-	saved := []savedAttachment{{MessageID: "42", Name: "invoice.pdf", Path: "/tmp/invoice.pdf", Status: "failed", Error: "save failed"}}
-	rows := [][]string{{"42", "invoice.pdf", "failed", "save failed"}}
+	saved := []savedAttachment{
+		{MessageID: "42", Name: "invoice.pdf", Path: "/tmp/invoice.pdf", Status: "failed", Error: "save failed"},
+		{MessageID: "43", Name: "receipt.pdf", Path: "/tmp/receipt.pdf", Status: "succeeded"},
+	}
 	var stdout, stderr bytes.Buffer
 	w, err := output.New(output.FormatPlain, &stdout, &stderr, false, "", "export attachments", mail.SchemaVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = w.Write(attachmentExportResult(saved, "/tmp", 1, rows))
+	err = w.Write(attachmentExportResult(saved, "/tmp", 1))
 	var failure *clierr.Error
 	if !errors.As(err, &failure) || !failure.Reported {
 		t.Fatalf("Write error = %#v, want reported classified failure", err)
 	}
 	if !strings.Contains(stdout.String(), "invoice.pdf") || !strings.Contains(stdout.String(), "save failed") {
 		t.Fatalf("plain receipt = %q", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "/tmp/invoice.pdf") || !strings.Contains(stdout.String(), "/tmp/receipt.pdf") || !strings.Contains(stdout.String(), "succeeded") {
+		t.Fatalf("plain receipt did not prefer failure detail and successful path: %q", stdout.String())
 	}
 	if !strings.Contains(stderr.String(), "failed to export 1 attachment") {
 		t.Fatalf("plain error = %q", stderr.String())
@@ -164,5 +168,19 @@ esac
 	}
 	if len(envelope.Data) != 1 || envelope.Data[0].Status != "failed" || envelope.Data[0].Error == "" {
 		t.Fatalf("receipt data = %+v", envelope.Data)
+	}
+}
+
+func TestAttachmentExportResultEmptyPlainReceipt(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	w, err := output.New(output.FormatPlain, &stdout, &stderr, false, "", "export attachments", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(attachmentExportResult([]savedAttachment{}, "/tmp", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if stdout.String() != "no attachments\n" || stderr.Len() != 0 {
+		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }

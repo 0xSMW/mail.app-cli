@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
-func newMessagesReconcileCmd() *cobra.Command {
+func (a *application) newMessagesReconcileCmd() *cobra.Command {
 	var settle, budget time.Duration
 	cmd := &cobra.Command{
 		Use:         "reconcile <receipt-file>",
@@ -28,13 +28,11 @@ func newMessagesReconcileCmd() *cobra.Command {
 			}
 			opts.Action = receipt.Action
 			opts.MarkReadBefore = receipt.MarkReadRequested
-			result, err := mail.ReconcileMutations(mailClient, opts, receipt)
-			return writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("Reconciled %d %s identities (%d unverified)", len(result.Items), result.Action, result.Unverified), Err: clierr.Classify(err)})
+			result, err := mail.ReconcileMutations(a.mailClient, opts, receipt)
+			return a.writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("Reconciled %d %s identities (%d unverified)", len(result.Items), result.Action, result.Unverified), Err: clierr.Classify(err)})
 		},
 	}
 	cmd.Flags().DurationVar(&settle, "settle", 0, "Final observation settling window (0 uses the default)")
 	cmd.Flags().DurationVar(&budget, "verify-budget", 30*time.Second, "Overall reconciliation budget including reads and queueing")
 	return cmd
 }
-
-func init() { messagesCmd.AddCommand(newMessagesReconcileCmd()) }

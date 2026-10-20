@@ -8,7 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // writeQueue runs Mail.app writes one after another. A write is never
@@ -104,19 +104,20 @@ func (m *model) handleActionKey(key string) tea.Cmd {
 func (m *model) act(targets []mail.Message, opts mail.BatchOptions, mutate mail.Mutator) tea.Cmd {
 	m.list.clearSelection()
 	if opts.Action == "mark" {
-		keys := make(map[string]bool, len(targets))
-		for _, t := range targets {
-			keys[bodyKey(t)] = true
-		}
 		if opts.Read {
 			// An explicit mark-read lifts any guard.
-			for key := range keys {
-				delete(m.noAutoRead, key)
+			for _, target := range targets {
+				delete(m.noAutoRead, bodyKey(target))
 			}
-		} else if m.reader.open && keys[m.readerKey] {
+		} else if m.reader.open {
 			// An explicit mark-unread of the message on screen must survive
 			// the reader's own marking; rows not being read need no guard.
-			m.suppressAutoRead(map[string]bool{m.readerKey: true})
+			for _, target := range targets {
+				if bodyKey(target) == m.readerKey {
+					m.suppressAutoRead(map[string]bool{m.readerKey: true})
+					break
+				}
+			}
 		}
 	}
 	return m.mutate(targets, opts, mutate)

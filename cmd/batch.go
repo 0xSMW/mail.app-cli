@@ -10,11 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
 
@@ -29,9 +28,9 @@ type (
 // every mailbox the run touched. An explicit --mailbox is trusted for ordinary
 // moves, but never for archive: Gmail messages can be listed in Important and
 // INBOX simultaneously, and archive must remove the INBOX label.
-func runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator) (batchResult, error) {
-	opts.TrustSource = trustExplicitSource(opts.Action, mailboxExplicit())
-	opts.ExplicitSource = mailboxExplicit()
+func (a *application) runMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator) (batchResult, error) {
+	opts.TrustSource = trustExplicitSource(opts.Action, a.mailboxExplicit())
+	opts.ExplicitSource = a.mailboxExplicit()
 	result, err := mail.RunBatch(client, opts, items, mutate)
 	if !opts.DryRun {
 		invalidateBatchCaches(opts.Action, result.Items)
@@ -108,7 +107,7 @@ func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) 
 
 // writeReceipt emits the receipt in the current format and returns the
 // mutation error, if any, so the process exits non-zero after reporting.
-func writeReceipt(result batchResult, opts batchOptions, notices []string, mutationErr error, reportFile string) error {
+func (a *application) writeReceipt(result batchResult, opts batchOptions, notices []string, mutationErr error, reportFile string) error {
 	var reportErr error
 	if reportFile != "" && result.ReceiptPath != "" {
 		reportErr = writeBatchReport(reportFile, result)
@@ -116,7 +115,7 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 			notices = append(notices, reportErr.Error())
 		}
 	}
-	if err := writer.Write(output.Result{
+	if err := a.writer.Write(output.Result{
 		Data:    result,
 		Summary: result.Summary(opts),
 		Notices: notices,
@@ -138,7 +137,7 @@ func writeReceipt(result batchResult, opts batchOptions, notices []string, mutat
 
 // preflightBatchReceipt verifies the legacy final report target before Mail
 // state can change, then creates a separate append-only sidecar journal.
-func preflightBatchReceipt(opts *batchOptions, reportFile string) (*mail.BatchJournal, error) {
+func (a *application) preflightBatchReceipt(opts *batchOptions, reportFile string) (*mail.BatchJournal, error) {
 	journalPath := ""
 	if reportFile != "" {
 		absoluteReport, err := filepath.Abs(reportFile)
@@ -163,7 +162,7 @@ func preflightBatchReceipt(opts *batchOptions, reportFile string) (*mail.BatchJo
 		return nil, err
 	}
 	opts.Receipt = journal
-	fmt.Fprintf(writer.Stderr, "receipt journal: %s\n", journal.Path())
+	fmt.Fprintf(a.writer.Stderr, "receipt journal: %s\n", journal.Path())
 	return journal, nil
 }
 
@@ -218,14 +217,14 @@ func writeBatchReport(path string, result batchResult) error {
 	return nil
 }
 
-func runDurableMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator, reportFile string) (result batchResult, mutationErr error) {
-	journal, err := preflightBatchReceipt(&opts, reportFile)
+func (a *application) runDurableMessageBatch(client *mail.Client, opts batchOptions, items []batchItem, mutate mail.Mutator, reportFile string) (result batchResult, mutationErr error) {
+	journal, err := a.preflightBatchReceipt(&opts, reportFile)
 	if err != nil {
 		return batchResult{Action: opts.Action, DryRun: opts.DryRun}, err
 	}
 	ctx, stop := signal.NotifyContext(client.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	result, mutationErr = runMessageBatch(client.WithContext(ctx), opts, items, mutate)
+	result, mutationErr = a.runMessageBatch(client.WithContext(ctx), opts, items, mutate)
 	if err := journal.Close(); err != nil {
 		result.JournalError = err.Error()
 		mutationErr = errors.Join(mutationErr, err)
@@ -251,130 +250,60 @@ func itemsFromRefs(refs []messageRef) []batchItem {
 }
 
 // mutateByIDs is the shared body of every ID-driven mutation verb.
-func mutateByIDs(ids []string, opts batchOptions, mutate mail.Mutator) error {
-	refs, notices, err := locateMessages(ids)
+func (a *application) mutateByIDs(ids []string, opts batchOptions, mutate mail.Mutator) error {
+	refs, notices, err := a.locateMessages(ids)
 	if err != nil {
 		return err
 	}
-	result, mutationErr := runDurableMessageBatch(mailClient, opts, itemsFromRefs(refs), mutate, "")
-	return writeReceipt(result, opts, notices, mutationErr, "")
+	result, mutationErr := a.runDurableMessageBatch(a.mailClient, opts, itemsFromRefs(refs), mutate, "")
+	return a.writeReceipt(result, opts, notices, mutationErr, "")
 }
 
 // --- messages batch -------------------------------------------------------
 
-var (
-	batchQuery          string
-	batchSender         string
-	batchSenderDomain   string
-	batchStdin          bool
-	batchDryRun         bool
-	batchYes            bool
-	batchRead           bool
-	batchFlagged        bool
-	batchMarkReadBefore bool
-	batchMarkReadOnSkip bool
-	batchSettle         time.Duration
-	batchVerifyBudget   time.Duration
-	batchVerify         bool
-	batchProgress       bool
-	batchChunkSize      int
-	batchLimit          int
-	batchReportFile     string
-)
-
-var messagesBatchCmd = &cobra.Command{
-	Use:   "batch",
-	Short: "Apply bulk operations to selected messages",
-	Long:  "Apply bulk operations to selected messages. Select with positional IDs, --stdin, or --query/--sender/--sender-domain within the account and mailbox in scope.",
-	Annotations: map[string]string{
-		annotationAgentNotes: "Query-selected archive, delete, and move need --yes unless --dry-run is set. Explicit IDs do not. Always preview with --dry-run first.",
-	},
-}
-
-var messagesBatchArchiveCmd = &cobra.Command{
-	Use:   "archive [message-id...]",
-	Short: "Archive selected messages",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("archive", args, "", mail.ArchiveMutator(false))
-	},
-}
-
-var messagesBatchDeleteCmd = &cobra.Command{
-	Use:   "delete [message-id...]",
-	Short: "Delete selected messages",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("delete", args, "", mail.DeleteMutator)
-	},
-}
-
-var messagesBatchMoveCmd = &cobra.Command{
-	Use:   "move <target-mailbox> [message-id...]",
-	Short: "Move selected messages",
-	Args:  cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("move", args[1:], args[0], mail.MoveMutator(false))
-	},
-}
-
-var messagesBatchMarkCmd = &cobra.Command{
-	Use:   "mark [message-id...]",
-	Short: "Mark selected messages read or unread",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("mark", args, "", mail.MarkMutator(batchRead))
-	},
-}
-
-var messagesBatchFlagCmd = &cobra.Command{
-	Use:   "flag [message-id...]",
-	Short: "Flag or unflag selected messages",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSelectedBatch("flag", args, "", mail.FlagMutator(batchFlagged))
-	},
-}
-
-func batchOptionsFromFlags(action, target string) batchOptions {
+func (a *application) batchOptionsFromFlags(action, target string) batchOptions {
 	opts := batchOptions{
 		Action:         action,
 		TargetMailbox:  target,
-		DryRun:         batchDryRun,
-		Verify:         batchVerify,
-		MarkReadBefore: batchMarkReadBefore,
-		MarkReadOnSkip: batchMarkReadOnSkip,
-		Settle:         batchSettle,
-		VerifyBudget:   batchVerifyBudget,
-		ChunkSize:      batchChunkSize,
+		DryRun:         a.batchDryRun,
+		Verify:         a.batchVerify,
+		MarkReadBefore: a.batchMarkReadBefore,
+		MarkReadOnSkip: a.batchMarkReadOnSkip,
+		Settle:         a.batchSettle,
+		VerifyBudget:   a.batchVerifyBudget,
+		ChunkSize:      a.batchChunkSize,
 		ReuseBridge:    true,
-		Read:           batchRead,
-		Flagged:        batchFlagged,
+		Read:           a.batchRead,
+		Flagged:        a.batchFlagged,
 	}
-	if batchProgress {
-		opts.Progress = writer.Stderr
+	if a.batchProgress {
+		opts.Progress = a.writer.Stderr
 	}
 	return opts
 }
 
-func runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mail.Mutator) error {
-	opts := batchOptionsFromFlags(action, targetMailbox)
+func (a *application) runSelectedBatch(action string, argIDs []string, targetMailbox string, mutate mail.Mutator) error {
+	opts := a.batchOptionsFromFlags(action, targetMailbox)
 	if err := mail.ValidateBatchOptions(opts); err != nil {
 		return clierr.Usage(err.Error())
 	}
-	bySelector := batchQuery != "" || batchSender != "" || batchSenderDomain != ""
-	if bySelector && (len(argIDs) > 0 || batchStdin) {
+	bySelector := a.batchQuery != "" || a.batchSender != "" || a.batchSenderDomain != ""
+	if bySelector && (len(argIDs) > 0 || a.batchStdin) {
 		return clierr.Usage("--query, --sender, and --sender-domain cannot be combined with message IDs or --stdin")
 	}
-	if bySelector && !opts.DryRun && requiresBatchConfirmation(action) && !batchYes {
+	if bySelector && !opts.DryRun && requiresBatchConfirmation(action) && !a.batchYes {
 		return clierr.Usagef("%s by selector needs --yes unless --dry-run is set", action).WithHint("run with --dry-run first to see what would change")
 	}
 
 	var items []batchItem
 	var notices []string
 	if bySelector {
-		account, err := requireAccount()
+		account, err := a.requireAccount()
 		if err != nil {
 			return err
 		}
-		mailbox := mailboxInScope()
-		messages, err := resolveBatchMessages(account, mailbox)
+		mailbox := a.mailboxInScope()
+		messages, err := a.resolveBatchMessages(account, mailbox)
 		if err != nil {
 			return err
 		}
@@ -386,11 +315,11 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 			})
 		}
 	} else {
-		ids, err := collectBatchIDs(argIDs)
+		ids, err := a.collectBatchIDs(argIDs)
 		if err != nil {
 			return err
 		}
-		refs, locateNotices, err := locateMessages(ids)
+		refs, locateNotices, err := a.locateMessages(ids)
 		if err != nil {
 			return err
 		}
@@ -400,13 +329,13 @@ func runSelectedBatch(action string, argIDs []string, targetMailbox string, muta
 	if len(items) == 0 {
 		return clierr.New(clierr.CodeNotFound, "no messages selected")
 	}
-	result, mutationErr := runDurableMessageBatch(mailClient, opts, items, mutate, batchReportFile)
-	return writeReceipt(result, opts, notices, mutationErr, batchReportFile)
+	result, mutationErr := a.runDurableMessageBatch(a.mailClient, opts, items, mutate, a.batchReportFile)
+	return a.writeReceipt(result, opts, notices, mutationErr, a.batchReportFile)
 }
 
-func collectBatchIDs(argIDs []string) ([]string, error) {
+func (a *application) collectBatchIDs(argIDs []string) ([]string, error) {
 	ids := append([]string(nil), argIDs...)
-	if batchStdin {
+	if a.batchStdin {
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			if id := strings.TrimSpace(scanner.Text()); id != "" {
@@ -423,21 +352,21 @@ func collectBatchIDs(argIDs []string) ([]string, error) {
 	return uniqueStrings(ids), nil
 }
 
-func resolveBatchMessages(account, mailbox string) ([]mail.Message, error) {
+func (a *application) resolveBatchMessages(account, mailbox string) ([]mail.Message, error) {
 	var messages []mail.Message
 	var err error
-	if batchQuery != "" {
-		messages, err = mailClient.SearchMessagesJSON(batchQuery, account, mailbox, batchLimit)
+	if a.batchQuery != "" {
+		messages, err = a.mailClient.SearchMessagesJSON(a.batchQuery, account, mailbox, a.batchLimit)
 		if err != nil {
 			return nil, fmt.Errorf("resolve --query: %w", err)
 		}
 	} else {
-		messages, err = mailClient.GetMessagesJSON(account, mailbox, batchLimit, 0, false, false, false, "")
+		messages, err = a.mailClient.GetMessagesJSON(account, mailbox, a.batchLimit, 0, false, false, false, "")
 		if err != nil {
 			return nil, fmt.Errorf("list messages for filtered batch: %w", err)
 		}
 	}
-	return mail.FilterBySender(messages, batchSender, batchSenderDomain), nil
+	return mail.FilterBySender(messages, a.batchSender, a.batchSenderDomain), nil
 }
 
 func requiresBatchConfirmation(action string) bool {
@@ -457,28 +386,73 @@ func uniqueStrings(values []string) []string {
 	return result
 }
 
-func init() {
-	messagesBatchCmd.AddCommand(messagesBatchArchiveCmd, messagesBatchDeleteCmd, messagesBatchMoveCmd, messagesBatchMarkCmd, messagesBatchFlagCmd)
+func (a *application) buildBatchCommands() {
+	a.messagesBatchCmd = &cobra.Command{
+		Use:   "batch",
+		Short: "Apply bulk operations to selected messages",
+		Long:  "Apply bulk operations to selected messages. Select with positional IDs, --stdin, or --query/--sender/--sender-domain within the account and mailbox in scope.",
+		Annotations: map[string]string{
+			annotationAgentNotes: "Query-selected archive, delete, and move need --yes unless --dry-run is set. Explicit IDs do not. Always preview with --dry-run first.",
+		},
+	}
+	a.messagesBatchArchiveCmd = &cobra.Command{
+		Use:   "archive [message-id...]",
+		Short: "Archive selected messages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runSelectedBatch("archive", args, "", mail.ArchiveMutator(false))
+		},
+	}
+	a.messagesBatchDeleteCmd = &cobra.Command{
+		Use:   "delete [message-id...]",
+		Short: "Delete selected messages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runSelectedBatch("delete", args, "", mail.DeleteMutator)
+		},
+	}
+	a.messagesBatchMoveCmd = &cobra.Command{
+		Use:   "move <target-mailbox> [message-id...]",
+		Short: "Move selected messages",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runSelectedBatch("move", args[1:], args[0], mail.MoveMutator(false))
+		},
+	}
+	a.messagesBatchMarkCmd = &cobra.Command{
+		Use:   "mark [message-id...]",
+		Short: "Mark selected messages read or unread",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runSelectedBatch("mark", args, "", mail.MarkMutator(a.batchRead))
+		},
+	}
+	a.messagesBatchFlagCmd = &cobra.Command{
+		Use:   "flag [message-id...]",
+		Short: "Flag or unflag selected messages",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return a.runSelectedBatch("flag", args, "", mail.FlagMutator(a.batchFlagged))
+		},
+	}
+
+	a.messagesBatchCmd.AddCommand(a.messagesBatchArchiveCmd, a.messagesBatchDeleteCmd, a.messagesBatchMoveCmd, a.messagesBatchMarkCmd, a.messagesBatchFlagCmd)
 
 	for _, cmd := range []*cobra.Command{
-		messagesBatchArchiveCmd, messagesBatchDeleteCmd, messagesBatchMoveCmd, messagesBatchMarkCmd, messagesBatchFlagCmd,
+		a.messagesBatchArchiveCmd, a.messagesBatchDeleteCmd, a.messagesBatchMoveCmd, a.messagesBatchMarkCmd, a.messagesBatchFlagCmd,
 	} {
-		cmd.Flags().StringVar(&batchQuery, "query", "", "Search query used to select messages")
-		cmd.Flags().StringVar(&batchSender, "sender", "", "Only select messages from this exact sender/email")
-		cmd.Flags().StringVar(&batchSenderDomain, "sender-domain", "", "Only select messages from this sender domain")
-		cmd.Flags().BoolVar(&batchStdin, "stdin", false, "Read message IDs from stdin, one per line")
-		cmd.Flags().BoolVar(&batchDryRun, "dry-run", false, "Report what would change without touching Mail.app")
-		cmd.Flags().BoolVar(&batchYes, "yes", false, "Confirm a selector-driven archive, delete, or move")
-		cmd.Flags().BoolVar(&batchMarkReadBefore, "mark-read", false, "Mark each selected message read before archive/delete/move")
-		cmd.Flags().DurationVar(&batchSettle, "settle", 0, "Extend the final verification observation window (up to 5m)")
-		cmd.Flags().DurationVar(&batchVerifyBudget, "verify-budget", 0, "Bound all verification checks (default 30s, up to 10m)")
-		cmd.Flags().BoolVar(&batchVerify, "verify", false, "Re-read each message after mutation and record the outcome")
-		cmd.Flags().BoolVar(&batchProgress, "progress", false, "Print per-chunk and per-message progress to stderr")
-		cmd.Flags().IntVar(&batchChunkSize, "chunk-size", 0, "Process selected messages in chunks of this size")
-		cmd.Flags().StringVar(&batchReportFile, "report-file", "", "Also write the receipt JSON to this path; journal uses .journal.jsonl")
-		cmd.Flags().IntVarP(&batchLimit, "limit", "l", 100, "Maximum selector-selected messages")
+		cmd.Flags().StringVar(&a.batchQuery, "query", "", "Search query used to select messages")
+		cmd.Flags().StringVar(&a.batchSender, "sender", "", "Only select messages from this exact sender/email")
+		cmd.Flags().StringVar(&a.batchSenderDomain, "sender-domain", "", "Only select messages from this sender domain")
+		cmd.Flags().BoolVar(&a.batchStdin, "stdin", false, "Read message IDs from stdin, one per line")
+		cmd.Flags().BoolVar(&a.batchDryRun, "dry-run", false, "Report what would change without touching Mail.app")
+		cmd.Flags().BoolVar(&a.batchYes, "yes", false, "Confirm a selector-driven archive, delete, or move")
+		cmd.Flags().BoolVar(&a.batchMarkReadBefore, "mark-read", false, "Mark each selected message read before archive/delete/move")
+		cmd.Flags().DurationVar(&a.batchSettle, "settle", 0, "Extend the final verification observation window (up to 5m)")
+		cmd.Flags().DurationVar(&a.batchVerifyBudget, "verify-budget", 0, "Bound all verification checks (default 30s, up to 10m)")
+		cmd.Flags().BoolVar(&a.batchVerify, "verify", false, "Re-read each message after mutation and record the outcome")
+		cmd.Flags().BoolVar(&a.batchProgress, "progress", false, "Print per-chunk and per-message progress to stderr")
+		cmd.Flags().IntVar(&a.batchChunkSize, "chunk-size", 0, "Process selected messages in chunks of this size")
+		cmd.Flags().StringVar(&a.batchReportFile, "report-file", "", "Also write the receipt JSON to this path; journal uses .journal.jsonl")
+		cmd.Flags().IntVarP(&a.batchLimit, "limit", "l", 100, "Maximum selector-selected messages")
 	}
-	messagesBatchArchiveCmd.Flags().BoolVar(&batchMarkReadOnSkip, "mark-read-on-skip", false, "Mark already archived messages read; requires --mark-read")
-	messagesBatchMarkCmd.Flags().BoolVar(&batchRead, "read", true, "Mark messages read; use --read=false for unread")
-	messagesBatchFlagCmd.Flags().BoolVar(&batchFlagged, "flagged", true, "Flag messages; use --flagged=false to unflag")
+	a.messagesBatchArchiveCmd.Flags().BoolVar(&a.batchMarkReadOnSkip, "mark-read-on-skip", false, "Mark already archived messages read; requires --mark-read")
+	a.messagesBatchMarkCmd.Flags().BoolVar(&a.batchRead, "read", true, "Mark messages read; use --read=false for unread")
+	a.messagesBatchFlagCmd.Flags().BoolVar(&a.batchFlagged, "flagged", true, "Flag messages; use --flagged=false to unflag")
 }

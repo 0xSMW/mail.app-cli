@@ -43,88 +43,63 @@ func (c *Client) GetUnifiedMessagesJSON(mailboxType string, limit, offset int, w
 }
 
 func (c *Client) getInboxBasedUnified(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
-	accounts, err := c.GetAccountsJSON()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list accounts: %w", err)
-	}
-
-	// Over-fetch per account so the global sort+slice is accurate.
-	perLimit := limit + offset
-	if perLimit < 50 {
-		perLimit = 50
-	}
-
-	type req = MailboxListRequest
-
-	var requests []req
-	for _, acc := range accounts {
-		if !acc.Enabled {
-			continue
-		}
-		requests = append(requests, req{
-			AccountName: acc.Name,
-			MailboxName: "INBOX",
-			Limit:       perLimit,
-			Offset:      0,
-			UnreadOnly:  mailboxType == "unread",
-			FlaggedOnly: mailboxType == "flagged",
-			WithContent: withContent,
-		})
-	}
-
-	if len(requests) == 0 {
-		return []Message{}, nil
-	}
-
-	messages, err := c.GetMessagesFromMultipleMailboxes(requests)
-	if err != nil {
-		return nil, err
-	}
-
-	return sortAndSlice(messages, offset, limit), nil
+	return c.getUnifiedMailboxes(mailboxType, limit, offset, withContent, true)
 }
 
 func (c *Client) getSpecialMailboxUnified(mailboxType string, limit, offset int, withContent bool) ([]Message, error) {
-	perLimit := limit + offset
-	if perLimit < 50 {
-		perLimit = 50
-	}
+	return c.getUnifiedMailboxes(mailboxType, limit, offset, withContent, false)
+}
 
-	allMailboxes, err := c.GetMailboxesJSON("")
-	if err != nil {
-		return nil, err
-	}
-
-	type req = MailboxListRequest
-
-	seen := make(map[string]bool)
-	var requests []req
-	for _, mailbox := range allMailboxes {
-		if mailbox.Account == "" || mailbox.Name == "" || !isSpecialMailboxName(mailboxType, mailbox.Name) {
-			continue
+func (c *Client) getUnifiedMailboxes(mailboxType string, limit, offset int, withContent, inbox bool) ([]Message, error) {
+	// Over-fetch per account so the global sort+slice is accurate.
+	perLimit := max(limit+offset, 50)
+	var requests []MailboxListRequest
+	if inbox {
+		accounts, err := c.GetAccountsJSON()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list accounts: %w", err)
 		}
-		key := mailbox.Account + "\x00" + mailbox.Name
-		if seen[key] {
-			continue
+		for _, acc := range accounts {
+			if acc.Enabled {
+				requests = append(requests, MailboxListRequest{
+					AccountName: acc.Name,
+					MailboxName: "INBOX",
+					Limit:       perLimit,
+					UnreadOnly:  mailboxType == "unread",
+					FlaggedOnly: mailboxType == "flagged",
+					WithContent: withContent,
+				})
+			}
 		}
-		seen[key] = true
-		requests = append(requests, req{
-			AccountName: mailbox.Account,
-			MailboxName: mailbox.Name,
-			Limit:       perLimit,
-			WithContent: withContent,
-		})
+	} else {
+		mailboxes, err := c.GetMailboxesJSON("")
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[string]bool)
+		for _, mailbox := range mailboxes {
+			if mailbox.Account == "" || mailbox.Name == "" || !isSpecialMailboxName(mailboxType, mailbox.Name) {
+				continue
+			}
+			key := mailbox.Account + "\x00" + mailbox.Name
+			if !seen[key] {
+				seen[key] = true
+				requests = append(requests, MailboxListRequest{
+					AccountName: mailbox.Account,
+					MailboxName: mailbox.Name,
+					Limit:       perLimit,
+					WithContent: withContent,
+				})
+			}
+		}
 	}
-
 	if len(requests) == 0 {
 		return []Message{}, nil
 	}
-
 	messages, err := c.GetMessagesFromMultipleMailboxes(requests)
 	if err != nil {
 		return nil, err
 	}
-
 	return sortAndSlice(messages, offset, limit), nil
 }
 

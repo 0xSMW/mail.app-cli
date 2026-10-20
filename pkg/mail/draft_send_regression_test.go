@@ -18,14 +18,20 @@ type draftRegressionAttachment struct {
 }
 
 type draftRegressionState struct {
-	Enumerated      []string                    `json:"enumerated"`
-	Exported        []string                    `json:"exported"`
-	Deleted         []string                    `json:"deleted"`
-	Composed        int                         `json:"composed"`
-	Sent            int                         `json:"sent"`
-	OriginalRemoved bool                        `json:"originalRemoved"`
-	SentAttachments []draftRegressionAttachment `json:"sentAttachments"`
-	SentBody        string                      `json:"sentBody"`
+	Enumerated          []string                    `json:"enumerated"`
+	Exported            []string                    `json:"exported"`
+	Deleted             []string                    `json:"deleted"`
+	Composed            int                         `json:"composed"`
+	Sent                int                         `json:"sent"`
+	OriginalRemoved     bool                        `json:"originalRemoved"`
+	SentAttachments     []draftRegressionAttachment `json:"sentAttachments"`
+	SentBody            string                      `json:"sentBody"`
+	PreparedDeleted     []string                    `json:"preparedDeleted"`
+	PreparedEnumerated  []string                    `json:"preparedEnumerated"`
+	PreparedByID        []string                    `json:"preparedById"`
+	OwnedCloseAfterSend int                         `json:"ownedCloseAfterSend"`
+	SavedBody           string                      `json:"savedBody"`
+	SavedAttachments    []draftRegressionAttachment `json:"savedAttachments"`
 }
 
 func installDraftRegressionBridge(t *testing.T, snapshot *draftSnapshot, attachments []draftRegressionAttachment, specialState string) string {
@@ -108,6 +114,14 @@ func TestSendDraftSpecialMailboxRegression(t *testing.T) {
 			if !result.Submitted || result.CleanupPending || state.Sent != 1 || !state.OriginalRemoved || strings.Join(state.Deleted, ",") != "special" || state.SentBody != "body\r\n" {
 				t.Fatalf("result=%+v state=%+v", result, state)
 			}
+			if strings.Join(state.PreparedDeleted, ",") != "700" || state.OwnedCloseAfterSend != 1 || len(state.PreparedByID) == 0 {
+				t.Fatalf("same outgoing preparation/cleanup not verified: %+v", state)
+			}
+			for _, id := range append(append([]string{}, state.PreparedEnumerated...), state.PreparedByID...) {
+				if id != "700" {
+					t.Fatalf("prepared cleanup accessed unrelated stored ID: %+v", state)
+				}
+			}
 			for _, kind := range append(append([]string{}, state.Enumerated...), state.Exported...) {
 				if kind != "special" {
 					t.Fatalf("accessed unrelated draft attachments: %+v", state)
@@ -135,6 +149,15 @@ func TestSendDraftUnavailableSpecialMailboxRegression(t *testing.T) {
 				t.Fatalf("unavailable special mailbox was not safe: result=%+v err=%v state=%+v", result, err, state)
 			}
 		})
+	}
+}
+
+func TestSendDraftChangedOriginalAfterPreparedCleanupRegression(t *testing.T) {
+	statePath := installDraftRegressionBridge(t, draftRegressionSnapshot(t, nil), nil, "changed-original-after-send")
+	result, err := NewClient().SendDraftResult("Work", "42")
+	state := readDraftRegressionState(t, statePath)
+	if err == nil || !result.Submitted || !result.CleanupPending || result.Uncertain || state.Sent != 1 || state.OriginalRemoved || len(state.Deleted) != 0 || strings.Join(state.PreparedDeleted, ",") != "700" {
+		t.Fatalf("changed original was not retained after exact prepared cleanup: result=%+v err=%v state=%+v", result, err, state)
 	}
 }
 

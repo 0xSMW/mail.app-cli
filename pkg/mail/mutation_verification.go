@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // StableIdentity identifies a logical message across Mail.app local-ID
@@ -38,12 +40,70 @@ func canonicalIdentityDate(value string) string {
 	return value
 }
 
+// Mail's messageId property commonly omits the header's angle brackets.
+// Accept only an ASCII dot-atom addr-spec, never a local numeric Mail ID or
+// a header containing display names, comments, whitespace, or control bytes.
+var rfcMessageIDAtom = regexp.MustCompile("^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.-]+$")
+
 func validRFCMessageID(value string) string {
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			return ""
+		}
+	}
 	value = strings.TrimSpace(value)
-	if len(value) < 3 || value[0] != '<' || value[len(value)-1] != '>' || strings.ContainsAny(value[1:len(value)-1], " \t\r\n<>") {
+	if strings.HasPrefix(value, "<") && strings.HasSuffix(value, ">") {
+		value = value[1 : len(value)-1]
+	}
+	parts := strings.Split(value, "@")
+	if len(parts) != 2 {
 		return ""
 	}
-	return value
+	for _, part := range parts {
+		if part == "" || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".") || strings.Contains(part, "..") || !rfcMessageIDAtom.MatchString(part) {
+			return ""
+		}
+	}
+	return "<" + value + ">"
+}
+
+func (identity StableIdentity) envelopeKey() string {
+	return identity.Sender + "\x00" + identity.Subject + "\x00" + identity.DateSent
+}
+
+func (identity StableIdentity) verificationKey() string {
+	if rfc := validRFCMessageID(identity.RFCMessageID); rfc != "" {
+		return rfc + "\x00" + identity.rfcEnvelopeKey()
+	}
+	return identity.fallbackKey()
+}
+
+// RFC identity permits presentation-only sender-name changes. Parse a single
+// address and validate its addr-spec; malformed sender text never weakens the
+// guard to subject/date matching. Mail treats mailbox addresses case-insensitively.
+func stableSenderAddress(sender string) string {
+	address, err := draftSenderAddress(sender)
+	if err != nil || validRFCMessageID(address) == "" {
+		return ""
+	}
+	return strings.ToLower(address)
+}
+
+func (identity StableIdentity) rfcEnvelopeKey() string {
+	address := stableSenderAddress(identity.Sender)
+	if address == "" {
+		return ""
+	}
+	return address + "\x00" + identity.Subject + "\x00" + canonicalIdentityDate(identity.DateSent)
+}
+
+func (identity StableIdentity) matchesEnvelope(message Message) bool {
+	actual := StableIdentityFromMessage(message)
+	if rfc := validRFCMessageID(identity.RFCMessageID); rfc != "" {
+		expectedKey := identity.rfcEnvelopeKey()
+		return expectedKey != "" && expectedKey == actual.rfcEnvelopeKey() && actual.RFCMessageID == rfc
+	}
+	return identity.envelopeKey() == actual.envelopeKey() && identity.hasFallback() && identity.MessageSize == actual.MessageSize
 }
 
 func (identity StableIdentity) hasFallback() bool {
@@ -56,21 +116,6 @@ func (identity StableIdentity) valid() bool {
 
 func (identity StableIdentity) fallbackKey() string {
 	return identity.Sender + "\x00" + identity.Subject + "\x00" + identity.DateSent + "\x00" + strconv.Itoa(identity.MessageSize)
-}
-
-func (c *Client) captureStableIdentity(item BatchItem) (StableIdentity, error) {
-	identity := item.Identity
-	identity.Sender = strings.TrimSpace(identity.Sender)
-	identity.Subject = strings.TrimSpace(identity.Subject)
-	identity.DateSent = canonicalIdentityDate(identity.DateSent)
-	identity.RFCMessageID = validRFCMessageID(identity.RFCMessageID)
-	if !identity.valid() {
-		identity = StableIdentity{Sender: strings.TrimSpace(item.Sender), Subject: strings.TrimSpace(item.Subject), DateSent: canonicalIdentityDate(item.DateSent), MessageSize: item.MessageSize}
-	}
-	// Mail's header property is the only source accepted as an RFC Message-ID.
-	// The Envelope Index's numeric message_id is a local database value.
-	message, err := c.GetMessageDetailsForVerificationJSON(item.Account, item.SourceMailbox, item.ID)
-	return completeStableIdentity(identity, message, err)
 }
 
 // completeStableIdentity treats the live RFC read as enrichment. A complete
@@ -102,63 +147,6 @@ func completeStableIdentity(identity StableIdentity, message *Message, enrichmen
 // verificationBackoff is deliberately small but bounded: Mail and IMAP can
 // accept a move before the destination row is visible in the Envelope Index.
 var verificationBackoff = []time.Duration{0, 100 * time.Millisecond, 250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
-
-type verificationPresence struct {
-	Source      bool
-	Destination bool
-}
-
-type verificationLookup func() (verificationPresence, error)
-type verificationPause func(context.Context, time.Duration) error
-
-func verifyRelocationWithLookup(ctx context.Context, item BatchItem, lookup verificationLookup, pause verificationPause) (string, error) {
-	for attempt, delay := range verificationBackoff {
-		if attempt > 0 {
-			if err := pause(ctx, delay); err != nil {
-				return "unknown_after_timeout", err
-			}
-		}
-		if err := ctx.Err(); err != nil {
-			return "unknown_after_timeout", err
-		}
-		presence, err := lookup()
-		if err != nil {
-			if isVerificationTimeout(err) {
-				return "unknown_after_timeout", err
-			}
-			if isRetryableVerificationError(err) && attempt < len(verificationBackoff)-1 {
-				continue
-			}
-			return "applied_destination_unverified", err
-		}
-		// Always use the final observation: a local source can reappear after
-		// an initially successful destination observation.
-		if attempt == len(verificationBackoff)-1 {
-			if presence.Source {
-				return "present_in_source", fmt.Errorf("message still present in %s", item.SourceMailbox)
-			}
-			if presence.Destination {
-				return "confirmed_destination", nil
-			}
-			return "applied_destination_unverified", fmt.Errorf("message left %s but was not found in %s", item.SourceMailbox, item.TargetMailbox)
-		}
-	}
-	return "applied_destination_unverified", fmt.Errorf("message destination could not be verified")
-}
-
-func isRetryableVerificationError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if IsNotFound(err) {
-		return true
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "apple event connection is invalid") ||
-		strings.Contains(message, "connection invalid") ||
-		strings.Contains(message, "connection interrupted") ||
-		strings.Contains(message, "(-609)")
-}
 
 func isVerificationTimeout(err error) bool {
 	if err == nil {
@@ -316,7 +304,7 @@ func captureBatchIdentities(client *Client, opts BatchOptions, items []BatchItem
 				session = nil
 				reader.session = nil
 			}
-			if opts.ReuseBridge && len(items) > 1 && session == nil {
+			if !reader.nativeEnabled() && opts.ReuseBridge && len(items) > 1 && session == nil {
 				session, err = newJXASession(ctx)
 				reader.session = session
 			}
@@ -397,21 +385,8 @@ func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) 
 		items[i].VerifyStatus, items[i].VerifyError, items[i].Observed = "", "", nil
 	}
 	verified := VerifyMutations(client, opts, items)
-	var skippedMarks []BatchItem
-	var skippedIndices []int
-	for i, item := range items {
-		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
-			item.Status = "succeeded"
-			skippedMarks = append(skippedMarks, item)
-			skippedIndices = append(skippedIndices, i)
-		}
-	}
-	if len(skippedMarks) > 0 {
-		checks := VerifyMutations(client, BatchOptions{Action: "mark", Read: true, VerifyBudget: opts.VerifyBudget, readOnlyVerification: true}, skippedMarks)
-		for i, check := range checks {
-			verified[skippedIndices[i]].VerifyStatus, verified[skippedIndices[i]].VerifyError = check.VerifyStatus, check.VerifyError
-		}
-	}
+	verifySkippedMarks(client, opts, verified, nil)
+
 	receipt.Unverified = 0
 	for i := range verified {
 		if receipt.Items[i].Status == "unknown" && verified[i].VerifyStatus == "" {

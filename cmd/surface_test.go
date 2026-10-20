@@ -16,10 +16,12 @@ import (
 //
 //	UPDATE_SURFACE=1 go test ./cmd -run TestSurfaceSnapshot
 func TestSurfaceSnapshot(t *testing.T) {
+	a := newApplication()
+
 	// Cobra creates these public commands lazily during Execute. Initialize them
 	// here so the snapshot captures the same user-visible command tree.
-	rootCmd.InitDefaultHelpCmd()
-	rootCmd.InitDefaultCompletionCmd()
+	a.rootCmd.InitDefaultHelpCmd()
+	a.rootCmd.InitDefaultCompletionCmd()
 
 	var lines []string
 	var walk func(cmd *cobra.Command)
@@ -52,7 +54,7 @@ func TestSurfaceSnapshot(t *testing.T) {
 			walk(sub)
 		}
 	}
-	walk(rootCmd)
+	walk(a.rootCmd)
 	sort.Strings(lines)
 	want := strings.Join(lines, "\n") + "\n"
 

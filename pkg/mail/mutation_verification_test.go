@@ -10,18 +10,6 @@ import (
 	"time"
 )
 
-func TestVerifyRelocationMatchesNewLocalIDInDestination(t *testing.T) {
-	item := verificationItem()
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		// The observer deliberately knows nothing about the old ID. It found
-		// the same complete identity under Mail.app's newly assigned ID.
-		return verificationPresence{Destination: true}, nil
-	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" {
-		t.Fatalf("verification = (%q, %v), want confirmed_destination", status, err)
-	}
-}
-
 func TestVerificationObservationCountsElapsedQueryTime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -87,78 +75,45 @@ func TestDryRunVerifySkipsLiveIdentityCapture(t *testing.T) {
 func TestRFCOnlyIdentityRefusesMailboxWideLookup(t *testing.T) {
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "osascript.log")
-	script := "#!/bin/sh\nprintf '%s' \"$*\" > \"$MAIL_APP_CLI_TEST_LOG\"\nprintf true\n"
+	script := "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$MAIL_APP_CLI_TEST_LOG\"\nprintf true\n"
 	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir)
+	t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
 	t.Setenv("MAIL_APP_CLI_TEST_LOG", logPath)
-	identity := StableIdentity{RFCMessageID: "<unique@example.com>"}
-	found, err := NewClient().hasMessageIdentityForVerification("Work", "Processed", identity)
-	if err == nil || found || !strings.Contains(err.Error(), "refusing mailbox-wide RFC lookup") {
-		t.Fatalf("RFC-only lookup = (%v, %v), want bounded refusal", found, err)
+	previous := verificationBackoff
+	verificationBackoff = []time.Duration{0}
+	t.Cleanup(func() { verificationBackoff = previous })
+	item := BatchItem{ID: "1", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "Processed", Status: "succeeded", Identity: StableIdentity{RFCMessageID: "<unique@example.com>"}}
+	got := VerifyMutations(NewClient(), BatchOptions{Action: "move"}, []BatchItem{item})[0]
+	if got.VerifyStatus != "applied_destination_unverified" || got.VerifyError == "" {
+		t.Fatalf("RFC-only verification accepted insufficient identity: %+v", got)
 	}
-	logged, readErr := os.ReadFile(logPath)
-	if readErr == nil && strings.Contains(string(logged), `const wanted =`) {
-		t.Fatalf("RFC-only verification enumerated mailbox: %s", logged)
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, broad := range []string{"mbox.messages()", "mbox.messages.id()", "msg.content()"} {
+		if strings.Contains(string(logged), broad) {
+			t.Fatalf("RFC-only verification requested %s: %s", broad, logged)
+		}
 	}
 }
 
-func TestCompleteIdentityUsesEnvelopeIndexWithoutRFCMailboxScan(t *testing.T) {
-	binDir := t.TempDir()
-	osaLog := filepath.Join(t.TempDir(), "osascript.log")
-	sqlLog := filepath.Join(t.TempDir(), "sqlite.log")
-	osaScript := `#!/bin/sh
-printf '%s\n' "$*" >> "$MAIL_APP_CLI_OSA_LOG"
-case "$*" in
-  *"const wanted ="*) printf '%s\n' 'mailbox not found: Archive' >&2; exit 1 ;;
-  *"const accounts = mail.accounts();"*) printf '%s\n' '[{"id":"ABC","name":"Work","emailAddresses":[],"userName":"work","enabled":true}]' ;;
-  *) printf '%s\n' 'unexpected osascript' >&2; exit 1 ;;
-esac
-`
-	sqliteScript := `#!/bin/sh
-printf '%s\n' "$4" >> "$MAIL_APP_CLI_SQL_LOG"
-case "$4" in
-  *"m.size = 42"*) printf '%s\n' '[{"ID":999}]' ;;
-  *"url = 'imap://ABC/Archive' or"*) printf '%s\n' '[{"ID":7,"URL":"imap://ABC/Archive","TotalCount":1,"UnreadCount":0}]' ;;
-  *) printf '%s\n' '[]' ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte(osaScript), 0o755); err != nil {
-		t.Fatal(err)
+func TestCompleteIdentityUsesEnvelopeIndexWithBoundedRFCRead(t *testing.T) {
+	client := fakeRelocationIndex(t, "INBOX", "Archive", "imap://ABC/INBOX", "[]", "["+fakeIdentityRow+"]", false)
+	item := verificationItem()
+	item.TargetMailbox, item.Status = "Archive", "succeeded"
+	item.Identity.RFCMessageID = "<stable@example.com>"
+	installVerificationIdentityBridge(t, Message{ID: "205", RFCMessageID: "stable@example.com", Sender: "sender@example.com", Subject: "subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}, "")
+	got := VerifyMutations(client, BatchOptions{Action: "move"}, []BatchItem{item})[0]
+	if got.VerifyStatus != "confirmed_destination" || got.Observed == nil || len(got.Observed.DestinationIDs) != 1 || got.Observed.DestinationIDs[0] != "205" {
+		t.Fatalf("complete identity did not use scoped index snapshot: %+v", got)
 	}
-	if err := os.WriteFile(filepath.Join(binDir, "sqlite3"), []byte(sqliteScript), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", binDir)
-	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "automation.lock"))
-	t.Setenv("MAIL_APP_CLI_OSA_LOG", osaLog)
-	t.Setenv("MAIL_APP_CLI_SQL_LOG", sqlLog)
-
-	identity := StableIdentity{RFCMessageID: "<stable@example.com>", Sender: "sender@example.com", Subject: "subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}
-	found, err := NewClient().hasMessageIdentityForVerification("Work", "Archive", identity)
-	if err != nil || !found {
-		t.Fatalf("identity lookup = (%v, %v), want regenerated destination row", found, err)
-	}
-	osaCalls, err := os.ReadFile(osaLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(osaCalls), `const wanted =`) {
-		t.Fatalf("complete identity triggered mailbox-wide RFC lookup: %s", osaCalls)
-	}
-	sqlCalls, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(sqlCalls), "imap://ABC/Archive") || !strings.Contains(string(sqlCalls), "m.size = 42") {
-		t.Fatalf("fallback did not query the literal Archive tuple: %s", sqlCalls)
-	}
-	if strings.Contains(string(sqlCalls), "/%/All%20Mail") {
-		t.Fatalf("literal Archive should resolve before broad All Mail fallback: %s", sqlCalls)
-	}
+	// The bridge fixture accepts only a direct-ID metadata read, and rejects
+	// mailbox enumeration or content reads.
 }
 
 func TestArchiveSourceResolutionPreservesExplicitNonGmailWithoutIndex(t *testing.T) {
@@ -186,77 +141,6 @@ func TestArchiveLocationUsesInboxForGmailImportantAndInbox(t *testing.T) {
 	}
 }
 
-func TestVerifyRelocationPollsDestinationLag(t *testing.T) {
-	item := verificationItem()
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		if calls < 3 {
-			return verificationPresence{Source: true}, nil
-		}
-		return verificationPresence{Destination: true}, nil
-	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d", status, err, calls)
-	}
-}
-
-func TestVerifyGmailArchiveWaitsForSourceToStayRemoved(t *testing.T) {
-	item := verificationItem()
-	item.GmailInboxSource = true
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		if calls == len(verificationBackoff) {
-			return verificationPresence{Destination: true}, nil
-		}
-		return verificationPresence{Source: true, Destination: true}, nil
-	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want settled Gmail destination with source absent", status, err, calls)
-	}
-}
-
-func TestVerifyGmailArchiveRejectsDestinationWhileSourcePersists(t *testing.T) {
-	item := verificationItem()
-	item.GmailInboxSource = true
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{Source: true, Destination: true}, nil
-	}, noVerificationPause)
-	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want persistent Gmail source rejected", status, err, calls)
-	}
-}
-
-func TestVerifyGmailArchiveRejectsSourceThatReappearsAfterSync(t *testing.T) {
-	item := verificationItem()
-	item.GmailInboxSource = true
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{Source: calls == len(verificationBackoff), Destination: true}, nil
-	}, noVerificationPause)
-	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want regenerated Gmail source rejected", status, err, calls)
-	}
-}
-
-func TestVerifyGmailArchiveRecognizesArchiveAlias(t *testing.T) {
-	item := verificationItem()
-	item.GmailInboxSource = true
-	item.TargetMailbox = "Archive"
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{Source: true, Destination: true}, nil
-	}, noVerificationPause)
-	if status != "present_in_source" || err == nil || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want Gmail archive alias to require source absence", status, err, calls)
-	}
-}
-
 func TestGmailArchiveSyncTimeoutIsUnknown(t *testing.T) {
 	binDir := t.TempDir()
 	script := "#!/bin/sh\nprintf '%s\\n' 'execution error: AppleEvent timed out. (-1712)' >&2\nexit 1\n"
@@ -270,61 +154,6 @@ func TestGmailArchiveSyncTimeoutIsUnknown(t *testing.T) {
 	status, err := VerifyMutation(NewClient(), BatchOptions{Action: "archive"}, item)
 	if status != "unknown_after_timeout" || err == nil {
 		t.Fatalf("verification = (%q, %v), want unknown_after_timeout", status, err)
-	}
-}
-
-func TestVerifyRelocationRetriesMailboxResolutionUntilRegeneratedDestinationAppears(t *testing.T) {
-	item := verificationItem()
-	item.ID = "old-mail-id"
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		calls++
-		if calls <= 3 {
-			return verificationPresence{}, notFound("mailbox", "Archive")
-		}
-		// Presence is identity-based; the old local Mail ID is deliberately
-		// absent after Mail assigned a new ID in the destination.
-		return verificationPresence{Destination: true}, nil
-	}, noVerificationPause)
-	if err != nil || status != "confirmed_destination" || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want retry then regenerated destination", status, err, calls)
-	}
-}
-
-func TestVerifyRelocationExhaustedLookupErrorIsAppliedAndUnverified(t *testing.T) {
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), verificationItem(), func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{}, notFound("mailbox", "Archive")
-	}, noVerificationPause)
-	if status != "applied_destination_unverified" || err == nil || calls != len(verificationBackoff) {
-		t.Fatalf("verification = (%q, %v), calls=%d; want exhausted applied_destination_unverified", status, err, calls)
-	}
-}
-
-func TestVerifyRelocationDoesNotRetryPermanentAutomationError(t *testing.T) {
-	calls := 0
-	status, err := verifyRelocationWithLookup(context.Background(), verificationItem(), func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{}, errString("jxa error: not authorized to send Apple events (-1743)")
-	}, noVerificationPause)
-	if status != "applied_destination_unverified" || err == nil || calls != 1 {
-		t.Fatalf("verification = (%q, %v), calls=%d; want one permanent-error attempt", status, err, calls)
-	}
-}
-
-func TestVerifyRelocationCancellationInterruptsBackoff(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	calls := 0
-	status, err := verifyRelocationWithLookup(ctx, verificationItem(), func() (verificationPresence, error) {
-		calls++
-		return verificationPresence{}, notFound("mailbox", "Archive")
-	}, func(ctx context.Context, delay time.Duration) error {
-		cancel()
-		return waitForVerificationBackoff(ctx, delay)
-	})
-	if status != "unknown_after_timeout" || !errors.Is(err, context.Canceled) || calls != 1 {
-		t.Fatalf("verification = (%q, %v), calls=%d; want canceled backoff", status, err, calls)
 	}
 }
 
@@ -386,48 +215,6 @@ esac
 	}
 }
 
-func TestVerifyRelocationDoesNotAcceptSourceOnlyDisappearance(t *testing.T) {
-	item := verificationItem()
-	item.TargetMailbox = "Processed"
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		return verificationPresence{}, nil
-	}, noVerificationPause)
-	if status != "applied_destination_unverified" || err == nil {
-		t.Fatalf("verification = (%q, %v), want unverified failure", status, err)
-	}
-}
-
-func TestVerifyRelocationRequiresGmailArchiveDestination(t *testing.T) {
-	item := verificationItem()
-	item.GmailInboxSource = true
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		return verificationPresence{}, nil
-	}, noVerificationPause)
-	if status != "applied_destination_unverified" || err == nil {
-		t.Fatalf("verification = (%q, %v), want unverified without Gmail destination", status, err)
-	}
-}
-
-func TestVerifyRelocationDoesNotTreatGenericAllMailAsGmailTransition(t *testing.T) {
-	item := verificationItem()
-	status, err := verifyRelocationWithLookup(context.Background(), item, func() (verificationPresence, error) {
-		return verificationPresence{}, nil
-	}, noVerificationPause)
-	if status != "applied_destination_unverified" || err == nil {
-		t.Fatalf("verification = (%q, %v), want unverified generic source removal", status, err)
-	}
-}
-
-func TestVerifyRelocationClassifiesAppleEventTimeoutAsUnknown(t *testing.T) {
-	status, err := verifyRelocationWithLookup(context.Background(), verificationItem(), func() (verificationPresence, error) {
-		return verificationPresence{}, &AutomationTimeoutError{Engine: "applescript"}
-	}, noVerificationPause)
-	var timeout *AutomationTimeoutError
-	if status != "unknown_after_timeout" || !errors.As(err, &timeout) {
-		t.Fatalf("verification = (%q, %v), want timeout unknown", status, err)
-	}
-}
-
 func TestRunBatchRetainsMarkReadWhenArchiveTimesOut(t *testing.T) {
 	binDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(binDir, "osascript"), []byte("#!/bin/sh\ncase \"$*\" in *mail-app-cli-native-archive-account*) printf true ;; *AXIsProcessTrusted*) printf ready ;; *) printf Success ;; esac\n"), 0o755); err != nil {
@@ -456,8 +243,6 @@ func TestRunBatchRetainsMarkReadWhenArchiveTimesOut(t *testing.T) {
 func verificationItem() BatchItem {
 	return BatchItem{ID: "old", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "All Mail", Identity: StableIdentity{Sender: "sender@example.com", Subject: "subject", DateSent: "2026-08-29T00:00:00Z", MessageSize: 42}}
 }
-
-func noVerificationPause(context.Context, time.Duration) error { return nil }
 
 func withGmailCapabilityScript(t *testing.T, result string) {
 	t.Helper()

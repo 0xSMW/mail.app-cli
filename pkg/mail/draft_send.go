@@ -62,7 +62,7 @@ func (c *Client) PreviewDraftSend(accountName, draftID string) (*OutgoingResult,
 		return nil, err
 	}
 	draft := snapshot.Message
-	return c.PreviewOutgoing(OutgoingInput{Account: draft.Account, Sender: sender, Subject: draft.Subject, Body: body, To: draft.ToRecipients, Cc: draft.CcRecipients, Bcc: draft.BccRecipients})
+	return c.PreviewOutgoing(draftOutgoing(draft, sender, body))
 }
 
 // SendDraftResult supports only drafts whose raw MIME proves that rebuilding
@@ -121,7 +121,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 	if !sameDraftSnapshot(snapshot, current) {
 		return fail("verify_original", fmt.Errorf("draft changed while preparing submission"))
 	}
-	outgoing, err := c.composeOutgoing(OutgoingInput{Account: draft.Account, Sender: sender, Subject: draft.Subject, Body: body, To: draft.ToRecipients, Cc: draft.CcRecipients, Bcc: draft.BccRecipients, Attachments: attachments}, "send")
+	input := draftOutgoing(draft, sender, body)
+	input.Attachments = attachments
+	outgoing, err := c.composeOutgoing(input, "send")
 	if outgoing != nil {
 		result.AccountID, result.Sender, result.Submitted = outgoing.AccountID, outgoing.Sender, outgoing.Submitted
 	}
@@ -155,6 +157,9 @@ func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult,
 // This read bypasses Envelope Index latency and requires one unambiguous exact
 // local ID in the account-owned special Drafts mailbox. Every property read is strict.
 func (c *Client) readDraftSnapshot(accountName, draftID string) (*draftSnapshot, error) {
+	if c.nativeEnabled() {
+		return c.readNativeDraftSnapshot(accountName, draftID)
+	}
 	script := jxaDraftSnapshotScript(accountName, draftID)
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -220,6 +225,9 @@ func sameDraftSnapshot(a, b *draftSnapshot) bool {
 // Compare source and compose properties again inside the deletion bridge, so
 // another edit between submission and cleanup cannot remove the edited draft.
 func (c *Client) deleteUnchangedDraft(snapshot *draftSnapshot) error {
+	if c.nativeEnabled() {
+		return c.deleteNativeUnchangedDraft(snapshot)
+	}
 	script := jxaDraftCleanupScript(snapshot)
 	output, err := c.runJXA(script)
 	if err != nil {
@@ -246,19 +254,36 @@ const expected = %s;
 %s
 %s
 const acc = mail.accounts.byName(expected.message.account);
-const mbox = draftMailboxForAccount(mail, acc, false);
-const msg = messageById(mbox,expected.message.id);
-if (msg === null) throw new Error('Original draft unavailable after submission');
-const current = {subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())};
-if (msg.source() !== expected.source || current.subject !== expected.message.subject || current.sender !== expected.message.sender || current.content !== expected.message.content || JSON.stringify(current.toRecipients) !== JSON.stringify(expected.message.toRecipients) || JSON.stringify(current.ccRecipients) !== JSON.stringify(expected.message.ccRecipients) || JSON.stringify(current.bccRecipients) !== JSON.stringify(expected.message.bccRecipients)) throw new Error('Original draft changed after submission; retained');
-msg.delete();
-let removed = false;
-for (let i=0;i<30;i++) {
- if (messageById(mbox,expected.message.id) === null) { removed=true; break; }
- delay(0.1);
+const accountID = acc.id();
+if (typeof accountID !== 'string' || accountID.length === 0) throw new Error('Draft cleanup account identity unavailable');
+function currentDraftBox() {
+ const current = mail.accounts.byName(expected.message.account);
+ if (current.id() !== accountID) throw new Error('Draft cleanup account identity changed');
+ return draftMailboxForAccount(mail,current,false);
 }
-if (!removed) throw new Error('Original draft removal could not be verified after submission');
-JSON.stringify({deleted:true});
+function cleanupOriginalDraft() {
+ const msg = messageById(currentDraftBox(),expected.message.id);
+ if (msg === null) { currentDraftBox(); return true; }
+ const current = {subject:msg.subject(),sender:msg.sender(),content:msg.content(),toRecipients:msg.toRecipients().map(r=>r.address()),ccRecipients:msg.ccRecipients().map(r=>r.address()),bccRecipients:msg.bccRecipients().map(r=>r.address())};
+ if (msg.source() !== expected.source || current.subject !== expected.message.subject || current.sender !== expected.message.sender || current.content !== expected.message.content || JSON.stringify(current.toRecipients) !== JSON.stringify(expected.message.toRecipients) || JSON.stringify(current.ccRecipients) !== JSON.stringify(expected.message.ccRecipients) || JSON.stringify(current.bccRecipients) !== JSON.stringify(expected.message.bccRecipients)) throw new Error('Original draft changed after preparation; retained');
+ currentDraftBox();
+ msg.delete();
+ for (let i=0;i<30;i++) {
+  try {
+   if (messageById(currentDraftBox(),expected.message.id) === null) {currentDraftBox(); return true;}
+  } catch(e) {
+   if (e.errorNumber !== -1728) throw e;
+   // A failed nested read is not absence. Fresh strict IDs in the same owned
+   // account may independently establish that the exact deleted ID is gone.
+   const ids=draftIDs(currentDraftBox());
+   currentDraftBox();
+   if (!ids.includes(expected.message.id)) return true;
+  }
+  delay(0.1);
+ }
+ throw new Error('Original draft removal could not be verified after preparation');
+}
+JSON.stringify({deleted:cleanupOriginalDraft()});
 `, string(expected), jxaDraftMailboxHelper(), jxaDraftMessageByIDHelper())
 }
 
@@ -266,16 +291,33 @@ JSON.stringify({deleted:true});
 // mailbox must never be interpreted as absence during destructive cleanup.
 func jxaDraftMessageByIDHelper() string {
 	return `
+function draftIDs(mbox) {
+ const owner=mbox.account().id();
+ if(typeof owner !== 'string' || owner.length === 0)throw new Error('Draft mailbox account identity unavailable');
+ const ids=mbox.messages.id();
+ if(!Array.isArray(ids))throw new Error('Draft mailbox IDs unavailable');
+ const seen={};
+ return ids.map(value=>{
+  let id;
+  if(typeof value==='number' && Number.isSafeInteger(value) && value>0)id=String(value);
+  else if(typeof value==='string' && /^[1-9][0-9]*$/.test(value) && Number.isSafeInteger(Number(value)))id=value;
+  else throw new Error('Draft mailbox contains an invalid ID');
+  if(seen[id])throw new Error('Draft mailbox contains duplicate IDs');
+  seen[id]=true;return id;
+ });
+}
 function messageById(mbox, messageId) {
- const ids = mbox.messages.id();
- if (!Array.isArray(ids)) throw new Error('Draft mailbox IDs unavailable');
- const matches = ids.map((id,index)=>({id:String(id),index:index})).filter(v=>v.id===messageId);
- if (matches.length > 1) throw new Error('Draft ID is ambiguous in mailbox');
- if (matches.length === 0) return null;
- const msg = mbox.messages.at(matches[0].index);
- if (String(msg.id()) !== messageId) throw new Error('Draft ID changed during lookup');
+ if(typeof messageId !== 'string' || !/^[1-9][0-9]*$/.test(messageId) || !Number.isSafeInteger(Number(messageId)))throw new Error('Draft ID is invalid');
+ const ids=draftIDs(mbox);
+ if(!ids.includes(messageId))return null;
+ const msg=mbox.messages.byId(Number(messageId));
+ if(String(msg.id()) !== messageId)throw new Error('Draft ID changed during lookup');
+ const deleted=msg.deletedStatus();
+ if(typeof deleted !== 'boolean')throw new Error('Draft deleted status is not a Boolean');
+ if(deleted===true)return null;
  return msg;
 }
+
 `
 }
 
@@ -298,12 +340,12 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	if err != nil || subject != snapshot.Message.Subject {
 		return "", nil, fmt.Errorf("draft subject does not match its raw source")
 	}
-	from, err := mail.ParseAddress(parsed.Header.Get("From"))
+	from, err := draftSenderAddress(parsed.Header.Get("From"))
 	if err != nil {
 		return "", nil, fmt.Errorf("draft source sender unavailable: %w", err)
 	}
-	sender, err := mail.ParseAddress(snapshot.Message.Sender)
-	if err != nil || !strings.EqualFold(from.Address, sender.Address) {
+	sender, err := draftSenderAddress(snapshot.Message.Sender)
+	if err != nil || !strings.EqualFold(from, sender) {
 		return "", nil, fmt.Errorf("draft sender does not match its raw source")
 	}
 	for _, item := range []struct {
@@ -349,12 +391,16 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 		}
 		return body, nil, err
 	}
+	if kind == "multipart/alternative" {
+		return applePlainAlternativeBody(snapshot, parsed.Body, params)
+	}
 	if kind != "multipart/mixed" || params["boundary"] == "" || len(params) != 1 {
 		return "", nil, fmt.Errorf("draft MIME %s cannot be reconstructed without losing formatting; send this draft in Mail", kind)
 	}
 	reader := multipart.NewReader(parsed.Body, params["boundary"])
 	body := ""
 	haveBody := false
+	bodyValidated := false
 	var attachments []draftMIMEAttachment
 	for {
 		part, err := reader.NextRawPart()
@@ -389,6 +435,19 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 			haveBody = true
 			continue
 		}
+		if !haveBody && partKind == "multipart/alternative" && disposition == "" {
+			var related []draftMIMEAttachment
+			body, related, err = applePlainAlternativeBody(snapshot, part, partParams)
+			if err != nil {
+				return "", nil, err
+			}
+			haveBody = true
+			// The alternative parser already proved the entire stored/body
+			// relationship, which may canonicalize Mail's wrapper layout.
+			bodyValidated = true
+			attachments = append(attachments, related...)
+			continue
+		}
 		if disposition != "attachment" || strings.HasPrefix(partKind, "multipart/") || partKind == "message/rfc822" || partKind == "message/external-body" || partKind == "application/pkcs7-mime" || partKind == "application/pgp-encrypted" || len(dispositionParams) != 1 {
 			return "", nil, fmt.Errorf("inline, nested, external, signed, encrypted, or additional body content cannot be reconstructed safely")
 		}
@@ -405,8 +464,10 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 	if !haveBody {
 		return "", nil, fmt.Errorf("plain-text draft body unavailable")
 	}
-	if err := validateDraftBody(snapshot, body); err != nil {
-		return "", nil, err
+	if !bodyValidated {
+		if err := validateDraftBody(snapshot, body); err != nil {
+			return "", nil, err
+		}
 	}
 	return body, attachments, nil
 }
@@ -419,24 +480,9 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 func reconstructibleAppleDraftHeader(key, value string) bool {
 	switch key {
 	case "X-Apple-Mail-Signature":
-		if value == "" {
-			return true
-		}
 		// Mail stores the selected signature's UUID, while the actual signature
 		// content must already be represented by the verified message body.
-		if len(value) != 36 {
-			return false
-		}
-		for i, ch := range value {
-			if i == 8 || i == 13 || i == 18 || i == 23 {
-				if ch != '-' {
-					return false
-				}
-			} else if !strings.ContainsRune("0123456789abcdefABCDEF", ch) {
-				return false
-			}
-		}
-		return true
+		return value == "" || isAppleDraftUUID(value)
 	case "X-Apple-Base-Url":
 		if !strings.HasPrefix(value, "x-msg://") || !strings.HasSuffix(value, "/") {
 			return false
@@ -520,11 +566,26 @@ func compareDraftMIMEAttachments(paths []string, expected []draftMIMEAttachment)
 }
 
 func draftSenderAddress(value string) (string, error) {
-	parsed, err := mail.ParseAddress(value)
-	if err != nil || parsed.Address == "" {
-		return "", fmt.Errorf("draft sender cannot be preserved: %q", value)
+	if !strings.ContainsAny(value, "\r\n") {
+		if parsed, err := mail.ParseAddress(value); err == nil && parsed.Address != "" {
+			return parsed.Address, nil
+		}
+		// Exchange can expose an address as its own unquoted display name.
+		// Accept only that duplicate-mailbox shape, without broadening the
+		// parser to arbitrary malformed display names or multiple senders.
+		trimmed := strings.TrimSpace(value)
+		if strings.Count(trimmed, "<") == 1 && strings.Count(trimmed, ">") == 1 && strings.HasSuffix(trimmed, ">") {
+			open := strings.IndexByte(trimmed, '<')
+			display := strings.TrimSpace(trimmed[:open])
+			mailbox := strings.TrimSpace(trimmed[open+1 : len(trimmed)-1])
+			left, leftErr := mail.ParseAddress(display)
+			right, rightErr := mail.ParseAddress(mailbox)
+			if leftErr == nil && rightErr == nil && left.Name == "" && right.Name == "" && strings.EqualFold(display, left.Address) && strings.EqualFold(mailbox, right.Address) && strings.EqualFold(left.Address, right.Address) {
+				return right.Address, nil
+			}
+		}
 	}
-	return parsed.Address, nil
+	return "", fmt.Errorf("draft sender cannot be preserved: %q", value)
 }
 
 func validateDraftBody(snapshot *draftSnapshot, body string) error {

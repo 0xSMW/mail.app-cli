@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -46,7 +47,7 @@ func fakeRelocationIndex(t *testing.T, source, target, actualSourceURL, sourceRo
  *)
  if [ '%t' = true ] && [ "$n" -lt 3 ]; then printf '%%s\n' '%s'; else printf '%%s\n' '%s'; fi ;;
  esac ;;
-`, counter, counter, counter, indexMailboxURLPattern("ABC", source), recur, snapshotRows(true, false), snapshotRows(true, true), recur, snapshotRows(false, false), snapshotRows(false, true))
+`, counter, counter, counter, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", source), "imap://ABC/")), recur, snapshotRows(true, false), snapshotRows(true, true), recur, snapshotRows(false, false), snapshotRows(false, true))
 	script := fmt.Sprintf(`#!/bin/sh
 case "$4" in
 %s
@@ -59,7 +60,7 @@ case "$4" in
  *"%s"*) printf '%%s\n' '[{"ID":2,"URL":"%s","TotalCount":1,"UnreadCount":0}]' ;;
  *) printf '[]\n' ;;
 esac
-`, snapshotScript, counter, counter, counter, recur, sourceRows, destinationRows, indexMailboxURLPattern("ABC", source), actualSourceURL, indexMailboxURLPattern("ABC", target), indexMailboxURLPattern("ABC", target))
+`, snapshotScript, counter, counter, counter, recur, sourceRows, destinationRows, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", source), "imap://ABC/")), actualSourceURL, sqlQuote(strings.TrimPrefix(indexMailboxURLPattern("ABC", target), "imap://ABC/")), indexMailboxURLPattern("ABC", target))
 	if err := os.WriteFile(filepath.Join(bin, "sqlite3"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +69,7 @@ esac
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)
+	t.Setenv("MAIL_APP_CLI_TEST_SOURCE_COUNT", counter)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
 	previous := verificationBackoff
@@ -334,5 +336,102 @@ func TestReconcileRejectsUnsupportedOrMismatchedReceiptsBeforeRead(t *testing.T)
 		if _, err := ReconcileMutations(NewClient(), tc.opts, tc.receipt); err == nil {
 			t.Fatalf("receipt accepted: %+v opts=%+v", tc.receipt, tc.opts)
 		}
+	}
+}
+
+// These cases exercise the grouped production verifier, including its final
+// observation, rather than a second polling algorithm used only by tests.
+func TestRelocationProductionObservations(t *testing.T) {
+	for _, tc := range []struct{ name, sourceRows, targetRows, want string }{
+		{"regenerated destination ID", "[]", "[" + fakeIdentityRow + "]", "confirmed_destination"},
+		{"source remains with destination", "[" + fakeIdentityRow + "]", "[" + fakeIdentityRow + "]", "present_in_source"},
+		{"source disappearance needs destination", "[]", "[]", "applied_destination_unverified"},
+		{"source only", "[" + fakeIdentityRow + "]", "[]", "present_in_source"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fakeRelocationIndex(t, "INBOX", "Processed", "imap://ABC/INBOX", tc.sourceRows, tc.targetRows, false)
+			item := verificationItem()
+			item.ID, item.TargetMailbox, item.Status = "old-local-id", "Processed", "succeeded"
+			got := VerifyMutations(client, BatchOptions{Action: "move"}, []BatchItem{item})[0]
+			if got.VerifyStatus != tc.want {
+				t.Fatalf("got %+v, want %s", got, tc.want)
+			}
+			data, err := os.ReadFile(os.Getenv("MAIL_APP_CLI_TEST_SOURCE_COUNT"))
+			if err != nil || strings.TrimSpace(string(data)) != fmt.Sprint(len(verificationBackoff)) {
+				t.Fatalf("observations=%s err=%v; want every scheduled observation", data, err)
+			}
+			if tc.want == "confirmed_destination" && (got.Observed == nil || len(got.Observed.DestinationIDs) != 1 || got.Observed.DestinationIDs[0] != "205") {
+				t.Fatalf("regenerated ID missing: %+v", got.Observed)
+			}
+		})
+	}
+}
+
+func TestRelocationProductionLookupFailuresAndCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		name, bridgeError, want string
+		cancel                  bool
+	}{
+		{name: "permission failure", bridgeError: "not authorized to send Apple events (-1743)", want: "applied_destination_unverified"},
+		{name: "lookup timeout", bridgeError: "AppleEvent timed out (-1712)", want: "unknown_after_timeout"},
+		{name: "cancelled before observation", cancel: true, want: "unknown_after_timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fakeRelocationIndex(t, "INBOX", "Processed", "imap://ABC/INBOX", "[]", "[]", false)
+			t.Setenv("MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX", "1")
+			log := filepath.Join(t.TempDir(), "lookups")
+			script := fmt.Sprintf("#!/bin/sh\nprintf 'call\n' >> '%s'\nprintf '%%s\n' '%s' >&2\nexit 1\n", log, tc.bridgeError)
+			if err := os.WriteFile(filepath.Join(os.Getenv("PATH"), "osascript"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.cancel {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				client = client.WithContext(ctx)
+			}
+			item := verificationItem()
+			item.TargetMailbox, item.Status = "Processed", "succeeded"
+			got := VerifyMutations(client, BatchOptions{Action: "move"}, []BatchItem{item})[0]
+			if got.VerifyStatus != tc.want || got.VerifyError == "" {
+				t.Fatalf("got %+v, want %s", got, tc.want)
+			}
+			if tc.cancel {
+				if _, err := os.Stat(log); !os.IsNotExist(err) {
+					t.Fatalf("cancelled observation invoked bridge: %v", err)
+				}
+			} else {
+				data, err := os.ReadFile(log)
+				if err != nil || strings.Count(string(data), "call") != 2*len(verificationBackoff) {
+					t.Fatalf("lookups=%s err=%v; want both scopes at every observation", data, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBatchMutationJournalFailureRetainsAppliedAttempt(t *testing.T) {
+	journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer journal.Close()
+	attempts := 0
+	items := []BatchItem{{ID: "1", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "Processed"}, {ID: "2", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "Processed"}}
+	result, err := RunBatch(NewClient(), BatchOptions{Action: "move", Receipt: journal}, items, func(*Client, *BatchItem) error {
+		attempts++
+		if err := journal.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	})
+	if err == nil || attempts != 1 || result.Attempted != 1 || result.Succeeded != 0 || result.Failed != 1 || len(result.Items) != 1 {
+		t.Fatalf("attempts=%d result=%+v err=%v", attempts, result, err)
+	}
+	if result.Items[0].Status != "unknown" || !strings.HasPrefix(result.Items[0].Error, "receipt durability after mutation: ") || result.JournalError == "" {
+		t.Fatalf("applied attempt disappeared after journal failure: %+v", result)
+	}
+	events := readJournalEvents(t, journal.Path())
+	if countJournalEvents(events, "mutation_started") != 1 || countJournalEvents(events, "mutation_succeeded") != 0 {
+		t.Fatalf("durability ordering changed: %+v", events)
 	}
 }

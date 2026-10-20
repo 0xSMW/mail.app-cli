@@ -4,85 +4,11 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
 )
-
-var recentLimit int
-
-var recentCmd = &cobra.Command{
-	Use:   "recent",
-	Short: "Reopen recently handled messages",
-	Annotations: map[string]string{
-		annotationAgentNotes: "A local journal of messages touched by show, search, archive, and move. Use it to get back to a message without a broad search. --account and --mailbox narrow it.",
-	},
-}
-
-var recentSearchCmd = &cobra.Command{
-	Use:   "search <query>",
-	Short: "Search the recent-message journal",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		mailbox := ""
-		if mailboxExplicit() {
-			mailbox = mailboxInScope()
-		}
-		messages, err := mail.SearchRecentMessages(args[0], resolved.Account.Value, mailbox, recentLimit, "")
-		if err != nil {
-			return fmt.Errorf("search recent messages: %w", err)
-		}
-		return writer.Write(output.Result{
-			Data:    messages,
-			Summary: fmt.Sprintf("%s in the recent journal", plural(len(messages), "match")),
-			Meta:    map[string]any{"source": "recent"},
-			Plain:   renderMessages(messages, true),
-		})
-	},
-}
-
-var recentShowCmd = &cobra.Command{
-	Use:   "show <message-id-or-query>",
-	Short: "Show a recently handled message by ID or query",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		mailbox := ""
-		if mailboxExplicit() {
-			mailbox = mailboxInScope()
-		}
-		entry, err := mail.ResolveRecentMessage(args[0], resolved.Account.Value, mailbox)
-		if err != nil {
-			return err
-		}
-		message, err := getRecentMessageDetails(mailClient, entry)
-		if err != nil {
-			return fmt.Errorf("get recent message: %w", err)
-		}
-		_ = mail.RecordRecentMessage(*message, "recent-show")
-		return writer.Write(output.Result{
-			Data:    message,
-			Summary: fmt.Sprintf("%s from %s", output.Truncate(message.Subject, 60), displaySender(message.Sender)),
-			Meta:    map[string]any{"account": message.Account, "mailbox": message.Mailbox},
-			Plain:   renderMessage(message, false),
-		})
-	},
-}
-
-var recentClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Clear the recent-message journal",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := mail.ClearRecentMessages(); err != nil {
-			return err
-		}
-		return writer.Write(output.Result{
-			Data:    map[string]any{"cleared": true},
-			Summary: "Cleared the recent-message journal",
-			Plain:   renderLine("Cleared the recent-message journal"),
-		})
-	},
-}
 
 func getRecentMessageDetails(client *mail.Client, entry *mail.RecentMessage) (*mail.Message, error) {
 	candidates := recentMailboxCandidates(entry.Mailbox)
@@ -122,7 +48,78 @@ func recentMailboxCandidates(mailbox string) []string {
 	return ordered
 }
 
-func init() {
-	recentCmd.AddCommand(recentSearchCmd, recentShowCmd, recentClearCmd)
-	recentSearchCmd.Flags().IntVarP(&recentLimit, "limit", "l", 10, "Maximum recent messages")
+func (a *application) buildRecentCommands() {
+	var recentLimit int
+
+	a.recentCmd = &cobra.Command{
+		Use:   "recent",
+		Short: "Reopen recently handled messages",
+		Annotations: map[string]string{
+			annotationAgentNotes: "A local journal of messages touched by show, search, archive, and move. Use it to get back to a message without a broad search. --account and --mailbox narrow it.",
+		},
+	}
+	a.recentSearchCmd = &cobra.Command{
+		Use:   "search <query>",
+		Short: "Search the recent-message journal",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mailbox := ""
+			if a.mailboxExplicit() {
+				mailbox = a.mailboxInScope()
+			}
+			messages, err := mail.SearchRecentMessages(args[0], a.resolved.Account.Value, mailbox, recentLimit, "")
+			if err != nil {
+				return fmt.Errorf("search recent messages: %w", err)
+			}
+			return a.writer.Write(output.Result{
+				Data:    messages,
+				Summary: fmt.Sprintf("%s in the recent journal", plural(len(messages), "match")),
+				Meta:    map[string]any{"source": "recent"},
+				Plain:   renderMessages(messages, true),
+			})
+		},
+	}
+	recentShowCmd := &cobra.Command{
+		Use:   "show <message-id-or-query>",
+		Short: "Show a recently handled message by ID or query",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			mailbox := ""
+			if a.mailboxExplicit() {
+				mailbox = a.mailboxInScope()
+			}
+			entry, err := mail.ResolveRecentMessage(args[0], a.resolved.Account.Value, mailbox)
+			if err != nil {
+				return err
+			}
+			message, err := getRecentMessageDetails(a.mailClient, entry)
+			if err != nil {
+				return fmt.Errorf("get recent message: %w", err)
+			}
+			_ = mail.RecordRecentMessage(*message, "recent-show")
+			return a.writer.Write(output.Result{
+				Data:    message,
+				Summary: fmt.Sprintf("%s from %s", output.Truncate(message.Subject, 60), displaySender(message.Sender)),
+				Meta:    map[string]any{"account": message.Account, "mailbox": message.Mailbox},
+				Plain:   renderMessage(message, false),
+			})
+		},
+	}
+	a.recentClearCmd = &cobra.Command{
+		Use:   "clear",
+		Short: "Clear the recent-message journal",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := mail.ClearRecentMessages(); err != nil {
+				return err
+			}
+			return a.writer.Write(output.Result{
+				Data:    map[string]any{"cleared": true},
+				Summary: "Cleared the recent-message journal",
+				Plain:   renderLine("Cleared the recent-message journal"),
+			})
+		},
+	}
+
+	a.recentCmd.AddCommand(a.recentSearchCmd, recentShowCmd, a.recentClearCmd)
+	a.recentSearchCmd.Flags().IntVarP(&recentLimit, "limit", "l", 10, "Maximum recent messages")
 }

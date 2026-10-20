@@ -9,7 +9,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // --- confirm ---
@@ -234,7 +234,7 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	m.notice = ""
 	switch {
 	case !msg.result.Complete:
-		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be searched"
+		m.notice = plural(len(msg.result.FailedMailboxes), "mailbox") + " could not be completely searched"
 	case len(msg.result.Messages) >= searchLimit:
 		m.notice = "showing the newest " + strconv.Itoa(searchLimit) + " matches; narrow the query for older ones"
 	}

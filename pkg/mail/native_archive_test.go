@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const nativeArchiveOwnedEvent = `printf '%s\n' 'mail-app-cli-phase {"name":"archive-viewer-owned","state":"done","note":"{\"viewerId\":42,\"previousApp\":\"com.example.editor\"}"}' >&2
+const nativeArchiveOwnedEvent = `printf '%s\n' 'mail-app-cli-phase {"name":"archive-viewer-owned","state":"done","note":"{\"viewerId\":42}"}' >&2
 `
 const nativeArchivePressEvent = `printf '%s\n' 'mail-app-cli-phase {"name":"native-archive-press","state":"start"}' >&2
 `
@@ -148,7 +148,13 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 		presses   int
 		wantError bool
 	}{
-		{"non-gmail", 0, true}, {"gmail-lookalike", 0, true}, {"googlemail", 1, false}, {"apply", 1, false}, {"prepare", 0, false}, {"wrong-id", 0, true}, {"source", 0, true}, {"conversation", 0, true}, {"foreground", 0, true}, {"preview", 0, true}, {"late-selection", 0, true}, {"late-foreground", 0, true}, {"focus-window", 0, true}, {"press-error", 1, true},
+		{"non-gmail", 0, true}, {"gmail-lookalike", 0, true}, {"googlemail", 1, false}, {"apply", 1, false}, {"prepare", 0, false}, {"wrong-id", 0, true}, {"source", 0, true}, {"conversation", 0, true}, {"background-editor", 1, false}, {"background-other-mail-window", 1, false}, {"disabled-menu", 1, false}, {"preview", 0, true}, {"late-selection", 0, true}, {"press-error", 1, true},
+		{"existing-viewer-id", 0, true}, {"created-viewer-missing", 0, true}, {"created-viewer-ambiguous", 0, true},
+		{"ambiguous-window", 0, true}, {"changed-window", 0, true}, {"late-ambiguous-window", 0, true},
+		{"ambiguous-table", 0, true}, {"changed-table", 0, true}, {"late-ambiguous-table", 0, true},
+		{"missing-current-row", 0, true}, {"duplicate-current-row", 0, true}, {"changed-selected-row", 0, true}, {"late-conversation", 0, true},
+		{"boxed-action-names", 1, false}, {"boxed-unsupported-button", 0, true}, {"disabled-button", 0, true}, {"ambiguous-button", 0, true}, {"unsupported-button", 0, true}, {"action-query-error", 0, true},
+		{"changed-button", 0, true}, {"late-disabled-button", 0, true}, {"late-ambiguous-button", 0, true},
 	} {
 		t.Run(tt.scenario, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -160,9 +166,12 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 				t.Fatalf("mock execution: %v: %s", err, out)
 			}
 			var got struct {
-				Presses       int
-				Output, Error string
-				Events        []phaseEvent
+				Presses                             int
+				Output, Error                       string
+				Events                              []phaseEvent
+				ActivationCalls, FocusReads         int
+				TableChildReads, SidebarChildReads  int
+				UnusedViewerPresent, FocusPreserved bool
 			}
 			if err := json.Unmarshal(out, &got); err != nil {
 				t.Fatalf("decode mock: %v: %s", err, out)
@@ -170,15 +179,26 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 			if got.Presses != tt.presses || (got.Error != "") != tt.wantError {
 				t.Fatalf("mock result = %s", out)
 			}
+			if got.TableChildReads != 0 || got.SidebarChildReads != 0 {
+				t.Fatalf("unbounded discovery = %s", out)
+			}
+			if got.ActivationCalls != 0 || got.FocusReads != 0 || !got.UnusedViewerPresent || !got.FocusPreserved {
+				t.Fatalf("background isolation = %s", out)
+			}
 			if !tt.wantError {
 				var result struct{ Prepared, Applied bool }
-				if err := json.Unmarshal([]byte(got.Output), &result); err != nil || !result.Prepared || result.Applied != (tt.scenario == "apply" || tt.scenario == "googlemail") {
+				if err := json.Unmarshal([]byte(got.Output), &result); err != nil || !result.Prepared || result.Applied != (tt.scenario != "prepare") {
 					t.Fatalf("result = %s", out)
 				}
 			}
-			if tt.scenario == "non-gmail" || tt.scenario == "gmail-lookalike" {
+			if tt.scenario == "non-gmail" || tt.scenario == "gmail-lookalike" || tt.scenario == "existing-viewer-id" {
 				if len(got.Events) != 0 {
 					t.Fatalf("ineligible account created viewer: %#v", got.Events)
+				}
+			}
+			if tt.scenario == "created-viewer-missing" || tt.scenario == "created-viewer-ambiguous" {
+				if len(got.Events) != 1 || got.Events[0].Name != "archive-viewer-owned" || got.Events[0].State != "done" {
+					t.Fatalf("post-creation failure lost ownership marker: %s", out)
 				}
 			}
 			if tt.scenario == "press-error" {
@@ -280,5 +300,137 @@ printf '%s' "$NATIVE_PROBE_RESPONSE"`)
 	data, err = os.ReadFile(log)
 	if err != nil || string(data) != "probe\nprobe\n" {
 		t.Fatalf("refreshed probes=%q err=%v", data, err)
+	}
+}
+
+func TestNativeArchiveCleanupOnlyClosesOwnedViewer(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for JXA mocks")
+	}
+	for _, tt := range []struct {
+		scenario   string
+		wantClosed int
+		wantError  bool
+	}{
+		{"cleanup-owned", 1, false}, {"cleanup-missing", 0, false}, {"cleanup-ambiguous", 0, true}, {"cleanup-remains", 1, true},
+	} {
+		t.Run(tt.scenario, func(t *testing.T) {
+			cmd := exec.Command(node, "testdata/native_archive_mock.js", tt.scenario)
+			cmd.Stdin = strings.NewReader(nativeArchiveAXHelper + nativeArchiveCleanupScript)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("mock execution: %v: %s", err, out)
+			}
+			var got struct {
+				Closed                              []int
+				Error, Output                       string
+				ActivationCalls, FocusReads         int
+				TableChildReads, SidebarChildReads  int
+				UnusedViewerPresent, FocusPreserved bool
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("decode mock: %v: %s", err, out)
+			}
+			if len(got.Closed) != tt.wantClosed || (got.Error != "") != tt.wantError || got.ActivationCalls != 0 || got.FocusReads != 0 || !got.UnusedViewerPresent || !got.FocusPreserved {
+				t.Fatalf("cleanup result = %s", out)
+			}
+			if !tt.wantError && got.Output != "closed" {
+				t.Fatalf("cleanup output = %s", out)
+			}
+		})
+	}
+}
+
+func TestNativeArchiveScriptsNeverRequestFocus(t *testing.T) {
+	for _, forbidden := range []string{"activate", "previousApp", "frontApp", "frontmostApplication", "AXFocusedWindow", "AXRaise", "keystroke"} {
+		if strings.Contains(nativeArchiveScript+nativeArchiveCleanupScript, forbidden) {
+			t.Fatalf("native archive scripts contain forbidden foreground dependency %q", forbidden)
+		}
+	}
+}
+
+func TestNativeArchiveAccountProbeFailuresAreNotCached(t *testing.T) {
+	for _, failure := range []string{"invalid", "command-error"} {
+		t.Run(failure, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "probes.log")
+			t.Setenv("NATIVE_DISPATCH_LOG", log)
+			t.Setenv("NATIVE_PROBE_RESPONSE", failure)
+			t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", filepath.Join(t.TempDir(), "lock"))
+			writeFakeOsaScript(t, `printf 'probe\n' >> "$NATIVE_DISPATCH_LOG"
+if [ "$NATIVE_PROBE_RESPONSE" = command-error ]; then exit 1; fi
+printf '%s' "$NATIVE_PROBE_RESPONSE"`)
+			client := NewClient()
+			if _, err := client.archiveUsesNative("Test", "INBOX", "All Mail"); err == nil {
+				t.Fatal("failed probe succeeded")
+			}
+			t.Setenv("NATIVE_PROBE_RESPONSE", "true")
+			got, err := client.archiveUsesNative("Test", "INBOX", "All Mail")
+			if err != nil || !got {
+				t.Fatalf("retry native=%v error=%v", got, err)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil || string(data) != "probe\nprobe\n" {
+				t.Fatalf("probes=%q error=%v", data, err)
+			}
+		})
+	}
+}
+
+func TestNativeArchivePostCreationReadFailureCleansOwnedViewer(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for JXA mocks")
+	}
+	for _, scenario := range []string{"created-viewer-read-error", "created-viewer-id-read-error"} {
+		t.Run(scenario, func(t *testing.T) {
+			cmd := exec.Command(node, "testdata/native_archive_mock.js", scenario)
+			cmd.Stdin = strings.NewReader(nativeArchiveScript + "\n// archive-mock-cleanup\n" + nativeArchiveAXHelper + nativeArchiveCleanupScript)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("mock execution: %v: %s", err, out)
+			}
+			var got struct {
+				Presses                             int
+				Error, CleanupError, CleanupOutput  string
+				Events                              []phaseEvent
+				Closed                              []int
+				UnusedViewerPresent, FocusPreserved bool
+			}
+			if err := json.Unmarshal(out, &got); err != nil {
+				t.Fatalf("decode mock: %v: %s", err, out)
+			}
+			if got.Error == "" || got.Presses != 0 || got.CleanupError != "" || got.CleanupOutput != "closed" || len(got.Closed) != 1 || got.Closed[0] != 42 || !got.UnusedViewerPresent || !got.FocusPreserved {
+				t.Fatalf("post-creation cleanup = %s", out)
+			}
+			if len(got.Events) != 1 || got.Events[0].Name != "archive-viewer-owned" || got.Events[0].State != "done" {
+				t.Fatalf("post-creation failure lost ownership marker: %s", out)
+			}
+		})
+	}
+}
+
+func TestNativeArchiveDiscoveryPrunesMessageRowsAndSidebar(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node unavailable for JXA mocks")
+	}
+	cmd := exec.Command(node, "testdata/native_archive_mock.js", "bounded-discovery")
+	cmd.Stdin = strings.NewReader(nativeArchiveAXHelper + `
+const window = ax(mailAX(),'AXWindows')[0];
+JSON.stringify({tables:matchingAX(window,'Mail.messageList',0,[]).length,missing:matchingAX(window,'NoSuchWindowControl',0,[]).length});`)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("mock execution: %v: %s", err, out)
+	}
+	var got struct {
+		Error, Output                      string
+		TableChildReads, SidebarChildReads int
+	}
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("decode mock: %v: %s", err, out)
+	}
+	if got.Error != "" || got.TableChildReads != 0 || got.SidebarChildReads != 0 || got.Output != `{"tables":1,"missing":0}` {
+		t.Fatalf("unbounded discovery = %s", out)
 	}
 }

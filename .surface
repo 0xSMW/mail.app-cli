@@ -1,6 +1,7 @@
 (root)
 (root) --account (-a)
 (root) --agent [hidden]
+(root) --backend
 (root) --count
 (root) --help (-h)
 (root) --ids-only
@@ -76,8 +77,11 @@ drafts create --body
 drafts create --body-file
 drafts create --cc
 drafts create --dry-run
+drafts create --forward-of
 drafts create --from
 drafts create --help (-h)
+drafts create --reply-all
+drafts create --reply-to
 drafts create --subject
 drafts create --to
 drafts delete
@@ -142,6 +146,31 @@ inbox --limit (-l)
 inbox --offset (-o)
 inbox --unread (-u)
 inbox --with-content
+labels
+labels --email
+labels --help (-h)
+labels add
+labels add --dry-run
+labels add --help (-h)
+labels add --label
+labels auth
+labels auth --help (-h)
+labels auth connect
+labels auth connect --client-secret
+labels auth connect --help (-h)
+labels auth import
+labels auth import --credentials
+labels auth import --help (-h)
+labels list
+labels list --help (-h)
+labels reconcile
+labels reconcile --help (-h)
+labels remove
+labels remove --dry-run
+labels remove --help (-h)
+labels remove --label
+labels show
+labels show --help (-h)
 mailboxes
 mailboxes --help (-h)
 mailboxes list
@@ -392,8 +421,11 @@ send --body
 send --body-file
 send --cc (-c)
 send --dry-run
+send --forward-of
 send --from
 send --help (-h)
+send --reply-all
+send --reply-to
 send --signature
 send --subject (-s)
 send --to (-t)

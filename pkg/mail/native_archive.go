@@ -18,8 +18,7 @@ func (e *NativeArchiveError) Error() string { return e.Err.Error() }
 func (e *NativeArchiveError) Unwrap() error { return e.Err }
 
 type archiveViewerOwnership struct {
-	ViewerID    int    `json:"viewerId"`
-	PreviousApp string `json:"previousApp"`
+	ViewerID int `json:"viewerId"`
 }
 
 func needsNativeArchive(source, destination string) bool {
@@ -38,16 +37,27 @@ func (c *Client) archiveUsesNative(account, source, destination string) (bool, e
 	if cached {
 		return useNative, nil
 	}
-	quoted, _ := json.Marshal(account)
-	output, err := c.runJXA("// mail-app-cli-native-archive-account\nconst account = Application('Mail').accounts.byName(" + string(quoted) + ");\n" + nativeArchiveGmailHelper + "JSON.stringify(isGmailArchiveAccount(account));")
-	if err != nil {
-		return false, err
+	if c.nativeEnabled() {
+		var err error
+		err = c.withNativeAutomation(defaultAutomationTimeout, func(n *nativeMail) error {
+			useNative, err = n.gmailArchiveAccount(account)
+			return err
+		})
+		if err != nil {
+			return false, err
+		}
+	} else {
+		quoted, _ := json.Marshal(account)
+		output, err := c.runJXA("// mail-app-cli-native-archive-account\nconst account = Application('Mail').accounts.byName(" + string(quoted) + ");\n" + nativeArchiveGmailHelper + "JSON.stringify(isGmailArchiveAccount(account));")
+		if err != nil {
+			return false, err
+		}
+		var eligible *bool
+		if err := json.Unmarshal([]byte(output), &eligible); err != nil || eligible == nil {
+			return false, fmt.Errorf("native archive account check returned an invalid response")
+		}
+		useNative = *eligible
 	}
-	var eligible *bool
-	if err := json.Unmarshal([]byte(output), &eligible); err != nil || eligible == nil {
-		return false, fmt.Errorf("native archive account check returned an invalid response")
-	}
-	useNative = *eligible
 	c.shared.accountsMu.Lock()
 	if c.shared.nativeArchiveAccounts == nil {
 		c.shared.nativeArchiveAccounts = make(map[string]bool)
@@ -66,6 +76,12 @@ function isGmailArchiveAccount(account) {
 // Check permission before a batch performs its separately requested mark-read.
 // The action repeats this check and validates the actual Mail controls.
 func (c *Client) preflightNativeArchive() error {
+	if c.nativeEnabled() {
+		if err := c.Done(); err != nil {
+			return err
+		}
+		return c.archiveAX().Trusted()
+	}
 	output, err := c.runJXA(`ObjC.import('ApplicationServices');if (!$.AXIsProcessTrusted()) throw Error('Native Gmail archive requires Accessibility access for the app running mail-app-cli');'ready';`)
 	if err != nil {
 		return err
@@ -84,6 +100,9 @@ func (c *Client) archiveInboxThroughMail(account, messageID string) error {
 }
 
 func (c *Client) runNativeArchive(account, messageID string, apply bool) (err error) {
+	if c.nativeEnabled() {
+		return c.runNativeArchiveDirect(account, messageID, apply)
+	}
 	id, parseErr := strconv.ParseUint(messageID, 10, 53)
 	if parseErr != nil || id == 0 {
 		return fmt.Errorf("invalid native archive message ID: %q", messageID)
@@ -151,6 +170,7 @@ ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['int']]);
 ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
 ObjC.bindFunction('AXUIElementSetAttributeValue', ['int', ['id', 'id', 'id']]);
 ObjC.bindFunction('AXUIElementPerformAction', ['int', ['id', 'id']]);
+ObjC.bindFunction('AXUIElementCopyActionNames', ['int', ['id', 'id*']]);
 ObjC.bindFunction('CFEqual', ['bool', ['id', 'id']]);
 function ax(element, key) {
     const value = Ref();
@@ -164,7 +184,6 @@ function mailAX() {
     if (Number(apps.count) !== 1) throw Error('Mail must be running');
     return $.AXUIElementCreateApplication(apps.objectAtIndex(0).processIdentifier);
 }
-function frontApp() { return ObjC.unwrap($.NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier); }
 function appleScript(source) {
     const error = Ref();
     const result = $.NSAppleScript.alloc.initWithSource($(source)).executeAndReturnError(error);
@@ -183,6 +202,16 @@ function findAX(element, id, depth) {
     }
     return null;
 }
+function matchingAX(element, id, depth, matches) {
+    if (!element || depth > 8) return matches;
+    const identifier = optionalAX(element, 'AXIdentifier');
+    // A matched control owns its subtree; inspecting message rows is unnecessary.
+    if (identifier === id) {matches.push(element);return matches;}
+    if (identifier === 'MailboxesOutlineView' || identifier === 'Mail.sidebar' || identifier === 'Mail.messageList') return matches;
+    for (const child of optionalAX(element, 'AXChildren') || []) matchingAX(child, id, depth + 1, matches);
+    return matches;
+}
+
 `
 
 const nativeArchiveScript = nativeArchiveAXHelper + nativeArchiveGmailHelper + `
@@ -198,19 +227,29 @@ function identity(message) {
 const expectedIdentity = identity(target);
 const expectedSubject = target.subject();
 const accountID = account.id();
-const previousApp = frontApp();
+const existingViewerIDs = mail.messageViewers().map(v => Number(v.id()));
+if (existingViewerIDs.some(id => !Number.isSafeInteger(id) || id <= 0) || new Set(existingViewerIDs).size !== existingViewerIDs.length) throw Error('Could not snapshot existing Mail viewers');
 const viewerID = Number(appleScript('tell application "Mail"\nset ownedViewer to make new message viewer with properties {preview pane is visible:false}\nreturn id of ownedViewer\nend tell').int32Value);
-if (!Number.isSafeInteger(viewerID) || viewerID <= 0) throw Error('Mail did not return an owned viewer');
-emitPhase({name:'archive-viewer-owned',state:'done',note:JSON.stringify({viewerId:viewerID,previousApp:previousApp})});
-const viewer = mail.messageViewers.byId(viewerID);
-appleScript('tell application "Mail"\nset sourceBox to mailbox "INBOX" of account ' + asText(request.account) + '\nset selected mailboxes of message viewer id ' + viewerID + ' to {sourceBox}\nset selected messages of message viewer id ' + viewerID + ' to {first message of sourceBox whose id is ' + request.id + '}\nset visible of window of message viewer id ' + viewerID + ' to true\nactivate\nend tell');
+if (!Number.isSafeInteger(viewerID) || viewerID <= 0 || existingViewerIDs.includes(viewerID)) throw Error('Mail did not return a new owned viewer');
+// Persist ownership before any further Mail read can fail, so cleanup remains possible.
+emitPhase({name:'archive-viewer-owned',state:'done',note:JSON.stringify({viewerId:viewerID})});
+const createdViewers = mail.messageViewers().filter(v => Number(v.id()) === viewerID);
+if (createdViewers.length !== 1) throw Error('Could not prove ownership of the new Mail viewer');
+const viewer = createdViewers[0];
+appleScript('tell application "Mail"\nset sourceBox to mailbox "INBOX" of account ' + asText(request.account) + '\nset selected mailboxes of message viewer id ' + viewerID + ' to {sourceBox}\nset selected messages of message viewer id ' + viewerID + ' to {first message of sourceBox whose id is ' + request.id + '}\nset visible of window of message viewer id ' + viewerID + ' to true\nend tell');
 const root = mailAX();
 const windowID = 'Mail.messageViewer.window.' + viewerID;
 let win = null, table = null;
 const readyDeadline = Date.now() + 3000;
 do {
-    win = ax(root,'AXWindows').find(w => optionalAX(w,'AXIdentifier') === windowID);
-    if (win) table = findAX(win,'Mail.messageList',0);
+    const windows = ax(root,'AXWindows').filter(w => optionalAX(w,'AXIdentifier') === windowID);
+    if (windows.length > 1) throw Error('Owned Mail window is ambiguous');
+    win = windows[0];
+    if (win) {
+        const tables = matchingAX(win,'Mail.messageList',0,[]);
+        if (tables.length > 1) throw Error('Owned Mail message list is ambiguous');
+        table = tables[0];
+    }
     if (table) break;
     delay(0.05);
 } while (Date.now() < readyDeadline);
@@ -247,7 +286,12 @@ for (const index of candidates) {
 }
 if (!selectedRow) throw Error('Could not safely select the exact individual message in Mail; archive it in Mail directly');
 function guard() {
-    if (frontApp() !== 'com.apple.mail' || optionalAX(ax(root,'AXFocusedWindow'),'AXIdentifier') !== windowID) throw Error('Mail focus changed');
+    const windows = ax(root,'AXWindows').filter(w => optionalAX(w,'AXIdentifier') === windowID);
+    if (windows.length !== 1 || !$.CFEqual(windows[0],win)) throw Error('Owned Mail window changed');
+    const tables = matchingAX(win,'Mail.messageList',0,[]);
+    if (tables.length !== 1 || !$.CFEqual(tables[0],table)) throw Error('Owned Mail message list changed');
+    const currentRows = ax(table,'AXRows');
+    if (currentRows.filter(row => $.CFEqual(row,selectedRow)).length !== 1) throw Error('Owned Mail row changed');
     const selected = ax(table,'AXSelectedRows');
     if (selected.length !== 1 || !$.CFEqual(selected[0],selectedRow) || !selectionMatches()) throw Error('Mail message selection changed');
     if (findAX(selectedRow,'Mail.messageList.cell.view.disclosureButton',0)) throw Error('Conversation archive is not allowed for an individual message');
@@ -257,22 +301,36 @@ let archiveTitle = null;
 for (const top of ax(ax(root,'AXMenuBar'),'AXChildren')) {
     if (optionalAX(top,'AXIdentifier') !== 'Mail.menuBar.messageMenu') continue;
     for (const menu of ax(top,'AXChildren')) for (const item of ax(menu,'AXChildren')) {
-        if (optionalAX(item,'AXIdentifier') === 'Mail.menuBar.messageMenu.archive' && ax(item,'AXEnabled')) archiveTitle = ax(item,'AXTitle');
+        if (optionalAX(item,'AXIdentifier') === 'Mail.menuBar.messageMenu.archive') {
+            const title = ax(item,'AXTitle');
+            if (archiveTitle !== null) throw Error('Mail Archive title is ambiguous');
+            archiveTitle = title;
+        }
     }
 }
 if (!archiveTitle) throw Error('Mail native Archive is unavailable');
-const toolbar = ax(win,'AXChildren').find(child => optionalAX(child,'AXRole') === 'AXToolbar');
-const archiveButtons = [];
-function collectButtons(element,depth) {
-    if (!element || depth > 5) return;
-    if (optionalAX(element,'AXRole') === 'AXButton' && optionalAX(element,'AXDescription') === archiveTitle) archiveButtons.push(element);
-    for (const child of optionalAX(element,'AXChildren') || []) collectButtons(child,depth + 1);
+function archiveButton() {
+    const toolbars = ax(win,'AXChildren').filter(child => optionalAX(child,'AXRole') === 'AXToolbar');
+    if (toolbars.length !== 1) throw Error('Owned Mail toolbar is unavailable');
+    const buttons = [];
+    function collectButtons(element,depth) {
+        if (!element || depth > 5) return;
+        if (optionalAX(element,'AXRole') === 'AXButton' && optionalAX(element,'AXDescription') === archiveTitle) buttons.push(element);
+        for (const child of optionalAX(element,'AXChildren') || []) collectButtons(child,depth + 1);
+    }
+    collectButtons(toolbars[0],0);
+    if (buttons.length !== 1 || ax(buttons[0],'AXEnabled') !== true) throw Error('Owned Mail Archive button is unavailable');
+    const actions = Ref();
+    const actionStatus = $.AXUIElementCopyActionNames(buttons[0],actions);
+    const actionNames = actionStatus === 0 ? ObjC.deepUnwrap(actions[0]) : null;
+    if (!Array.isArray(actionNames) || !actionNames.includes('AXPress')) throw Error('Owned Mail Archive button cannot be pressed');
+    return buttons[0];
 }
-collectButtons(toolbar,0);
-if (archiveButtons.length !== 1 || !ax(archiveButtons[0],'AXEnabled')) throw Error('Owned Mail Archive button is unavailable');
+const button = archiveButton();
 guard();
+if (!$.CFEqual(archiveButton(),button)) throw Error('Owned Mail Archive button changed');
 if (request.apply) phase('native-archive-press',function () {
-    const status = $.AXUIElementPerformAction(archiveButtons[0],$('AXPress'));
+    const status = $.AXUIElementPerformAction(button,$('AXPress'));
     if (status !== 0) throw Error('Mail Archive action returned ' + status + '; do not retry');
 });
 JSON.stringify({prepared:true,applied:request.apply});
@@ -280,18 +338,9 @@ JSON.stringify({prepared:true,applied:request.apply});
 
 const nativeArchiveCleanupScript = `
 const mail = Application('Mail');
-const viewers = mail.messageViewers();
-const viewer = viewers.find(v => v.id() === owner.viewerId);
-if (viewer) {
-    const root = mailAX();
-    const focused = optionalAX(root,'AXFocusedWindow');
-    const ownedFocus = frontApp() === 'com.apple.mail' && focused && optionalAX(focused,'AXIdentifier') === 'Mail.messageViewer.window.' + owner.viewerId;
-    mail.close(viewer.window(),{saving:'no'});
-    if (ownedFocus && owner.previousApp && owner.previousApp !== 'com.apple.mail' && frontApp() === 'com.apple.mail') {
-        const previous = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(owner.previousApp);
-        if (Number(previous.count) === 1) previous.objectAtIndex(0).activateWithOptions(2);
-    }
-}
-if (mail.messageViewers().some(v => v.id() === owner.viewerId)) throw Error('Owned Mail viewer remains open');
+const viewers = mail.messageViewers().filter(v => Number(v.id()) === owner.viewerId);
+if (viewers.length > 1) throw Error('Owned Mail viewer is ambiguous');
+if (viewers.length === 1) mail.close(viewers[0].window(),{saving:'no'});
+if (mail.messageViewers().some(v => Number(v.id()) === owner.viewerId)) throw Error('Owned Mail viewer remains open');
 'closed';
 `

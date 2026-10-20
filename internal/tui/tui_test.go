@@ -10,8 +10,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func press(m model, keys ...string) model {
@@ -577,7 +577,7 @@ func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)
 	}
-	if got := sanitizeBody("  indented\n\tcode\x07 \n"); got != "  indented\n    code\n" {
+	if got := strings.Join(sanitizeBodyLines("  indented\n\tcode\x07 \n"), "\n"); got != "  indented\n    code\n" {
 		t.Fatalf("sanitizeBody = %q", got)
 	}
 }

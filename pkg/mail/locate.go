@@ -42,20 +42,13 @@ func (c *Client) LocateMessages(ids []string) (map[string]MessageLocation, error
 	idList := strings.Join(numeric, ", ")
 
 	var rows []struct {
-		ID           int64  `json:"ID"`
-		Subject      string `json:"Subject"`
-		Sender       string `json:"Sender"`
-		DateSent     string `json:"DateSent"`
-		DateReceived string `json:"DateReceived"`
-		Read         int    `json:"Read"`
-		Flagged      int    `json:"Flagged"`
-		MessageSize  int    `json:"MessageSize"`
-		URL          string `json:"URL"`
+		indexMessage
+		URL string `json:"URL"`
 	}
 	query := fmt.Sprintf(`
 select
 	m.ROWID as ID,
-	coalesce(s.subject, '') as Subject,
+	`+indexSubjectExpression+` as Subject,
 	case
 		when coalesce(a.comment, '') = '' then coalesce(a.address, '')
 		else a.comment || ' <' || a.address || '>'
@@ -113,19 +106,19 @@ where l.message_id in (%s);
 
 	located := make(map[string]MessageLocation, len(rows))
 	for _, row := range rows {
-		id := strconv.FormatInt(row.ID, 10)
 		accountID := indexMailboxAccountID(row.URL)
 		accountName, ok := accountNames[accountID]
 		if !ok {
 			continue
 		}
+		envelope := row.indexMessage.message()
 		backing := indexMailboxDisplayName(row.URL)
 		labels := labelsByID[row.ID]
 		if labels == nil {
 			labels = []string{}
 		}
 		location := MessageLocation{
-			ID:             id,
+			ID:             envelope.ID,
 			Account:        accountName,
 			Mailbox:        preferredMessageMailbox(backing, userLabelsByID[row.ID]),
 			BackingMailbox: backing,
@@ -133,19 +126,9 @@ where l.message_id in (%s);
 			Labels:         labels,
 			IsGmail:        strings.Contains(row.URL, "/%5BGmail%5D/"),
 		}
-		location.Envelope = Message{
-			ID:           id,
-			Subject:      row.Subject,
-			Sender:       row.Sender,
-			DateSent:     row.DateSent,
-			DateReceived: row.DateReceived,
-			Read:         row.Read != 0,
-			Flagged:      row.Flagged != 0,
-			MessageSize:  row.MessageSize,
-			Mailbox:      location.Mailbox,
-			Account:      accountName,
-		}
-		located[id] = location
+		envelope.Mailbox, envelope.Account = location.Mailbox, accountName
+		location.Envelope = envelope
+		located[envelope.ID] = location
 	}
 	return located, nil
 }
@@ -177,17 +160,33 @@ func (c *Client) countMessageIdentityInMailbox(accountName, mailboxName string, 
 	if !identity.hasFallback() {
 		return 0, fmt.Errorf("Envelope Index cannot look up an RFC Message-ID directly")
 	}
+	if validRFCMessageID(identity.RFCMessageID) != "" {
+		// The index has no RFC header column. Never accept its envelope tuple
+		// alone when the caller supplied a stronger identity.
+		if c.nativeEnabled() {
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
+		present, err := c.hasMessageIdentityWithWhoseJXA(accountName, mailboxName, identity)
+		if present {
+			return 1, err
+		}
+		return 0, err
+	}
+
 	mbox, ok, err := c.resolveIndexMailbox(accountName, mailboxName)
 	if err != nil {
 		return 0, err
 	}
 	if !ok {
+		if c.nativeEnabled() {
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
 		return 0, fmt.Errorf("mailbox not found: %s", mailboxName)
 	}
 	query := buildIndexMessageSelect(accountName, mbox.Name) + fmt.Sprintf(`
 where %s
 	and m.deleted = 0
-	and coalesce(s.subject, '') = %s
+	and `+indexSubjectExpression+` = %s
 	and (case when coalesce(a.comment, '') = '' then coalesce(a.address, '') else a.comment || ' <' || a.address || '>' end) = %s
 	and coalesce(strftime('%%Y-%%m-%%dT%%H:%%M:%%SZ', m.date_sent, 'unixepoch'), '') = %s
 	and m.size = %d
@@ -195,40 +194,38 @@ limit 2;
 `, indexMailboxMembershipCondition(mbox), sqlQuote(identity.Subject), sqlQuote(identity.Sender), sqlQuote(identity.DateSent), identity.MessageSize)
 	var rows []indexMessage
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		if c.nativeEnabled() && isEnvelopeIndexUnavailable(err) {
+			c.warnEnvelopeIndexFallback(err)
+			return c.nativeIdentityCount(accountName, mailboxName, identity)
+		}
 		return 0, err
 	}
 	return len(rows), nil
 }
 
-func (c *Client) hasMessageIdentityForVerification(accountName, mailboxName string, identity StableIdentity) (bool, error) {
-	// A unique complete tuple is safe to use without enumerating a potentially
-	// enormous Mail.app mailbox. Ambiguous or incomplete identities fail closed;
-	// verification never falls back to a mailbox-wide RFC scan.
-	if identity.hasFallback() {
-		matches, err := c.countMessageIdentityInMailbox(accountName, mailboxName, identity)
+func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
+	if !identity.hasFallback() {
+		return false, fmt.Errorf("stable identity lacks complete metadata; refusing mailbox-wide RFC lookup in %s", mailboxName)
+	}
+	identity.RFCMessageID = validRFCMessageID(identity.RFCMessageID)
+	if identity.RFCMessageID != "" && stableSenderAddress(identity.Sender) == "" {
+		return false, fmt.Errorf("RFC stable identity lacks a valid sender address")
+	}
+
+	if c.nativeEnabled() {
+		matches, err := c.nativeIdentityCount(accountName, mailboxName, identity)
 		if err != nil {
-			if isVerificationTimeout(err) {
-				return false, err
-			}
-			return c.hasMessageIdentityWithWhoseJXA(accountName, mailboxName, identity)
+			return false, err
 		}
-		switch matches {
-		case 0:
-			return false, nil
-		case 1:
-			return true, nil
-		default:
+		if matches > 1 {
 			return false, fmt.Errorf("stable identity is ambiguous in %s", mailboxName)
 		}
+		return matches == 1, nil
 	}
-	if identity.RFCMessageID != "" {
-		return false, fmt.Errorf("stable identity lacks complete indexed metadata; refusing mailbox-wide RFC lookup in %s", mailboxName)
-	}
-	return false, fmt.Errorf("invalid stable identity")
-}
-
-func (c *Client) hasMessageIdentityWithWhoseJXA(accountName, mailboxName string, identity StableIdentity) (bool, error) {
-	identityJSON, err := json.Marshal(identity)
+	identityJSON, err := json.Marshal(struct {
+		StableIdentity
+		SenderAddress string `json:"senderAddress"`
+	}{identity, stableSenderAddress(identity.Sender)})
 	if err != nil {
 		return false, err
 	}
@@ -243,16 +240,29 @@ acc.name();
 const mbox = %s;
 if (mbox === null) throw new Error('mailbox not found: ' + requestedMailbox);
 mbox.name();
-const candidates = mbox.messages.whose({subject: {_equals: wanted.subject}})();
+const criteria = {subject: {_equals: wanted.subject}, dateSent: {_equals: new Date(wanted.dateSent)}, deletedStatus: false};
+if (!wanted.rfcMessageId) criteria.messageSize = wanted.messageSize;
+const candidates = mbox.messages.whose(criteria)();
+if (candidates.length > 32) throw new Error('stable identity has too many metadata candidates');
 const wantedSent = Date.parse(wanted.dateSent);
 let matches = 0;
 for (let i = 0; i < candidates.length && matches < 2; i++) {
 	const msg = candidates[i];
-	if ((msg.sender() || '').trim() !== wanted.sender) continue;
+    const sender = (msg.sender() || '').trim();
+    if (wanted.rfcMessageId) {
+        let address = sender;
+        if (sender.endsWith('>') && sender.lastIndexOf('<') >= 0) address = sender.slice(sender.lastIndexOf('<') + 1, -1);
+        const canonicalAddress = rfcMessageId({messageId: () => address});
+        if (!canonicalAddress || canonicalAddress.slice(1, -1).toLowerCase() !== wanted.senderAddress) continue;
+    } else if (sender !== wanted.sender) continue;
 	const actualSent = (msg.dateSent() || new Date(0)).getTime();
 	if (!Number.isFinite(wantedSent) || actualSent !== wantedSent) continue;
-	if (msg.messageSize() !== wanted.messageSize) continue;
-	if (wanted.rfcMessageId && rfcMessageId(msg) !== wanted.rfcMessageId) continue;
+    if (!wanted.rfcMessageId && msg.messageSize() !== wanted.messageSize) continue;
+    if (wanted.rfcMessageId) {
+        const actualRFC = rfcMessageId(msg);
+        if (!actualRFC) throw new Error('RFC identity candidate lacks a valid live header');
+        if (actualRFC !== wanted.rfcMessageId) continue;
+    }
 	matches++;
 }
 JSON.stringify(matches);
@@ -276,6 +286,9 @@ JSON.stringify(matches);
 // Gmail-like and therefore fail-closed: only the index can prove whether a
 // selected Important message also has INBOX.
 func (c *Client) isGmailAccount(accountName string) (bool, error) {
+	if c.nativeEnabled() {
+		return c.nativeGmailCapability(accountName)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const acc = mail.accounts.byName('%s');

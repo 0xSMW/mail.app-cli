@@ -40,40 +40,24 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, err
 	}
-	draft, err := c.GetDraft(accountName, draftID)
+	if c.nativeEnabled() {
+		return c.updateNativeDraft(accountName, draftID, input, attachments)
+	}
+	snapshot, err := c.readDraftSnapshot(accountName, draftID)
 	if err != nil {
 		return nil, err
 	}
-	details, err := c.getMessageDetailsFromMail(draft.Account, draft.Mailbox, draft.ID)
+	draft := snapshot.Message
+	body, mimeAttachments, err := reconstructibleDraft(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("cannot preserve draft content: %w", err)
+	}
+	sender, err := draftSenderAddress(draft.Sender)
 	if err != nil {
 		return nil, err
 	}
-	if details == nil {
-		return nil, notFound("draft", draftID)
-	}
-	if details.ContentError != "" {
-		return nil, fmt.Errorf("cannot preserve draft body: %s", details.ContentError)
-	}
-	sender, err := draftSenderAddress(details.Sender)
-	if err != nil {
-		return nil, err
-	}
-	replacement := DraftInput{
-		Account: draft.Account,
-		Sender:  sender,
-		Subject: details.Subject,
-		Body:    details.Content,
-		To:      details.ToRecipients,
-		Cc:      details.CcRecipients,
-		Bcc:     details.BccRecipients,
-	}
-	if input.SubjectSet {
-		replacement.Subject = input.Subject
-	}
-	if input.BodySet {
-		replacement.Body = input.Body
-	}
-	if replacement.Subject == details.Subject && replacement.Body == details.Content && len(attachments) == 0 {
+	replacement := draftReplacement(draft.Account, draft, sender, body, input)
+	if replacement.Subject == draft.Subject && replacement.Body == body && len(attachments) == 0 {
 		return draft, nil
 	}
 	if len(replacement.To) == 0 {
@@ -90,18 +74,35 @@ func (c *Client) UpdateDraft(accountName, draftID string, input DraftInput) (*Me
 	if err != nil {
 		return nil, fmt.Errorf("preserve draft attachments: %w", err)
 	}
+	if err := compareDraftMIMEAttachments(preserved, mimeAttachments); err != nil {
+		return nil, fmt.Errorf("preserve draft attachment bytes: %w", err)
+	}
+	current, err := c.readDraftSnapshot(draft.Account, draft.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !sameDraftSnapshot(snapshot, current) {
+		return nil, fmt.Errorf("draft changed while preparing replacement")
+	}
 	replacement.Attachments = append(preserved, attachments...)
 	updated, err := c.CreateDraft(replacement)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.deleteDraftByID(draft.Account, draft.Mailbox, draft.ID); err != nil {
-		return nil, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
+	if err := c.deleteUnchangedDraft(snapshot); err != nil {
+		return updated, fmt.Errorf("created updated draft %s but failed to delete original draft %s: %w", updated.ID, draft.ID, err)
 	}
 	return updated, nil
 }
 
 func (c *Client) GetDraft(accountName, draftID string) (*Message, error) {
+	if c.nativeEnabled() {
+		snapshot, err := c.readNativeDraftSnapshot(accountName, draftID)
+		if err != nil {
+			return nil, err
+		}
+		return snapshot.Message, nil
+	}
 	const pageSize = 500
 	for offset := 0; ; offset += pageSize {
 		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
@@ -136,46 +137,6 @@ func (c *Client) DeleteDraft(accountName, draftID string) error {
 	return nil
 }
 
-func (c *Client) findDraftBySubject(accountName, subject string) (*Message, error) {
-	return c.findDraftBySubjectContentSince(accountName, subject, "", time.Time{})
-}
-
-func (c *Client) findDraftBySubjectContentSince(accountName, subject, content string, since time.Time) (*Message, error) {
-	var best *Message
-	const pageSize = 500
-	for offset := 0; ; offset += pageSize {
-		messages, err := c.GetUnifiedMessagesJSON("drafts", pageSize, offset, true)
-		if err != nil {
-			return nil, err
-		}
-		for _, message := range messages {
-			if message.Subject != subject || (accountName != "" && message.Account != accountName) {
-				continue
-			}
-			if content != "" && normalizeDraftContent(message.Content) != normalizeDraftContent(content) {
-				continue
-			}
-			if !since.IsZero() {
-				messageTime, ok := parseMessageTimestamp(message.DateReceived)
-				if !ok || messageTime.Before(since) {
-					continue
-				}
-			}
-			if best == nil || message.DateReceived > best.DateReceived {
-				copy := message
-				best = &copy
-			}
-		}
-		if len(messages) < pageSize {
-			break
-		}
-	}
-	if best == nil {
-		return nil, fmt.Errorf("draft not found by subject: %s", subject)
-	}
-	return best, nil
-}
-
 // ParseMessageTime parses the timestamp shapes Mail.app and the Envelope
 // Index produce.
 func ParseMessageTime(value string) (time.Time, bool) {
@@ -187,15 +148,10 @@ func ParseMessageTime(value string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-func parseMessageTimestamp(value string) (time.Time, bool) { return ParseMessageTime(value) }
-
-func normalizeDraftContent(value string) string {
-	value = strings.ReplaceAll(value, "\r\n", "\n")
-	value = strings.ReplaceAll(value, "\r", "\n")
-	return strings.TrimSpace(value)
-}
-
 func (c *Client) deleteDraftByID(accountName, mailboxName, draftID string) error {
+	if c.nativeEnabled() {
+		return c.deleteNativeDraft(accountName, mailboxName, draftID)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const requestedMailbox = '%s';
@@ -216,12 +172,5 @@ try {
 	'Error: ' + e;
 }
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(draftID))
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }

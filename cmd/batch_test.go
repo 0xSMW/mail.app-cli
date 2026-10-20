@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/clierr"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 func TestArchiveDoesNotTrustExplicitMailboxSource(t *testing.T) {
@@ -37,6 +37,8 @@ func TestItemsFromExplicitIndexedRefCarryFallbackIdentity(t *testing.T) {
 }
 
 func TestRunMessageBatchIdentityCaptureFailureFailsBeforeMutation(t *testing.T) {
+	a := newApplication()
+
 	installBatchVerificationScript(t, "error")
 
 	for _, tt := range []struct {
@@ -47,7 +49,7 @@ func TestRunMessageBatchIdentityCaptureFailureFailsBeforeMutation(t *testing.T) 
 		{name: "move", action: "move", target: "Processed"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := runMessageBatch(mail.NewClient(), batchOptions{
+			result, err := a.runMessageBatch(mail.NewClient(), batchOptions{
 				Action:        tt.action,
 				TargetMailbox: tt.target,
 				Verify:        true,
@@ -94,23 +96,23 @@ func TestVerifyBatchMutationRefusesUncapturedIdentity(t *testing.T) {
 }
 
 func TestWriteReceiptWritesLegacyFinalReport(t *testing.T) {
+	a := newApplication()
+
 	var stdout, stderr bytes.Buffer
 	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages batch archive", mail.SchemaVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousWriter := writer
-	writer = w
-	t.Cleanup(func() { writer = previousWriter })
+	a.writer = w
 
-	result, err := runMessageBatch(mail.NewClient(), batchOptions{Action: "move", TargetMailbox: "Processed"}, []batchItem{{
+	result, err := a.runMessageBatch(mail.NewClient(), batchOptions{Action: "move", TargetMailbox: "Processed"}, []batchItem{{
 		ID: "42", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "Processed",
 	}}, func(*mail.Client, *batchItem) error { return nil })
 	if err != nil {
 		t.Fatalf("runMessageBatch() error = %v", err)
 	}
 	reportFile := filepath.Join(t.TempDir(), "receipt.json")
-	err = writeReceipt(result, batchOptions{Action: "move", TargetMailbox: "Processed"}, nil, nil, reportFile)
+	err = a.writeReceipt(result, batchOptions{Action: "move", TargetMailbox: "Processed"}, nil, nil, reportFile)
 	if err != nil {
 		t.Fatalf("writeReceipt() error = %#v, want nil", err)
 	}
@@ -147,17 +149,17 @@ func TestWriteReceiptWritesLegacyFinalReport(t *testing.T) {
 }
 
 func TestWriteReceiptKeepsMutationFailureAuthoritative(t *testing.T) {
+	a := newApplication()
+
 	var stdout, stderr bytes.Buffer
 	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages batch archive", mail.SchemaVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousWriter := writer
-	writer = w
-	t.Cleanup(func() { writer = previousWriter })
+	a.writer = w
 
 	mutationErr := &mail.BatchFailedError{Action: "archive", Failed: 1, Attempted: 1}
-	err = writeReceipt(batchResult{Action: "archive", Matched: 1, Attempted: 1, Failed: 1, Items: []batchItem{{ID: "42", Status: "failed"}}}, batchOptions{Action: "archive"}, nil, mutationErr, filepath.Join(t.TempDir(), "missing", "receipt.json"))
+	err = a.writeReceipt(batchResult{Action: "archive", Matched: 1, Attempted: 1, Failed: 1, Items: []batchItem{{ID: "42", Status: "failed"}}}, batchOptions{Action: "archive"}, nil, mutationErr, filepath.Join(t.TempDir(), "missing", "receipt.json"))
 	var failure *clierr.Error
 	if !errors.As(err, &failure) || failure.Code != clierr.CodeMutationFailed || !failure.Reported {
 		t.Fatalf("writeReceipt() error = %#v, want reported mutation failure", err)
@@ -175,21 +177,21 @@ func TestWriteReceiptKeepsMutationFailureAuthoritative(t *testing.T) {
 }
 
 func TestWriteReceiptReportsAppliedMoveAndIncompleteVerificationSeparately(t *testing.T) {
+	a := newApplication()
+
 	var stdout, stderr bytes.Buffer
 	w, err := output.New(output.FormatJSON, &stdout, &stderr, false, "", "messages move", mail.SchemaVersion)
 	if err != nil {
 		t.Fatal(err)
 	}
-	previousWriter := writer
-	writer = w
-	t.Cleanup(func() { writer = previousWriter })
+	a.writer = w
 
 	result := batchResult{
 		Action: "move", Matched: 1, Attempted: 1, Succeeded: 1, Unverified: 1,
 		Items: []batchItem{{ID: "old", Status: "succeeded", VerifyStatus: "applied_destination_unverified", VerifyError: "mailbox not found: Archive"}},
 	}
 	mutationErr := &mail.BatchFailedError{Action: "move", Unverified: 1, Attempted: 1}
-	err = writeReceipt(result, batchOptions{Action: "move", TargetMailbox: "Archive"}, nil, mutationErr, "")
+	err = a.writeReceipt(result, batchOptions{Action: "move", TargetMailbox: "Archive"}, nil, mutationErr, "")
 	var failure *clierr.Error
 	if !errors.As(err, &failure) || failure.Code != clierr.CodeMutationFailed || !failure.Reported {
 		t.Fatalf("writeReceipt error = %#v, want reported incomplete verification", err)

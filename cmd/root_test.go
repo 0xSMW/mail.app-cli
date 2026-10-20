@@ -7,11 +7,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/0xSMW/mail.app-cli/v2/internal/config"
-	"github.com/0xSMW/mail.app-cli/v2/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -53,7 +54,73 @@ func TestUnknownCommandIsUsageError(t *testing.T) {
 	}
 }
 
+func TestRunConcurrentInvocationsKeepCommandsAndWritersIndependent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(config.EnvConfigPath, filepath.Join(home, "config.json"))
+	t.Setenv(config.EnvAccount, "")
+	t.Setenv(config.EnvMailbox, "")
+	t.Setenv(config.EnvOutput, "")
+	t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+	t.Setenv("MAIL_APP_CLI_METRICS_FILE", "")
+
+	cases := []struct {
+		name                           string
+		args                           []string
+		code                           int
+		stdoutContains, stderrContains string
+		stdoutJSON, stderrJSON         bool
+	}{
+		{name: "JSON version", args: []string{"version", "--json"}, stdoutContains: `"version": "` + version + `"`, stdoutJSON: true},
+		{name: "plain version", args: []string{"version", "--plain", "--no-color"}, stdoutContains: "mail-app-cli " + version},
+		{name: "JSON parse error", args: []string{"concurrent-unknown", "--json"}, code: 1, stderrContains: `"code": "usage"`, stderrJSON: true},
+		{name: "plain parse error", args: []string{"concurrent-unknown", "--plain"}, code: 1, stderrContains: `unknown command "concurrent-unknown"`},
+		{name: "agent help", args: []string{"version", "--agent", "--help"}, stdoutContains: `"path": "version"`, stdoutJSON: true},
+		{name: "human help", args: []string{"help", "version"}, stdoutContains: "Print the version"},
+	}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		for _, tc := range cases {
+			workers.Add(1)
+			go func() {
+				defer workers.Done()
+				<-start
+				var stdout, stderr bytes.Buffer
+				code := Run(tc.args, &stdout, &stderr)
+				if code != tc.code {
+					t.Errorf("%s: exit = %d, want %d; stdout = %q, stderr = %q", tc.name, code, tc.code, stdout.String(), stderr.String())
+				}
+				if tc.stdoutContains == "" {
+					if stdout.Len() != 0 {
+						t.Errorf("%s: unexpected stdout = %q", tc.name, stdout.String())
+					}
+				} else if !strings.Contains(stdout.String(), tc.stdoutContains) {
+					t.Errorf("%s: stdout = %q, want %q", tc.name, stdout.String(), tc.stdoutContains)
+				}
+				if tc.stderrContains == "" {
+					if stderr.Len() != 0 {
+						t.Errorf("%s: unexpected stderr = %q", tc.name, stderr.String())
+					}
+				} else if !strings.Contains(stderr.String(), tc.stderrContains) {
+					t.Errorf("%s: stderr = %q, want %q", tc.name, stderr.String(), tc.stderrContains)
+				}
+				if tc.stdoutJSON && !json.Valid(stdout.Bytes()) {
+					t.Errorf("%s: invalid JSON stdout = %q", tc.name, stdout.String())
+				}
+				if tc.stderrJSON && !json.Valid(stderr.Bytes()) {
+					t.Errorf("%s: invalid JSON stderr = %q", tc.name, stderr.String())
+				}
+			}()
+		}
+	}
+	close(start)
+	workers.Wait()
+}
+
 func TestRunDerivesAutomaticOutputFromSuppliedStdout(t *testing.T) {
+	a := newApplication()
+
 	t.Setenv(config.EnvConfigPath, filepath.Join(t.TempDir(), "config.json"))
 	t.Setenv(config.EnvOutput, "")
 	t.Setenv("NO_COLOR", "")
@@ -61,27 +128,28 @@ func TestRunDerivesAutomaticOutputFromSuppliedStdout(t *testing.T) {
 
 	var terminalStdout terminalBuffer
 	var stderr bytes.Buffer
-	if code := Run([]string{"version"}, &terminalStdout, &stderr); code != 0 {
+	if code := a.run([]string{"version"}, &terminalStdout, &stderr); code != 0 {
 		t.Fatalf("terminal version exit = %d: %s", code, stderr.String())
 	}
 	if !strings.HasPrefix(terminalStdout.String(), "mail-app-cli "+version) {
 		t.Fatalf("terminal stdout = %q, want plain version", terminalStdout.String())
 	}
-	if writer == nil || writer.Format != output.FormatPlain || !writer.Color {
-		t.Fatalf("terminal writer = %#v, want plain color writer", writer)
+	if a.writer == nil || a.writer.Format != output.FormatPlain || !a.writer.Color {
+		t.Fatalf("terminal writer = %#v, want plain color writer", a.writer)
 	}
 
+	a = newApplication()
 	var bufferedStdout bytes.Buffer
 	stderr.Reset()
-	if code := Run([]string{"version"}, &bufferedStdout, &stderr); code != 0 {
+	if code := a.run([]string{"version"}, &bufferedStdout, &stderr); code != 0 {
 		t.Fatalf("buffered version exit = %d: %s", code, stderr.String())
 	}
 	var env output.Envelope
 	if err := json.Unmarshal(bufferedStdout.Bytes(), &env); err != nil || !env.OK {
 		t.Fatalf("buffered stdout = %q, unmarshal error = %v", bufferedStdout.String(), err)
 	}
-	if writer == nil || writer.Format != output.FormatJSON || writer.Color {
-		t.Fatalf("buffered writer = %#v, want JSON non-color writer", writer)
+	if a.writer == nil || a.writer.Format != output.FormatJSON || a.writer.Color {
+		t.Fatalf("buffered writer = %#v, want JSON non-color writer", a.writer)
 	}
 }
 
@@ -479,6 +547,8 @@ func TestCountRefusedBeforeRunOnNonList(t *testing.T) {
 }
 
 func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
+	a := newApplication()
+
 	var jqOutput bytes.Buffer
 	jqWriter, err := output.New(output.FormatJSON, &jqOutput, io.Discard, false, "1 / 0", "test", 1)
 	if err != nil {
@@ -498,10 +568,13 @@ func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
 			return nil
 		},
 	}
-	rootCmd.AddCommand(mutation)
-	t.Cleanup(func() { rootCmd.RemoveCommand(mutation) })
+	a.rootCmd.AddCommand(mutation)
+	t.Cleanup(func() { a.rootCmd.RemoveCommand(mutation) })
 
-	code, stdout, stderr := run(t, "jq-mutation-preflight-test", "--jq", "1 / 0")
+	t.Setenv(config.EnvConfigPath, filepath.Join(t.TempDir(), "config.json"))
+	var stdoutBuffer, stderrBuffer bytes.Buffer
+	code := a.run([]string{"jq-mutation-preflight-test", "--jq", "1 / 0"}, &stdoutBuffer, &stderrBuffer)
+	stdout, stderr := stdoutBuffer.String(), stderrBuffer.String()
 	if code != 1 || stdout != "" || !strings.Contains(stderr, "--jq cannot be combined with a command that changes state") {
 		t.Fatalf("exit = %d, stdout = %q, stderr = %s", code, stdout, stderr)
 	}
@@ -511,22 +584,26 @@ func TestJQRuntimeFailureStopsAnnotatedMutationBeforeRunE(t *testing.T) {
 }
 
 func TestStateChangingCommandsRejectJQBeforeRun(t *testing.T) {
+	a := newApplication()
+
 	for _, cmd := range []*cobra.Command{
-		archiveCmd, sendCmd, attachmentsSaveCmd, configSetCmd, draftsCreateCmd,
-		exportAttachmentsCmd, messagesBatchArchiveCmd, recentClearCmd,
-		skillInstallCmd, syncCmd, threadsArchiveCmd,
+		a.archiveCmd, a.sendCmd, a.attachmentsSaveCmd, a.configSetCmd, a.draftsCreateCmd,
+		a.exportAttachmentsCmd, a.messagesBatchArchiveCmd, a.recentClearCmd,
+		a.skillInstallCmd, a.syncCmd, a.threadsArchiveCmd,
 	} {
 		if cmd.Annotations[annotationMutation] != "true" {
 			t.Fatalf("%s is not annotated as a mutation", cmd.CommandPath())
 		}
 	}
-	if exportMessagesCmd.Annotations[annotationFileOutputMutation] != "true" {
-		t.Fatalf("%s is not annotated as a file-output mutation", exportMessagesCmd.CommandPath())
+	if a.exportMessagesCmd.Annotations[annotationFileOutputMutation] != "true" {
+		t.Fatalf("%s is not annotated as a file-output mutation", a.exportMessagesCmd.CommandPath())
 	}
 }
 
 func TestReadOnlyPreviewsAllowJQ(t *testing.T) {
-	for _, cmd := range []*cobra.Command{importMessagesCmd, rulesApplyCmd} {
+	a := newApplication()
+
+	for _, cmd := range []*cobra.Command{a.importMessagesCmd, a.rulesApplyCmd} {
 		if cmd.Annotations[annotationMutation] == "true" {
 			t.Fatalf("%s is incorrectly annotated as a mutation", cmd.CommandPath())
 		}
@@ -550,6 +627,7 @@ func TestReadOnlyPreviewsAllowJQ(t *testing.T) {
 printf '%s\n' "$*" >> "$MAIL_APP_CLI_TEST_OSASCRIPT_LOG"
 case "$*" in
   *"const accounts = mail.accounts()"*) printf '%s' '[{"id":"work","name":"Work","enabled":true}]' ;;
+  *"const searchTerms"*) printf '%s' '{"messages":[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}],"truncated":false,"readFailures":0,"scannedMessages":1,"totalMessages":1}' ;;
   *) printf '%s' '[{"id":"42","subject":"Receipt","sender":"billing@example.com","dateReceived":"2026-08-27T00:00:00Z","dateSent":"2026-08-27T00:00:00Z","read":false,"flagged":false,"messageSize":1,"mailbox":"INBOX","account":"Work"}]' ;;
 esac
 `), 0o755); err != nil {
@@ -569,6 +647,8 @@ esac
 }
 
 func TestListOutputEligibilityAnnotations(t *testing.T) {
+	a := newApplication()
+
 	tests := []struct {
 		path   []string
 		idList bool
@@ -590,7 +670,7 @@ func TestListOutputEligibilityAnnotations(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(strings.Join(tt.path, " "), func(t *testing.T) {
-			cmd, _, err := rootCmd.Find(tt.path)
+			cmd, _, err := a.rootCmd.Find(tt.path)
 			if err != nil {
 				t.Fatal(err)
 			}

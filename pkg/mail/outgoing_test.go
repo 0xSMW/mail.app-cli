@@ -2,8 +2,10 @@ package mail
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -68,6 +70,7 @@ func TestOutgoingProductionScript(t *testing.T) {
 		{name: "send false", config: map[string]interface{}{"sendFalse": true}, sent: 1, uncertain: true},
 		{name: "send throw", config: map[string]interface{}{"sendThrows": true}, sent: 1, uncertain: true},
 		{name: "attachment accepted", attachments: []string{"/tmp/report.pdf"}, ok: true, sent: 1},
+		{name: "attachment escaped quote comma and backslash", attachments: []string{`/tmp/quote", comma\file.pdf`}, ok: true, sent: 1},
 		{name: "attachment throws", attachments: []string{"/tmp/report.pdf"}, config: map[string]interface{}{"attachmentThrows": true}, deleted: 1},
 		{name: "attachment wait exhausted", attachments: []string{"/tmp/report.pdf"}, config: map[string]interface{}{"attachNeverReady": true}, deleted: 1},
 		{name: "cleanup failure", config: map[string]interface{}{"readback": "other@example.com", "cleanupThrows": true}, deleted: 1},
@@ -110,13 +113,18 @@ func TestOutgoingProductionScript(t *testing.T) {
 			if err := json.Unmarshal(output, &got); err != nil {
 				t.Fatal(err)
 			}
-			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != tc.deleted || got.Response.Uncertain != tc.uncertain {
+			// Successful sends close the same owned composition without saving.
+			expectedDeleted := tc.deleted
+			if tc.ok && action == "send" {
+				expectedDeleted++
+			}
+			if got.Response.OK != tc.ok || got.Sent != tc.sent || got.Closed != tc.closed || got.Deleted != expectedDeleted || got.Response.Uncertain != tc.uncertain {
 				t.Fatalf("unexpected execution: %s", output)
 			}
-			if got.Sent == 1 && got.ComposedBody != input.Body {
+			if got.Sent == 1 && got.ComposedBody != input.Body+"\n" {
 				t.Fatalf("submission changed body: %s", output)
 			}
-			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "stored-900" {
+			if tc.ok && action == "save" && got.Response.Result.Draft.ID != "900" {
 				t.Fatalf("assumed outgoing/stored IDs equal: %s", output)
 			}
 			if tc.name == "cleanup failure" && !strings.Contains(got.Response.Cleanup, "cleanup failed") {
@@ -163,5 +171,530 @@ func TestOutgoingStrictReceipts(t *testing.T) {
 				t.Fatalf("missing uncertainty: %v", err)
 			}
 		})
+	}
+}
+
+func TestLegacyOutgoingSubmittedCleanup(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for production outgoing tests")
+	}
+	tests := []struct {
+		name           string
+		config         map[string]any
+		attachments    []string
+		submitted      bool
+		closes         int
+		ok             bool
+		beforeDispatch bool
+	}{
+		{name: "missing value filename uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingValue": true, "intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "previously readable filename becomes missing value retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingValueAfterSend": true}, submitted: true},
+		{name: "malformed filename is not missing value", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMalformed": true}, beforeDispatch: true, closes: 1},
+		{name: "missing filename getter uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissing": true, "intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "missing previously readable filename retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameMissingAfterSend": true}, submitted: true},
+		{name: "truthy ObjC nil wrapper fails closed", config: map[string]any{"snapshotNil": true}, beforeDispatch: true, closes: 1},
+		{name: "required count missing before dispatch", config: map[string]any{"snapshotCountMissing": true}, beforeDispatch: true, closes: 1},
+		{name: "required count missing after ack", config: map[string]any{"snapshotCountMissing": true, "failAfterSend": true}, submitted: true},
+		{name: "owned disappears during full fingerprint", config: map[string]any{"ownedDisappearsDuringFingerprint": true}, submitted: true, ok: true},
+		{name: "owned disappears during close", config: map[string]any{"ownedDisappearsAtClose": true}, submitted: true, closes: 1, ok: true},
+		{name: "unchanged owned composition", submitted: true, closes: 1, ok: true},
+		{name: "unchanged attachments", attachments: []string{"/tmp/report.pdf"}, submitted: true, closes: 1, ok: true},
+		{name: "subject changed", config: map[string]any{"afterSend": map[string]any{"subject": "edited"}}, submitted: true},
+		{name: "body changed", config: map[string]any{"afterSend": map[string]any{"body": "edited"}}, submitted: true},
+		{name: "sender changed", config: map[string]any{"afterSend": map[string]any{"sender": "other@example.com"}}, submitted: true},
+		{name: "To changed", config: map[string]any{"afterSend": map[string]any{"to": []string{"other@example.com"}}}, submitted: true},
+		{name: "Cc changed", config: map[string]any{"afterSend": map[string]any{"cc": []string{"other@example.com"}}}, submitted: true},
+		{name: "Bcc changed", config: map[string]any{"afterSend": map[string]any{"bcc": []string{"other@example.com"}}}, submitted: true},
+		{name: "unsupported baseline filenames uses strict count", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameUnsupported": true}, submitted: true, closes: 1, ok: true},
+		{name: "previously readable filenames become unsupported", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"filenameUnsupportedAfterSend": true}, submitted: true},
+		{name: "attachment name changed", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"afterSend": map[string]any{"attachments": []string{"other.pdf"}}}, submitted: true},
+		{name: "attachment count changed", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"afterSend": map[string]any{"attachments": []string{"report.pdf", "report.pdf"}}}, submitted: true},
+		{name: "nested recipient missing is not owned absence", config: map[string]any{"fingerprintFailures": []string{"cc"}, "failAfterSend": true}, submitted: true},
+		{name: "nested attachment missing is not owned absence", config: map[string]any{"fingerprintFailures": []string{"attachments"}, "failAfterSend": true}, submitted: true},
+		{name: "body read failure retains composition", config: map[string]any{"fingerprintFailures": []string{"body"}, "failAfterSend": true}, submitted: true},
+		{name: "owned object already gone", config: map[string]any{"fingerprintFailures": []string{"subject"}, "failAfterSend": true}, submitted: true, ok: true},
+		{name: "intrinsic true availability descriptor", config: map[string]any{"intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic true attachment filenames", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"intrinsicBoolean": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic false unavailable filename descriptor", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"intrinsicBoolean": true, "filenameUnsupported": true}, submitted: true, closes: 1, ok: true},
+		{name: "intrinsic true with unavailable filename list retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"flag": "true"}, "malformedAfterSend": true, "filenameUnsupportedAfterSend": true}, submitted: true},
+		{name: "intrinsic false with inconsistent filename list retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"flag": "fals"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong root descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"root": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong count descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"count": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong availability descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"flag": "long"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong names list descriptor retains", config: map[string]any{"malformedSnapshot": map[string]string{"names": "utxt"}, "malformedAfterSend": true}, submitted: true},
+		{name: "wrong filename descriptor retains", attachments: []string{"/tmp/report.pdf"}, config: map[string]any{"malformedSnapshot": map[string]string{"name": "long"}, "malformedAfterSend": true}, submitted: true},
+		{name: "close failure preserves acknowledgement", config: map[string]any{"cleanupThrows": true}, submitted: true, closes: 1},
+		{name: "send false retains", config: map[string]any{"sendFalse": true}},
+		{name: "send throws retains", config: map[string]any{"sendThrows": true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: tt.attachments}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "send", "config": tt.config})
+			cmd := exec.Command(node, "testdata/outgoing_mock.js")
+			cmd.Stdin = bytes.NewReader(payload)
+			raw, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("mock: %v %s", err, raw)
+			}
+			var got struct {
+				Response      outgoingEnvelope
+				Sent, Deleted int
+				Events        []json.RawMessage
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			expectedSent := 1
+			if tt.beforeDispatch {
+				expectedSent = 0
+			}
+			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != expectedSent || got.Deleted != tt.closes {
+				t.Fatalf("execution=%s", raw)
+			}
+			if tt.submitted && !tt.ok {
+				if got.Response.Phase != "submitted_cleanup" || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "" || got.Response.Uncertain {
+					t.Fatalf("lost authoritative ack=%s", raw)
+				}
+			}
+			if tt.name == "required count missing before dispatch" || tt.name == "required count missing after ack" {
+				if !strings.Contains(got.Response.Error, "AppleScript error -1728") {
+					t.Fatalf("lost nil-wrapper error metadata: %s", raw)
+				}
+			}
+			if tt.name == "malformed filename is not missing value" && !strings.Contains(got.Response.Error, "AppleScript error -1700") {
+				t.Fatalf("malformed filename coercion was swallowed: %s", raw)
+			}
+			if tt.beforeDispatch && (got.Response.Uncertain || got.Response.Phase != "send_fingerprint") {
+				t.Fatalf("pre-dispatch count failure not safe: %s", raw)
+			}
+			if tt.name == "wrong availability descriptor retains" && (!strings.Contains(got.Response.Error, `available="long"`) || !strings.Contains(got.Response.Error, "1819242087")) {
+				t.Fatalf("missing descriptor diagnostics: %s", raw)
+			}
+			if !tt.submitted && !tt.beforeDispatch && !got.Response.Uncertain {
+				t.Fatalf("lost send uncertainty=%s", raw)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingCleanupErrorPreservesReceipt(t *testing.T) {
+	t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+	writeFakeOsaScript(t, `printf '%s' '{"ok":false,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted_cleanup_pending","submitted":true},"phase":"submitted_cleanup","error":"composition changed; retained","cleanup":"cleanup pending","attempted":true,"uncertain":false}'`)
+	result, err := NewClient().SendOutgoing(OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}})
+	var mutation *MutationError
+	if result == nil || !result.Submitted || !errors.As(err, &mutation) || !mutation.Submitted || mutation.Uncertain || mutation.Phase != "submitted_cleanup" || mutation.Cleanup == "" {
+		t.Fatalf("result=%+v err=%+v", result, err)
+	}
+}
+
+func TestLegacyOutgoingInterruptedAfterAcknowledgement(t *testing.T) {
+	for _, tt := range []struct {
+		name, tail string
+		cancel     bool
+	}{
+		{name: "bridge failure after ack", tail: "exit 1"},
+		{name: "caller deadline during cleanup", tail: "/bin/sleep 5", cancel: true},
+		{name: "invalid final JSON after ack", tail: "printf '%s' invalid"},
+		{name: "empty final JSON object after ack", tail: `printf '%s' '{}'`},
+		{name: "empty success receipt after ack", tail: `printf '%s' '{"ok":true}'`},
+		{name: "incomplete success receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","status":"submitted","submitted":true}}'`},
+		{name: "false submitted receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":false}}'`},
+		{name: "wrong account receipt after ack", tail: `printf '%s' '{"ok":true,"result":{"account":"Other","accountId":"id-1","sender":"sender@example.com","status":"submitted","submitted":true}}'`},
+		{name: "contradictory cleanup flags after ack", tail: `printf '%s' '{"ok":false,"result":{"account":"Account","accountId":"id-1","sender":"sender@example.com","status":"submitted_cleanup_pending","submitted":true},"phase":"submitted_cleanup","error":"retained","cleanup":"pending","attempted":false,"uncertain":true}'`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+			ready := filepath.Join(t.TempDir(), "ready")
+			t.Setenv("OUTGOING_ACK_READY", ready)
+			writeFakeOsaScript(t, `printf '%s\n' 'mail-app-cli-phase {"name":"outgoing_send","state":"done"}' 'mail-app-cli-phase {"name":"outgoing_submitted_cleanup","state":"start"}' >&2
+printf ready > "$OUTGOING_ACK_READY"
+`+tt.tail)
+			client := NewClient()
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+			var result *OutgoingResult
+			var err error
+			if tt.cancel {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				client = client.WithContext(ctx)
+				type receipt struct {
+					result *OutgoingResult
+					err    error
+				}
+				finished := make(chan receipt, 1)
+				go func() { result, err := client.SendOutgoing(input); finished <- receipt{result, err} }()
+				waitForAutomationLog(t, ready, "ready")
+				cancel()
+				got := <-finished
+				result, err = got.result, got.err
+			} else {
+				result, err = client.SendOutgoing(input)
+			}
+			var mutation *MutationError
+			if result == nil || !result.Submitted || result.Status != "submitted_cleanup_pending" || !errors.As(err, &mutation) || !mutation.Submitted || !mutation.Attempted || mutation.Uncertain || mutation.Cleanup == "" || !strings.Contains(err.Error(), "do not resend") {
+				t.Fatalf("result=%+v error=%+v", result, err)
+			}
+			if tt.name == "wrong account receipt after ack" && (result.Account != input.Account || result.AccountID != "" || result.Sender != input.Sender) {
+				t.Fatalf("untrusted receipt identity survived: %+v", result)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingPreparedDraftCleanup(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	tests := []struct {
+		name          string
+		config        map[string]any
+		sent          int
+		submitted, ok bool
+		deletes       int
+	}{
+		{name: "owned body edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"body": "edited"}}},
+		{name: "owned recipient edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"to": []string{"other@example.com"}}}},
+		{name: "owned attachment edited during prepare prevents send", config: map[string]any{"duringPrepare": map[string]any{"attachments": []string{"different.pdf"}}}},
+		{name: "null IDs list after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": nil}, sent: 1, submitted: true},
+		{name: "null ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{nil}}, sent: 1, submitted: true},
+		{name: "object ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{map[string]any{}}}, sent: 1, submitted: true},
+		{name: "nonnumeric ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{"bad"}}, sent: 1, submitted: true},
+		{name: "duplicate IDs after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{100, 100}}, sent: 1, submitted: true},
+		{name: "zero ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{0}}, sent: 1, submitted: true},
+		{name: "unsafe ID after disappearance cannot establish absence", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedIdsAfterRace": []any{9007199254740992}}, sent: 1, submitted: true},
+		{name: "prepared disappears after positive IDs before byId", config: map[string]any{"preparedDisappearsAtById": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared disappears during snapshot", config: map[string]any{"preparedDisappearsDuringSnapshot": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared lingering ID clears after snapshot disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 3}, sent: 1, submitted: true, ok: true},
+		{name: "prepared lingering ID never clears after disappearance", config: map[string]any{"preparedDisappearsDuringSnapshot": true, "preparedLingeringIdReads": 100}, sent: 1, submitted: true},
+		{name: "nested stored read missing with ID present retains", config: map[string]any{"storedNestedMissing": "source"}, sent: 1, submitted: true},
+		{name: "new prepared tombstone prevents send", config: map[string]any{"preparedInitiallyDeleted": true}},
+		{name: "prepared deleted getter failure prevents send", config: map[string]any{"deletedStatusThrows": true, "deletedStatusBeforeSend": true}},
+		{name: "prepared malformed deleted status prevents send", config: map[string]any{"deletedStatusValue": 1, "deletedStatusBeforeSend": true}},
+		{name: "already deleted prepared copy needs no delete", config: map[string]any{"preparedDeletedAfterSend": true, "tombstoneContentThrows": true}, sent: 1, submitted: true, ok: true},
+		{name: "prepared becomes deleted immediately before deletion", config: map[string]any{"preparedDeletedBeforeDelete": true}, sent: 1, submitted: true, ok: true},
+		{name: "delete leaves resolvable tombstone", config: map[string]any{"storedDeleteLeavesTombstone": true, "tombstoneContentThrows": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "false deleted status remains active", config: map[string]any{"deletedStatusValue": false}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "deleted getter disappearance confirmed by fresh absent IDs", config: map[string]any{"deletedStatusDisappears": true}, sent: 1, submitted: true, ok: true},
+		{name: "deleted getter disappearance confirmed after lingering IDs", config: map[string]any{"deletedStatusDisappears": true, "preparedLingeringIdReads": 3}, sent: 1, submitted: true, ok: true},
+		{name: "deleted getter disappearance with lingering IDs stays pending", config: map[string]any{"deletedStatusDisappears": true, "preparedLingeringIdReads": 100}, sent: 1, submitted: true},
+		{name: "deleted getter disappearance rejects malformed reconciliation IDs", config: map[string]any{"deletedStatusDisappears": true, "preparedIdsAfterRace": []any{nil}}, sent: 1, submitted: true},
+		{name: "deleted getter failure remains pending", config: map[string]any{"deletedStatusThrows": true}, sent: 1, submitted: true},
+		{name: "null deleted status remains pending", config: map[string]any{"deletedStatusValue": nil}, sent: 1, submitted: true},
+		{name: "numeric true deleted status remains pending", config: map[string]any{"deletedStatusValue": 1}, sent: 1, submitted: true},
+		{name: "numeric false deleted status remains pending", config: map[string]any{"deletedStatusValue": 0}, sent: 1, submitted: true},
+		{name: "string deleted status remains pending", config: map[string]any{"deletedStatusValue": "true"}, sent: 1, submitted: true},
+		{name: "object deleted status remains pending", config: map[string]any{"deletedStatusValue": map[string]any{}}, sent: 1, submitted: true},
+		{name: "deletes only prepared stored ID and leaves old draft", config: map[string]any{"preexisting": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "stable by-ID reference survives ordinal reorder", config: map[string]any{"preexisting": true, "reorderAfterLookup": true}, sent: 1, submitted: true, ok: true, deletes: 1},
+		{name: "stored already absent after send", config: map[string]any{"storedAbsent": true, "preexisting": true}, sent: 1, submitted: true, ok: true},
+		{name: "changed raw source retained", config: map[string]any{"storedAfterSend": map[string]any{"source": "edited raw source"}}, sent: 1, submitted: true},
+		{name: "changed body retained", config: map[string]any{"storedAfterSend": map[string]any{"body": "edited"}}, sent: 1, submitted: true},
+		{name: "changed To retained", config: map[string]any{"storedAfterSend": map[string]any{"to": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed Cc retained", config: map[string]any{"storedAfterSend": map[string]any{"cc": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed Bcc retained", config: map[string]any{"storedAfterSend": map[string]any{"bcc": []string{"other@example.com"}}}, sent: 1, submitted: true},
+		{name: "changed filename retained", config: map[string]any{"storedAfterSend": map[string]any{"attachments": []string{"/tmp/other.pdf"}}}, sent: 1, submitted: true},
+		{name: "owner changes immediately before delete", config: map[string]any{"accountIdChangeAtRead": 6}, sent: 1, submitted: true},
+		{name: "owner changes after verified absence", config: map[string]any{"accountIdChangeAtRead": 7}, sent: 1, submitted: true, deletes: 1},
+		{name: "changed owner retained", config: map[string]any{"storedAfterSend": map[string]any{"accountId": "other-account"}}, sent: 1, submitted: true},
+		{name: "changed mailbox retained", config: map[string]any{"storedAfterSend": map[string]any{"mailbox": "Other Drafts"}}, sent: 1, submitted: true},
+		{name: "stored source read failure retains", config: map[string]any{"storedReadThrows": "source"}, sent: 1, submitted: true},
+		{name: "delete failure preserves acknowledgement", config: map[string]any{"storedDeleteThrows": true}, sent: 1, submitted: true, deletes: 1},
+		{name: "delete absence verification failure preserves acknowledgement", config: map[string]any{"storedDeleteNoEffect": true}, sent: 1, submitted: true, deletes: 1},
+		{name: "false send keeps prepared copy", config: map[string]any{"sendFalse": true}, sent: 1},
+		{name: "throwing send keeps prepared copy", config: map[string]any{"sendThrows": true}, sent: 1},
+		{name: "ambiguous prepared copy prevents send", config: map[string]any{"ambiguousSave": true}},
+		{name: "unverified prepared copy prevents send", config: map[string]any{"neverSave": true}},
+		{name: "empty raw source prevents send", config: map[string]any{"savedChange": map[string]any{"source": ""}}},
+		{name: "prepared recipient mismatch prevents send", config: map[string]any{"savedChange": map[string]any{"bcc": []string{"other@example.com"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: []string{"/tmp/report.pdf"}}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "send", "config": tt.config})
+			command := exec.Command(node, "testdata/outgoing_mock.js")
+			command.Stdin = bytes.NewReader(payload)
+			raw, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("production script: %v %s", err, raw)
+			}
+			var got struct {
+				Response                    outgoingEnvelope
+				Sent, Deleted               int
+				StoredDeleted, ExactLookups []string
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Response.OK != tt.ok || got.Response.Result.Submitted != tt.submitted || got.Sent != tt.sent || len(got.StoredDeleted) != tt.deletes {
+				t.Fatalf("execution=%s", raw)
+			}
+			for _, id := range got.StoredDeleted {
+				if id != "900" {
+					t.Fatalf("deleted unrelated stored draft: %s", raw)
+				}
+			}
+			for _, id := range got.ExactLookups {
+				if id != "900" && !(tt.name == "ambiguous prepared copy prevents send" && id == "901") {
+					t.Fatalf("read unrelated draft by ID: %s", raw)
+				}
+			}
+			if tt.name == "ambiguous prepared copy prevents send" && (len(got.ExactLookups) != 2 || !strings.Contains(got.Response.Error, "Prepared draft identity is ambiguous")) {
+				t.Fatalf("did not inspect and reject both new matching copies: %s", raw)
+			}
+			if tt.submitted && !tt.ok && (got.Response.Uncertain || got.Response.Result.Status != "submitted_cleanup_pending" || got.Response.Cleanup == "") {
+				t.Fatalf("lost acknowledged send: %s", raw)
+			}
+			if tt.sent > 0 && !tt.submitted && (got.Deleted != 0 || !got.Response.Uncertain) {
+				t.Fatalf("uncertain send performed cleanup: %s", raw)
+			}
+			if strings.Contains(tt.name, "during prepare") && got.Response.Phase != "prepared_compose_verification" {
+				t.Fatalf("missed pre-send composition guard: %s", raw)
+			}
+			if tt.name == "nested stored read missing with ID present retains" && (!strings.Contains(got.Response.Error, "prepared_snapshot failed") || !strings.Contains(got.Response.Error, "-1728") || strings.Contains(got.Response.Error, "stored nested unavailable")) {
+				t.Fatalf("missing sanitized stage/error diagnostic: %s", raw)
+			}
+			if tt.sent == 0 && got.Response.Uncertain {
+				t.Fatalf("pre-send preparation reported send uncertainty: %s", raw)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingInterruptedPreparedSave(t *testing.T) {
+	for _, tt := range []struct {
+		name, state string
+		saved       bool
+	}{
+		{name: "prepared save in flight", state: "start"},
+		{name: "prepared save acknowledged", state: "done", saved: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("MAIL_APP_CLI_BACKEND", "legacy")
+			script := `printf '%s\n' 'mail-app-cli-phase {"name":"outgoing_compose","state":"done"}' 'mail-app-cli-phase {"name":"outgoing_prepare_save","state":"` + tt.state + `"}' >&2
+exit 1`
+			writeFakeOsaScript(t, script)
+			result, err := NewClient().SendOutgoing(OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}})
+			var mutation *MutationError
+			if result != nil || !errors.As(err, &mutation) || mutation.Attempted || mutation.Submitted || mutation.Uncertain || mutation.Saved != tt.saved || mutation.Cleanup == "" || !strings.Contains(mutation.Cleanup, "inspect Mail before retrying") {
+				t.Fatalf("result=%+v error=%+v", result, err)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingAttachmentStoredBodyProof(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	stored := func(value string) *string { return &value }
+	cases := []struct {
+		name                                           string
+		body                                           string
+		count                                          int
+		markers                                        bool
+		markerCount                                    *int
+		prefix, suffix                                 string
+		exactStored                                    *string
+		extraOwned                                     string
+		unavailableNames, changeDuringSave, userMarker bool
+		ok                                             bool
+	}{
+		{name: "one attachment exact stored layout", count: 1, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "two attachments exact stored layout", count: 2, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "actual compose terminator retained", body: "\nbody without terminator", count: 2, markers: true, prefix: "\n\u2028", ok: true},
+		{name: "unsupported owned filename getter retains count proof", count: 2, markers: true, prefix: "\n\u2028", unavailableNames: true, ok: true},
+		{name: "missing owned object markers", count: 2, prefix: "\n\u2028"},
+		{name: "too few owned object markers", count: 2, markers: true, markerCount: func() *int { v := 1; return &v }(), prefix: "\n\u2028"},
+		{name: "too many owned object markers", count: 2, markers: true, markerCount: func() *int { v := 3; return &v }(), prefix: "\n\u2028"},
+		{name: "no attachment objects cannot authorize separator", prefix: "\n\u2028"},
+		{name: "caller supplied object marker is rejected", count: 2, markers: true, prefix: "\n\u2028", userMarker: true},
+		{name: "extra owned text is rejected", count: 2, markers: true, prefix: "\n\u2028", extraOwned: "different"},
+		{name: "extra stored text is rejected", count: 2, markers: true, prefix: "\n\u2028", suffix: "different"},
+		{name: "extra stored whitespace is rejected", count: 2, markers: true, prefix: "\n\u2028", suffix: " "},
+		{name: "extra stored line separator is rejected", count: 2, markers: true, prefix: "\n\u2028\u2028"},
+		{name: "changed owned body during save is rejected", count: 2, markers: true, prefix: "\n\u2028", changeDuringSave: true},
+		{name: "one file interior blank paragraph", body: "first\n\nlast\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "two files interior blank paragraph", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "one file consecutive blank paragraphs", body: "first\n\n\nlast\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n"), ok: true},
+		{name: "two files consecutive blank paragraphs", body: "first\n\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n"), ok: true},
+		{name: "one file trailing blank paragraph", body: "first\n\n", count: 1, markers: true, exactStored: stored("\nfirst\n\u2028\n"), ok: true},
+		{name: "two files trailing blank paragraph", body: "first\n\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n"), ok: true},
+		{name: "leading consecutive blank paragraphs", body: "\n\nfirst\n", count: 2, markers: true, exactStored: stored("\n\u2028\n\u2028\nfirst\n"), ok: true},
+		{name: "all empty paragraphs retained", body: "\n\n", count: 2, markers: true, exactStored: stored("\n\u2028\n\u2028\n"), ok: true},
+		{name: "CRLF normalized only", body: "first\r\n\r\nlast\r\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n"), ok: true},
+		{name: "authored inline separator retained", body: "first\u2028part\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\u2028part\n\u2028\nlast\n"), ok: true},
+		{name: "changed nonempty paragraph rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nLAST\n")},
+		{name: "changed nonempty whitespace rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst \n\u2028\nlast\n")},
+		{name: "misplaced separator rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\u2028\n\nlast\n")},
+		{name: "extra empty paragraph rejected", body: "first\n\nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\n\u2028\nlast\n")},
+		{name: "old invented leading separator rejected", body: "first\n", count: 2, markers: true, exactStored: stored("\n\u2028first\n")},
+		{name: "space paragraph cannot become separator", body: "first\n \nlast\n", count: 2, markers: true, exactStored: stored("\nfirst\n\u2028\nlast\n")},
+		{name: "interior mapping requires object proof", body: "first\n\nlast\n", count: 2, exactStored: stored("\nfirst\n\u2028\nlast\n")},
+		{name: "existing exact body match remains", count: 2, ok: true},
+		{name: "existing leading LF match remains", count: 2, prefix: "\n", ok: true},
+	}
+	for _, action := range []string{"save", "send"} {
+		for _, tt := range cases {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				body := tt.body
+				if body == "" {
+					body = "\nOriginal body\n"
+				}
+				if tt.userMarker {
+					body += "\uFFFC"
+				}
+				compose := body
+				if !strings.HasSuffix(compose, "\n") {
+					compose += "\n"
+				}
+				attachments := make([]string, tt.count)
+				for i := range attachments {
+					attachments[i] = fmt.Sprintf("/tmp/file-%d.txt", i)
+				}
+				storedText := tt.prefix + compose + tt.suffix
+				if tt.exactStored != nil {
+					storedText = *tt.exactStored
+				}
+				config := map[string]any{"ownedAttachmentMarkers": tt.markers, "ownedBodyExtraBeforeMarkers": tt.extraOwned, "filenameUnsupported": tt.unavailableNames, "savedChange": map[string]any{"body": storedText}}
+				if tt.markerCount != nil {
+					config["ownedMarkerCount"] = *tt.markerCount
+				}
+				if tt.changeDuringSave {
+					config["duringPrepare"] = map[string]any{"body": "edited while saving"}
+				}
+				input := OutgoingInput{Account: "Account", Subject: "Subject", Body: body, To: []string{"to@example.com"}, Cc: []string{"cc@example.com"}, Bcc: []string{"bcc@example.com"}, Attachments: attachments}
+				payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": action, "config": config})
+				command := exec.Command(node, "testdata/outgoing_mock.js")
+				command.Stdin = bytes.NewReader(payload)
+				raw, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("production script: %v %s", err, raw)
+				}
+				var got struct {
+					Response     outgoingEnvelope
+					Sent, Closed int
+				}
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got.Response.OK != tt.ok || (!tt.ok && got.Sent != 0) || (action == "send" && tt.ok && got.Sent != 1) {
+					t.Fatalf("execution=%s", raw)
+				}
+				if action == "save" && tt.ok && (got.Closed != 1 || got.Response.Result.Draft == nil || got.Response.Result.Draft.Content != storedText) {
+					t.Fatalf("save did not retain exact stored content: %s", raw)
+				}
+				if tt.changeDuringSave && action == "save" && !got.Response.Saved {
+					t.Fatalf("save acknowledgement lost after fingerprint failure: %s", raw)
+				}
+				if tt.changeDuringSave && got.Closed != 0 {
+					t.Fatalf("changed owned body was closed: %s", raw)
+				}
+			})
+		}
+	}
+}
+
+func TestLegacyOutgoingSaveRejectsDeletedCandidates(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	for _, tt := range []struct {
+		name   string
+		config map[string]any
+		ok     bool
+	}{
+		{name: "active Boolean false candidate saves", config: map[string]any{"deletedStatusValue": false, "deletedStatusBeforeSend": true}, ok: true},
+		{name: "deleted candidate cannot return saved", config: map[string]any{"preparedInitiallyDeleted": true}},
+		{name: "deleted getter failure cannot return saved", config: map[string]any{"deletedStatusThrows": true, "deletedStatusBeforeSend": true}},
+		{name: "null deleted status cannot return saved", config: map[string]any{"deletedStatusValue": nil, "deletedStatusBeforeSend": true}},
+		{name: "numeric true deleted status cannot return saved", config: map[string]any{"deletedStatusValue": 1, "deletedStatusBeforeSend": true}},
+		{name: "numeric false deleted status cannot return saved", config: map[string]any{"deletedStatusValue": 0, "deletedStatusBeforeSend": true}},
+		{name: "string deleted status cannot return saved", config: map[string]any{"deletedStatusValue": "true", "deletedStatusBeforeSend": true}},
+		{name: "object deleted status cannot return saved", config: map[string]any{"deletedStatusValue": map[string]any{}, "deletedStatusBeforeSend": true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+			payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": "save", "config": tt.config})
+			command := exec.Command(node, "testdata/outgoing_mock.js")
+			command.Stdin = bytes.NewReader(payload)
+			raw, err := command.CombinedOutput()
+			if err != nil {
+				t.Fatalf("production script: %v %s", err, raw)
+			}
+			var got struct {
+				Response outgoingEnvelope
+				Sent     int
+			}
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.Response.OK != tt.ok || got.Sent != 0 || !got.Response.Saved || (!tt.ok && (got.Response.Result.Status == "saved" || got.Response.Result.Draft != nil)) {
+				t.Fatalf("unsafe saved receipt: %s", raw)
+			}
+			if !tt.ok && got.Response.Phase != "save_verification" {
+				t.Fatalf("missed saved candidate state guard: %s", raw)
+			}
+		})
+	}
+}
+
+func TestLegacyOutgoingPreparedReadinessRetriesOnlyReads(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("Node is required for outgoing production tests")
+	}
+	for _, action := range []string{"save", "send"} {
+		for _, tt := range []struct {
+			name   string
+			config map[string]any
+			ok     bool
+			reads  int
+		}{
+			{name: "transient missing deleted property recovers", config: map[string]any{"readinessMissingReads": 2}, ok: true, reads: 3},
+			{name: "persistent missing property fails closed", config: map[string]any{"readinessMissingPersistent": true}, reads: 80},
+			{name: "nonboolean after transient failure fails closed", config: map[string]any{"readinessMissingReads": 2, "readinessStatusValue": 1}, reads: 3},
+			{name: "null property is not transient absence", config: map[string]any{"readinessStatusValue": nil}, reads: 1},
+			{name: "other property error is not retried", config: map[string]any{"readinessOtherError": true}, reads: 1},
+		} {
+			t.Run(action+"/"+tt.name, func(t *testing.T) {
+				input := OutgoingInput{Account: "Account", Subject: "Subject", Body: "Body", To: []string{"to@example.com"}}
+				payload, _ := json.Marshal(map[string]any{"helper": jxaPhaseHelper() + jxaOutgoingHelper(), "input": input, "action": action, "config": tt.config})
+				command := exec.Command(node, "testdata/outgoing_mock.js")
+				command.Stdin = bytes.NewReader(payload)
+				raw, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("production script: %v %s", err, raw)
+				}
+				var got struct {
+					Response                          outgoingEnvelope
+					Saves, Sent, ReadinessStatusReads int
+					StoredDeleted                     []string
+				}
+				if err := json.Unmarshal(raw, &got); err != nil {
+					t.Fatal(err)
+				}
+				wantSends := 0
+				if action == "send" && tt.ok {
+					wantSends = 1
+				}
+				if got.Response.OK != tt.ok || got.Saves != 1 || got.Sent != wantSends || got.ReadinessStatusReads != tt.reads {
+					t.Fatalf("readiness retried a mutation or accepted unknown state: %s", raw)
+				}
+				if !tt.ok && (!got.Response.Saved || got.Response.Result.Submitted || len(got.StoredDeleted) > 0) {
+					t.Fatalf("unverified saved copy was not retained: %s", raw)
+				}
+				if action == "save" && tt.ok && (got.Response.Result.Draft == nil || got.Response.Result.Status != "saved") {
+					t.Fatalf("recovered saved receipt missing: %s", raw)
+				}
+				if action == "send" && tt.ok && !got.Response.Result.Submitted {
+					t.Fatalf("recovered send receipt missing: %s", raw)
+				}
+			})
+		}
 	}
 }

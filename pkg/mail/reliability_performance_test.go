@@ -56,7 +56,17 @@ import sys, os, json, re
 q = sys.argv[-1]
 if 'with verification_mailbox_0' in q:
     rows = []
-    for scope, url in re.findall(r"verification_mailbox_(\d+) as \(select ROWID as ID, url as URL from mailboxes where url = '([^']+)'", q):
+    scopes = re.split(r"verification_mailbox_(\d+) as \(", q)[1:]
+    for scope, selection in zip(scopes[::2], scopes[1::2]):
+        # Keep the older full-URL form for the documented baseline overlay.
+        legacy = re.search(r"from mailboxes where url = '([^']+)'", selection)
+        indexed_path = re.search(r"length\('ABC/'\)\) = '([^']+)'", selection)
+        if legacy:
+            url = legacy.group(1)
+        elif indexed_path:
+            url = 'imap://ABC/' + indexed_path.group(1)
+        else:
+            raise AssertionError('unexpected verification mailbox selector: ' + selection)
         source = url.endswith('/INBOX')
         rows.append({'VerificationScope': int(scope), 'MailboxID': 1 if source else 2, 'MailboxURL': url,
                      'Matches': '[]' if source else os.environ['RELIABILITY_ROWS']})
@@ -65,7 +75,7 @@ elif 'm.size =' in q:
     print('[]' if 'l.mailbox_id = 1' in q else os.environ['RELIABILITY_ROWS'])
 elif 'All%20Mail' in q:
     print('[{"ID":2,"URL":"imap://ABC/%5BGmail%5D/All%20Mail","TotalCount":30,"UnreadCount":0}]')
-elif 'imap://ABC/INBOX' in q:
+elif 'imap://ABC/INBOX' in q or ("length('ABC/')" in q and " = 'INBOX'" in q):
     print('[{"ID":1,"URL":"imap://ABC/INBOX","TotalCount":30,"UnreadCount":0}]')
 else:
     print('[]')

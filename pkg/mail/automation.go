@@ -37,6 +37,7 @@ type AutomationTimeoutError struct {
 	Engine  string
 	Timeout time.Duration
 	Trace   *PhaseTrace
+	Cause   error
 }
 
 func (e *AutomationTimeoutError) Error() string {
@@ -48,6 +49,9 @@ func (e *AutomationTimeoutError) Error() string {
 }
 
 func (e *AutomationTimeoutError) Unwrap() error {
+	if e.Cause != nil {
+		return e.Cause
+	}
 	return context.DeadlineExceeded
 }
 
@@ -110,8 +114,15 @@ func jxaRFCMessageIDHelper() string {
 	return `
 function rfcMessageId(msg) {
 	try {
-		const value = String(msg.messageId() || '').trim();
-		return /^<[^<>\\s]+>$/.test(value) ? value : '';
+        const raw = String(msg.messageId() || '');
+        if (/[\x00-\x1f\x7f]/.test(raw)) return '';
+        let value = raw.trim();
+        if (value.startsWith('<') && value.endsWith('>')) value = value.slice(1, -1);
+        const parts = value.split('@');
+        if (parts.length !== 2) return '';
+        const atom = /^[A-Za-z0-9!#$%&'*+\/=?^_\x60{|}~.\-]+$/;
+        if (parts.some(p => !p || p.startsWith('.') || p.endsWith('.') || p.includes('..') || !atom.test(p))) return '';
+        return '<' + value + '>';
 	} catch (e) { return ''; }
 }
 `
@@ -122,10 +133,7 @@ func (c *Client) runAppleScript(script string) (string, error) {
 }
 
 func (c *Client) runJXA(script string) (string, error) {
-	if c.session != nil {
-		return c.session.run(script, defaultAutomationTimeout)
-	}
-	return runAutomation(c.Context(), "jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
+	return c.runJXAWithTimeout(script, defaultAutomationTimeout)
 }
 
 func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
@@ -200,7 +208,9 @@ func runAutomationUnlocked(parent context.Context, engine string, timeout time.D
 		return automationExecution{}, fmt.Errorf("%s error: %v - %s", engine, err, stderr.String())
 	}
 
+	started := time.Now()
 	err := cmd.Wait()
+	recordLegacyProcess(time.Since(started))
 	events, diagnostics := splitPhaseEvents(stderr.String())
 	execution := automationExecution{Output: strings.TrimSpace(out.String()), Events: events}
 	if parentErr := parent.Err(); parentErr != nil {
@@ -323,7 +333,12 @@ function isInboxName(name) {
 
 function findMailbox(acc, requestedName, names) {
 	if (isInboxName(requestedName)) {
-		try { return acc.inbox(); } catch (e) { if (isTransportError(e)) throw e; }
+		try {
+			const inbox = acc.inbox();
+			if (inbox !== null && inbox !== undefined && inbox.name()) return inbox;
+		} catch (e) { if (isTransportError(e)) throw e; }
+		// Exchange can expose a null inbox accessor while listing Inbox normally.
+		names = names.concat(['Inbox', 'INBOX']);
 	}
 	let found;
 	try {
@@ -417,10 +432,7 @@ function messageById(mbox, messageId) {
 }
 
 func appleScriptBool(value bool) string {
-	if value {
-		return "true"
-	}
-	return "false"
+	return jxaBool(value)
 }
 
 func appleScriptStringList(values []string) string {
@@ -429,15 +441,4 @@ func appleScriptStringList(values []string) string {
 		escaped = append(escaped, `"`+escapeAppleScriptString(value)+`"`)
 	}
 	return strings.Join(escaped, ", ")
-}
-
-func appleScriptRecipientBlock(kind string, values []string) string {
-	if len(values) == 0 {
-		return ""
-	}
-	return fmt.Sprintf(`
-		repeat with addr in {%s}
-			make new %s recipient at end of %s recipients with properties {address:addr}
-		end repeat
-`, appleScriptStringList(values), kind, kind)
 }

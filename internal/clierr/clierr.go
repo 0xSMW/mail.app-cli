@@ -8,7 +8,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // Code is the machine-readable category of a failure.
@@ -125,6 +126,7 @@ func Classify(err error) *Error {
 	var notFound *mail.NotFoundError
 	var batchFailed *mail.BatchFailedError
 	var mutation *mail.MutationError
+	var native *appleevents.Error
 	switch {
 	case errors.As(err, &mutation):
 		if mutation.Phase == "sender_selection" && !mutation.Attempted {
@@ -144,6 +146,10 @@ func Classify(err error) *Error {
 		return Wrap(CodeTimeout, err, err.Error()).WithHint("another mail-app-cli command is holding Mail.app; wait for it or rerun")
 	case errors.As(err, &timeout):
 		return Wrap(CodeTimeout, err, err.Error()).WithHint("Mail.app did not answer in time; narrow the request with --limit or a smaller mailbox")
+	case errors.Is(err, appleevents.ErrUnavailable):
+		return Wrap(CodeUnavailable, err, err.Error()).WithHint("use a macOS build with cgo or select --backend legacy")
+	case errors.As(err, &native) && (native.Code == -1743 || native.Code == -600 || native.Code == -10814):
+		return Wrap(CodeUnavailable, err, err.Error()).WithHint("run 'mail-app-cli doctor' to check Mail.app and automation access")
 	case errors.As(err, &partial):
 		return Wrap(CodePartial, err, err.Error()).WithHint("rerun with --allow-partial to accept incomplete results, or scope with --account and --mailbox")
 	case errors.As(err, &notFound):

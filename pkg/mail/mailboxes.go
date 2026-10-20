@@ -1,11 +1,13 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
 )
 
 func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON(accountName)
+	}
 	script := fmt.Sprintf(`
 	tell application "Mail"
 		set mailboxList to {}
@@ -30,6 +32,9 @@ func (c *Client) GetMailboxes(accountName string) ([]Mailbox, error) {
 }
 
 func (c *Client) GetAllMailboxes() ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.GetMailboxesJSON("")
+	}
 	script := `
 	tell application "Mail"
 		set mailboxList to {}
@@ -57,18 +62,7 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 		if err != nil {
 			return nil, err
 		}
-		if mailboxes, ok, err := c.getMailboxesFromIndex(*account); err != nil {
-			return nil, err
-		} else if ok {
-			return mailboxes, nil
-		}
-
-		// If the Envelope Index cannot provide mailbox rows, use a single JXA call.
-		mailboxes, err := c.getMailboxesForSingleAccount(accountName)
-		if err != nil {
-			return nil, err
-		}
-		return c.enrichArchiveMailboxes(accountName, mailboxes), nil
+		return c.mailboxesForAccount(*account)
 	}
 
 	accounts, err := c.GetAccountsJSON()
@@ -82,52 +76,13 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 
 	// If only one account total, no need for parallelization
 	if len(accounts) == 1 {
-		if mailboxes, ok, err := c.getMailboxesFromIndex(accounts[0]); err != nil {
-			return nil, err
-		} else if ok {
-			return mailboxes, nil
-		}
-		mailboxes, err := c.getMailboxesForSingleAccount(accounts[0].Name)
-		if err != nil {
-			return nil, err
-		}
-		return c.enrichArchiveMailboxes(accounts[0].Name, mailboxes), nil
+		return c.mailboxesForAccount(accounts[0])
 	}
 
-	// Use channel to collect results from goroutines
-	type result struct {
-		mailboxes []Mailbox
-		err       error
-	}
-	results := make(chan result, len(accounts))
-
-	// Launch bounded goroutines for account mailbox retrieval.
-	runWithMailCommandLimit(accounts, func(account Account) {
-		mailboxes, ok, err := c.getMailboxesFromIndex(account)
-		if err != nil {
-			results <- result{err: err}
-			return
-		}
-		if !ok {
-			mailboxes, err = c.getMailboxesForSingleAccount(account.Name)
-			if err == nil {
-				mailboxes = c.enrichArchiveMailboxes(account.Name, mailboxes)
-			}
-		}
-		results <- result{mailboxes: mailboxes, err: err}
-	})
-
-	// Collect results
 	var allMailboxes []Mailbox
-	var errors []error
-	for i := 0; i < len(accounts); i++ {
-		res := <-results
-		if res.err != nil {
-			errors = append(errors, res.err)
-		} else {
-			allMailboxes = append(allMailboxes, res.mailboxes...)
-		}
-	}
+	errors := collectMailCommands(accounts, c.mailboxesForAccount, func(mailboxes []Mailbox) {
+		allMailboxes = append(allMailboxes, mailboxes...)
+	})
 
 	// Return partial results even if some accounts failed
 	if len(errors) > 0 && len(allMailboxes) == 0 {
@@ -135,6 +90,21 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 	}
 
 	return allMailboxes, nil
+}
+
+func (c *Client) mailboxesForAccount(account Account) ([]Mailbox, error) {
+	if mailboxes, ok, err := c.getMailboxesFromIndex(account); err != nil {
+		return nil, err
+	} else if ok {
+		return mailboxes, nil
+	}
+
+	// If the Envelope Index cannot provide mailbox rows, use a single live call.
+	mailboxes, err := c.getMailboxesForSingleAccount(account.Name)
+	if err != nil {
+		return nil, err
+	}
+	return c.enrichArchiveMailboxes(account.Name, mailboxes), nil
 }
 
 func (c *Client) enrichArchiveMailboxes(accountName string, mailboxes []Mailbox) []Mailbox {
@@ -163,6 +133,9 @@ func (c *Client) enrichArchiveMailboxes(accountName string, mailboxes []Mailbox)
 }
 
 func (c *Client) getMailboxesForSingleAccount(accountName string) ([]Mailbox, error) {
+	if c.nativeEnabled() {
+		return c.nativeMailboxes(accountName)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -176,7 +149,8 @@ try {
 			const name = fallbackName || mbox.name();
 			if (seen[name]) return;
 			seen[name] = true;
-			let totalCount = 0;
+			// A failed count is unknown; zero is reserved for known empty mailboxes.
+			let totalCount = -1;
 			try { totalCount = mbox.messages.count(); } catch (e) {}
 			result.push({
 				name: name,
@@ -202,14 +176,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(accountName))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var mailboxes []Mailbox
-	if err := json.Unmarshal([]byte(output), &mailboxes); err != nil {
-		return nil, fmt.Errorf("failed to parse mailboxes JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "mailboxes", &mailboxes); err != nil {
+		return nil, err
 	}
 
 	return mailboxes, nil

@@ -7,7 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/0xSMW/mail.app-cli/v2/pkg/mail"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 // bodyCacheSize bounds the fetched bodies kept in memory.
@@ -134,7 +134,7 @@ func (r *reader) render(msg *mail.Message) string {
 	}
 	switch {
 	case msg.Content != "":
-		for _, l := range strings.Split(sanitizeBody(msg.Content), "\n") {
+		for _, l := range sanitizeBodyLines(msg.Content) {
 			wrapped := ansi.Wrap(l, width, "")
 			if strings.HasPrefix(l, ">") {
 				wrapped = s.muted.Render(wrapped)

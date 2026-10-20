@@ -1,12 +1,21 @@
 package mail
 
 import (
-	"encoding/json"
 	"fmt"
-	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
+// attachmentNamesEqual accepts canonical Unicode spelling variants while
+// preserving case and compatibility distinctions in publisher filenames.
+func attachmentNamesEqual(a, b string) bool {
+	return norm.NFC.String(a) == norm.NFC.String(b)
+}
+
 func (c *Client) GetAttachmentsJSON(accountName, mailboxName, messageID string) ([]Attachment, error) {
+	if c.nativeEnabled() {
+		return c.nativeAttachments(accountName, mailboxName, messageID)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const result = [];
@@ -43,14 +52,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(mailboxName), jxaMailboxLookupHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName), escapeJSString(messageID))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return nil, err
-	}
-
 	var attachments []Attachment
-	if err := json.Unmarshal([]byte(output), &attachments); err != nil {
-		return nil, fmt.Errorf("failed to parse attachments JSON: %w", err)
+	if err := c.runJXAJSON(script, defaultAutomationTimeout, "attachments", &attachments); err != nil {
+		return nil, err
 	}
 
 	return attachments, nil
@@ -61,18 +65,26 @@ func (c *Client) SaveAttachment(accountName, mailboxName, messageID, attachmentN
 }
 
 func (c *Client) SaveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	return c.saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName, index, savePath, jxaMailboxLookupHelper()+jxaMessageByIdHelper(), jxaMailboxLookupExpression(mailboxName))
 }
 
 // Callers preserving a draft supply its account-owned special mailbox lookup;
 // ordinary attachment commands retain their explicit mailbox-name lookup.
 func (c *Client) saveAttachmentByIndex(accountName, mailboxName, messageID, attachmentName string, index int, savePath, lookupHelper, lookupExpression string) error {
+	if c.nativeEnabled() {
+		return c.nativeSaveAttachment(accountName, mailboxName, messageID, attachmentName, index, savePath)
+	}
 	script := fmt.Sprintf(`
 const mail = Application('Mail');
 const app = Application.currentApplication();
 app.includeStandardAdditions = true;
 const requestedMailbox = '%s';
 const requestedIndex = %d;
+const requestedName = '%s';
+function canonicalName(name) { return String(name).normalize('NFC'); }
 %s
 
 try {
@@ -83,23 +95,27 @@ try {
 		'Error: Message not found';
 	} else {
 		const attachments = msg.mailAttachments();
-		let found = false;
+		let selected = -1;
 		const pathObj = Path('%s');
 		if (requestedIndex >= 0) {
 			if (requestedIndex < attachments.length) {
-				attachments[requestedIndex].save({ in: pathObj });
-				found = true;
+				if (requestedName !== '' && canonicalName(attachments[requestedIndex].name()) !== canonicalName(requestedName)) {
+					throw new Error('Attachment index has unexpected name');
+				}
+				selected = requestedIndex;
 			}
 		} else {
 			for (let a = 0; a < attachments.length; a++) {
-				if (attachments[a].name() === '%s') {
-					attachments[a].save({ in: pathObj });
-					found = true;
-					break;
+				if (canonicalName(attachments[a].name()) === canonicalName(requestedName)) {
+					if (selected >= 0) {
+						throw new Error('Attachment name is ambiguous; select its index');
+					}
+					selected = a;
 				}
 			}
 		}
-		if (found) {
+		if (selected >= 0) {
+			attachments[selected].save({ in: pathObj });
 			'Success';
 		} else {
 			'Error: Attachment not found';
@@ -108,14 +124,7 @@ try {
 } catch (e) {
 	'Error: ' + e;
 }
-`, escapeJSString(mailboxName), index, lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath), escapeJSString(attachmentName))
+`, escapeJSString(mailboxName), index, escapeJSString(attachmentName), lookupHelper, escapeJSString(accountName), lookupExpression, escapeJSString(messageID), escapeJSString(savePath))
 
-	output, err := c.runJXA(script)
-	if err != nil {
-		return err
-	}
-	if strings.Contains(output, "Error") {
-		return bridgeError(output)
-	}
-	return nil
+	return c.runJXAStatus(script)
 }

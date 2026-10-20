@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -153,5 +154,16 @@ func BenchmarkBodyDiagnosticsRead(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestBodyDiagnosticsInventoryHiddenAndDuplicateAttributes(t *testing.T) {
+	source := `<div style="background-image:url(first)" style="display:none;background-image:url(second)"><img alt="first" alt=" second " alt=" "><svg style="background-image:none"></svg><canvas/><iframe>hidden</iframe></div><p style="text-transform:uppercase">Visible</p>`
+	body, diagnostics, err := readDiagnosticFixture(t, "1.emlx", "Content-Type: text/html\n\n"+source)
+	if err != nil || body != "VISIBLE" || htmlToText(source) != body {
+		t.Fatalf("rendering = %q, error=%v", body, err)
+	}
+	if diagnostics.HTMLImageCount != 1 || diagnostics.RichContentElements != 5 || !reflect.DeepEqual(diagnostics.HTMLImageAltTexts, []string{"first", " second "}) {
+		t.Fatalf("hidden/duplicate inventory = %#v", diagnostics)
 	}
 }

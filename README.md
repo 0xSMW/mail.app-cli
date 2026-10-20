@@ -10,7 +10,7 @@ mail-app-cli tui -a "Example Account"    # one account's INBOX
 mail-app-cli tui -a "Example Account" -m "Example Receipts" --message 100001
 ```
 
-A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; bodies and every action go through Mail.app one call at a time, with a spinner in the header while a call is queued.
+A three-pane client: mailboxes on the left, the message list in the middle, and the open message on the right (the reader takes the whole width on terminals narrower than 140 columns). Lists come from the Envelope Index, so switching mailboxes is quick; complete cached bodies and attachments come from local MIME files. Actions use typed native Apple Events, with a spinner in the header while a call is queued.
 
 ![The terminal client with the mailbox sidebar, the message list across two accounts, and an open message in the reader](docs/images/tui.png)
 
@@ -50,15 +50,50 @@ Actions apply on screen right away and the list refreshes from the index two sec
 curl -fsSL https://raw.githubusercontent.com/0xSMW/mail.app-cli/master/install.sh | sh
 ```
 
-Or with Go 1.25 or newer:
+Or with Go 1.25 or newer and Xcode Command Line Tools:
 
 ```bash
-go install github.com/0xSMW/mail.app-cli/v2/cmd/mail-app-cli@latest
+CGO_ENABLED=1 go install github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli@latest
 ```
 
 The named command installs `mail-app-cli` into `GOBIN` (or `$(go env GOPATH)/bin`). The legacy module-root install remains supported but produces `mail.app-cli` with a dot.
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.
+
+## Native transport in 3.0.0
+
+On macOS with cgo, the CLI sends typed Apple Events directly to Mail. Local lists use an embedded read-only SQLite connection, and complete cached MIME files supply bodies, recipients, and attachment bytes. Mail remains responsible for message changes, composition, and synchronization. Gmail archive uses Mail's Archive action with Accessibility access for the app running the CLI.
+
+Use `--backend legacy` or `MAIL_APP_CLI_BACKEND=legacy` to select the scripting compatibility backend explicitly. `--backend native` requires the compiled native transport; `--backend auto` selects native when available. Builds made with `CGO_ENABLED=0` select legacy automatically. A native operation that fails does not replay through the legacy backend. `doctor` reports the selected backend.
+
+Native replies and forwards are available in the TUI and from `send` or `drafts create`:
+
+```bash
+mail-app-cli send -a "Example Account" -m INBOX --reply-to 100001 \
+  --to recipient@example.test --subject "Re: Example" --body "Complete reply body"
+mail-app-cli drafts create -a "Example Account" -m INBOX --forward-of 100001 \
+  --to recipient@example.test --subject "Fwd: Example" --body-file ./forward.txt
+```
+
+The body, subject, and recipients are the complete outgoing content. Add `--reply-all` with `--reply-to` to create Mail's reply-all relationship. These flags require native mode and an explicit mailbox. Sending a stored draft preserves the existing MIME checks; unsupported rich drafts remain available for editing in Mail.
+
+## Exchange accounts in 3.0.0
+
+Use an Exchange account already connected to Mail.app with the same commands as other accounts:
+
+```bash
+mail-app-cli search "quarterly report" -a "Work Exchange" --limit 50
+mail-app-cli attachments list 100001 -a "Work Exchange" -m Inbox
+mail-app-cli archive 100001 -a "Work Exchange" -m Inbox --verify
+mail-app-cli drafts create -a "Work Exchange" --to colleague@example.test \
+  --subject "Review" --body-file review.txt --attach report.pdf
+```
+
+Search includes Exchange Inbox and other non-empty mailboxes, recognizes Mail's Exchange mailbox URLs, and treats `Inbox` and `INBOX` consistently. Incomplete mailbox searches return an error unless `--allow-partial` is requested; partial results identify the mailboxes that could not be read.
+
+Moves and archive verification follow the RFC Message-ID when Exchange changes the local ID or stored size. The account, source and destination, sender, subject, and sent time remain checked; ambiguous matches stay unverified. Attachment lookup accepts canonically equivalent Unicode filenames. Saved draft attachment reads use the selected account's special Drafts mailbox even before its local index catches up.
+
+Sending and draft updates accept recognized plain content stored inside Mail's generated HTML wrapper when text and attachment preservation can be proved. Rich formatting, unsupported inline content, signing, encryption, and reply-header reconstruction remain guarded; use Mail to send drafts outside the supported forms. After acknowledged submission, the CLI closes only its unchanged outgoing composition and removes only the unchanged stored draft. An uncertain submission is never automatically retried.
 
 ## Quick start
 
@@ -298,11 +333,15 @@ mail-app-cli drafts send <draft-id>
 mail-app-cli drafts delete <draft-id> --dry-run
 ```
 
-Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. `--dry-run` validates paths and previews the requested files without changing Mail.
+Draft `--attach` accepts one file per flag; repeat it for multiple files. Updates append new attachments and preserve existing ones when changing the subject or body. Files are checked before changes, and saved attachments are verified before a replacement draft removes the original. Mail controls delivery MIME encoding; text attachments can acquire CRLF line endings in transit. `--dry-run` validates paths and previews the requested files without changing Mail.
+
+Native sends with attachments save the same composition before submission and verify the stored filenames and file bytes. Missing, changed, or incomplete attachments stop the send before submission. This also applies when sending a supported saved draft or forwarding with explicit attachments.
 
 `send` and `drafts create` accept `--from <address>` to select an address configured on the account. Without it, they use the first configured address. Both validate the account and read the compose sender back before sending or saving; an unexpected sender or an address shared across accounts stops the operation. Draft updates preserve the original sender. Dry-run receipts include the account ID and selected sender, and validate the configured identity without composing a message. Sender validation does not establish which delivery route Mail will use.
 
 Outgoing commands require Mail to acknowledge the operation. A failure returns a nonzero exit; an uncertain submission must be checked before retrying. `sent` and `submitted` indicate Mail accepted submission, not recipient delivery. Draft creation verifies the saved draft directly through Mail rather than waiting for the search index. It identifies the account’s Drafts folder through Mail’s special mailbox references, including localized and nested folders.
+
+Sending requires Mail to expose one uniquely identified Drafts folder belonging to the selected account. The CLI saves the composition before sending and records that saved copy. After submission, it removes the copy only if it is unchanged and verifies its absence. A `submitted_cleanup_pending` receipt still means Mail accepted the message; check the retained draft instead of sending again.
 
 `drafts send` rebuilds supported plain-text drafts and ordinary file attachments as an outgoing message, preserving the sender and To/Cc/Bcc addresses. Standard Mail signature-selection, base-URL, and attachment-preference headers are accepted only with recognized values; content preservation is still verified independently. It rejects rich text, inline content, reply-thread headers, signing/encryption, or other unsupported message semantics before submission; send those drafts in Mail. The original stays until Mail acknowledges submission and is removed only if it is unchanged. A receipt with `submitted: true` and `cleanupPending: true` means the message was submitted but the original draft remains; do not resend it.
 
@@ -314,7 +353,9 @@ mail-app-cli search "sample invoice" -a "Example Account" --since 2026-01-01 --s
 mail-app-cli search "sample invoice" -a "Example Account" -m "All Mail"
 ```
 
-Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers every non-empty mailbox of each enabled account (or of the account named with `-a`). If a mailbox cannot be searched the command exits 5; `--allow-partial` returns what was found as `{messages, complete, searchedMailboxes, failedMailboxes}` in regular structured output. With `--ids-only` or `--count`, those list modifiers operate on `messages`. If the index is unreadable and live search fails, the recent-message journal is consulted; `--no-cache` disables that fallback.
+Every term must match the subject, sender, or Mail's indexed summary. Without `-m` the search covers each enabled account's Inbox and its other non-empty mailboxes (or only the account named with `-a`). Mailboxes with unknown counts are included. Exchange and IMAP accounts use Mail's local index when available.
+
+If a mailbox cannot be completely searched, the command exits 5. This includes reaching the automation fallback's scan budget or being unable to read a field needed to determine a match. The same rule applies with `-m`. `--allow-partial` returns observed matches as `{messages, complete, searchedMailboxes, failedMailboxes}`; incomplete mailbox entries include available scan counts, truncation, and read-failure details. Reaching the requested result limit alone is normal success. With `--ids-only` or `--count`, those list modifiers operate on `messages`. A known incomplete search is never replaced by cached success. The recent-message journal can be consulted when live search cannot start; `--no-cache` disables that fallback.
 
 ## Other commands
 
@@ -396,7 +437,7 @@ Caches live in `~/.cache/mail-app-cli/` (accounts and mailboxes 24h, message lis
 
 ## How it works
 
-Reads come from Mail's Envelope Index, a SQLite file, when it is readable, and from Mail.app through JavaScript for Automation otherwise. Writes and message bodies always go through Mail.app automation, serialized across goroutines and processes because Mail.app's scripting bridge is not safe under concurrent requests. Each automation call is bounded by a timeout and runs in its own process group.
+Native builds read Mail's Envelope Index through embedded read-only SQLite and extract complete cached bodies and attachments from local MIME files. When local data is unavailable, scoped public Apple Events read from Mail. Typed Apple Events also perform composition and changes; Gmail Inbox archive uses Mail's Archive action through public Accessibility APIs. Mail transactions are bounded and serialized across goroutines and processes. The explicit legacy backend uses JavaScript for Automation and AppleScript in bounded process groups.
 
 ## Development
 
@@ -431,10 +472,11 @@ cover Mail's local state; they do not certify server-side labels or future state
 
 Archiving from a Gmail Inbox to All Mail uses Mail's native Archive control.
 Grant Accessibility access to the application running `mail-app-cli` in macOS
-System Settings. The command briefly opens a separate Mail window with its
-preview hidden, selects and checks the individual message, then closes that
-window. If it cannot establish the exact selection or Mail's focus changes,
-the command stops before archiving. Conversation rows that cannot be selected
+System Settings. The command briefly opens a separate Mail window in the
+background with its preview hidden, selects and checks the individual message,
+then closes that window. It does not activate Mail or restore another app's
+focus afterward. If it cannot establish the exact owned window, selection, and
+Archive button, the command stops before archiving. Conversation rows that cannot be selected
 as an individual message require archiving in Mail directly. An uncertain
 Archive response stops the batch; reconcile its receipt before taking further
 action. All mailbox changes continue to go through Mail.

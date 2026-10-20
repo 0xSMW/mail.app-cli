@@ -117,38 +117,80 @@ func TestRunAutomationSerializesSeparateProcesses(t *testing.T) {
 
 func TestRunAutomationQueuedCallGetsFreshExecutionTimeout(t *testing.T) {
 	binDir, logPath, lockPath := writeLoggingFakeOsaScript(t)
-	holder := startAutomationHelper(t, binDir, logPath, lockPath, "holder")
-	t.Cleanup(func() {
-		if holder.Process != nil {
-			_ = holder.Process.Kill()
-		}
-		_ = holder.Wait()
-	})
-
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		contents, err := os.ReadFile(logPath)
-		if err == nil && strings.Contains(string(contents), "holder-start") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("holder did not acquire the process lock")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
+	t.Setenv("AUTOMATION_LOG", logPath)
+	releasePath := filepath.Join(t.TempDir(), "release-holder")
+	t.Setenv("AUTOMATION_HOLDER_RELEASE", releasePath)
 	t.Setenv("MAIL_APP_CLI_AUTOMATION_LOCK_PATH", lockPath)
 	t.Setenv("PATH", binDir)
-	started := time.Now()
-	output, err := NewClient().runJXAWithTimeout("fast", 50*time.Millisecond)
+	holder := startAutomationHelper(t, binDir, logPath, lockPath, "holder")
+	holderDone := make(chan struct{})
+	var holderErr error
+	go func() {
+		holderErr = holder.Wait()
+		close(holderDone)
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	var queuedDone chan struct{}
+	t.Cleanup(func() {
+		cancel()
+		if err := os.WriteFile(releasePath, nil, 0600); err != nil {
+			t.Errorf("release holder during cleanup: %v", err)
+		}
+		select {
+		case <-holderDone:
+		case <-time.After(3 * time.Second):
+			_ = holder.Process.Kill()
+			<-holderDone
+		}
+		if queuedDone != nil {
+			<-queuedDone
+		}
+	})
+	waitForAutomationLog(t, logPath, "holder-start")
+
+	const executionTimeout = 250 * time.Millisecond
+	type result struct {
+		output string
+		err    error
+	}
+	results := make(chan result, 1)
+	queuedStarted := make(chan struct{})
+	queuedDone = make(chan struct{})
+	go func() {
+		defer close(queuedDone)
+		close(queuedStarted)
+		output, err := NewClient().WithContext(ctx).runJXAWithTimeout("fast", executionTimeout)
+		results <- result{output, err}
+	}()
+	<-queuedStarted
+	// The lock wait exceeds the entire execution budget. A deadline started
+	// before acquiring the gate would expire while the holder is still blocked.
+	select {
+	case got := <-results:
+		t.Fatalf("queued call completed before holder release: %+v", got)
+	case <-time.After(2 * executionTimeout):
+	}
+	if err := os.WriteFile(releasePath, nil, 0600); err != nil {
+		t.Fatalf("release holder: %v", err)
+	}
+	select {
+	case got := <-results:
+		if got.err != nil || got.output != "fast" {
+			t.Fatalf("queued execution = %+v, want fast with a fresh deadline", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("queued call did not finish after holder release")
+	}
+	<-holderDone
+	if holderErr != nil {
+		t.Fatalf("holder helper failed: %v", holderErr)
+	}
+	contents, err := os.ReadFile(logPath)
 	if err != nil {
-		t.Fatalf("queued runJXAWithTimeout returned error: %v", err)
+		t.Fatalf("read automation log: %v", err)
 	}
-	if output != "fast" {
-		t.Fatalf("output = %q, want fast", output)
-	}
-	if elapsed := time.Since(started); elapsed < 100*time.Millisecond {
-		t.Fatalf("queued call elapsed = %s, want it to wait for the holder", elapsed)
+	if got := strings.Join(strings.Fields(string(contents)), "\n"); got != "holder-start\nholder-end\nfast-start\nfast-end" {
+		t.Fatalf("queued execution order = %q", contents)
 	}
 }
 
@@ -244,6 +286,13 @@ for arg in "$@"; do last="$arg"; done
 printf '%s-start\n' "$last" >> "$AUTOMATION_LOG"
 case "$last" in
   fast) /bin/sleep 0.01 ;;
+  holder)
+    if [ -n "$AUTOMATION_HOLDER_RELEASE" ]; then
+      while [ ! -e "$AUTOMATION_HOLDER_RELEASE" ]; do /bin/sleep 0.01; done
+    else
+      /bin/sleep 0.2
+    fi
+    ;;
   detached)
     /usr/bin/perl -MPOSIX=setsid -e 'setsid(); sleep 5' &
     printf 'detached-pid=%s\n' "$!" >> "$AUTOMATION_LOG"
