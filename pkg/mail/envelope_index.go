@@ -544,11 +544,11 @@ limit 1;
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	messages := indexMessagesToMessages(rows)
-	if len(messages) == 0 {
+	if len(rows) == 0 {
 		return nil, nil
 	}
-	return &messages[0], nil
+	message := rows[0].message()
+	return &message, nil
 }
 
 // getMessageEnvelopesForVerification reads every requested local message ID
@@ -580,9 +580,9 @@ where %s
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	messages := indexMessagesToMessages(rows)
-	byID := make(map[string]Message, len(messages))
-	for _, message := range messages {
+	byID := make(map[string]Message, len(rows))
+	for _, row := range rows {
+		message := row.message()
 		byID[message.ID] = message
 	}
 	return byID, nil
