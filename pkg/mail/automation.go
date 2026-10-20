@@ -133,10 +133,7 @@ func (c *Client) runAppleScript(script string) (string, error) {
 }
 
 func (c *Client) runJXA(script string) (string, error) {
-	if c.session != nil {
-		return c.session.run(script, defaultAutomationTimeout)
-	}
-	return runAutomation(c.Context(), "jxa", defaultAutomationTimeout, "-l", "JavaScript", "-e", script)
+	return c.runJXAWithTimeout(script, defaultAutomationTimeout)
 }
 
 func (c *Client) runJXAWithTimeout(script string, timeout time.Duration) (string, error) {
