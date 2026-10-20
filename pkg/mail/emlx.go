@@ -308,26 +308,6 @@ func unquotePlainText(text string) string {
 	return strings.Join(lines, "\n")
 }
 
-// newlineStripper drops line breaks, which base64 bodies carry every 76
-// characters and the decoder rejects.
-type newlineStripper struct{ reader io.Reader }
-
-func (s newlineStripper) Read(p []byte) (int, error) {
-	for {
-		n, err := s.reader.Read(p)
-		kept := 0
-		for _, b := range p[:n] {
-			if b != '\r' && b != '\n' {
-				p[kept] = b
-				kept++
-			}
-		}
-		if kept > 0 || err != nil {
-			return kept, err
-		}
-	}
-}
-
 func decodeCharset(raw []byte, charset string) (string, error) {
 	charset = strings.ToLower(strings.TrimSpace(charset))
 	switch charset {
