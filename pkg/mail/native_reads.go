@@ -487,11 +487,7 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 			return err
 		}
 		message.BodyDiagnostics = diskDiagnostics
-		if diskDiagnostics != nil && !c.shared.bodyAlternatives {
-			for i := range diskDiagnostics.Alternatives {
-				diskDiagnostics.Alternatives[i].Text = ""
-			}
-		}
+		trimBodyAlternatives(diskDiagnostics, c.shared.bodyAlternatives)
 		return n.phase("content", func() error {
 			body, err := n.stringProperty("ctnt", ref)
 			if err != nil {
