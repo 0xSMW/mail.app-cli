@@ -480,24 +480,9 @@ func reconstructibleDraft(snapshot *draftSnapshot) (string, []draftMIMEAttachmen
 func reconstructibleAppleDraftHeader(key, value string) bool {
 	switch key {
 	case "X-Apple-Mail-Signature":
-		if value == "" {
-			return true
-		}
 		// Mail stores the selected signature's UUID, while the actual signature
 		// content must already be represented by the verified message body.
-		if len(value) != 36 {
-			return false
-		}
-		for i, ch := range value {
-			if i == 8 || i == 13 || i == 18 || i == 23 {
-				if ch != '-' {
-					return false
-				}
-			} else if !strings.ContainsRune("0123456789abcdefABCDEF", ch) {
-				return false
-			}
-		}
-		return true
+		return value == "" || isAppleDraftUUID(value)
 	case "X-Apple-Base-Url":
 		if !strings.HasPrefix(value, "x-msg://") || !strings.HasSuffix(value, "/") {
 			return false
