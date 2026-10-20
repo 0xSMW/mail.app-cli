@@ -24,9 +24,6 @@ type focusDiagnostic struct {
 	OwnedIdentifierMatches bool     `json:"ownedIdentifierMatches"`
 	SameWindow             bool     `json:"sameWindow"`
 	MailFrontmostAX        bool     `json:"mailFrontmostAX"`
-	MainAttributeSet       bool     `json:"mainAttributeSet"`
-	FocusedAttributeSet    bool     `json:"focusedAttributeSet"`
-	RootFocusedWindowSet   bool     `json:"rootFocusedWindowSet"`
 	WindowIDs              []string `json:"windowIDs"`
 	Incomplete             bool     `json:"incomplete,omitempty"`
 }
@@ -56,7 +53,7 @@ func emitFocusDiagnostic(writer io.Writer, raw json.RawMessage, previous *string
 		return
 	}
 	switch diagnostic.Operation {
-	case "front", "prepare", "focusowned", "ownedfocus", "guard", "focus":
+	case "prepare", "guard":
 	default:
 		return
 	}
