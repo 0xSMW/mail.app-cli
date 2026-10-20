@@ -43,16 +43,16 @@ func stripControls(s string) string {
 	return b.String()
 }
 
-// sanitizeBody keeps line structure and indentation but drops control
+// sanitizeBodyLines keeps line structure and indentation but drops control
 // characters. Tabs become four spaces; trailing spaces are dropped.
-func sanitizeBody(s string) string {
+func sanitizeBodyLines(s string) []string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		lines[i] = strings.TrimRight(stripControls(strings.ReplaceAll(line, "\t", "    ")), " ")
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
 // truncate and pad measure width without counting ANSI escapes, so styled
