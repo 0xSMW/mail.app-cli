@@ -28,15 +28,11 @@ Keys:
 		Use:   "show",
 		Short: "Show every setting with where it came from",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rows := make([][]string, 0, 3)
-			for _, row := range a.resolved.Rows() {
-				rows = append(rows, row)
-			}
 			return a.writer.Write(output.Result{
 				Data:    a.resolved,
 				Summary: "config from " + a.resolved.Path,
 				Plain: func(p *output.Printer) {
-					p.Table([]string{"KEY", "VALUE", "SOURCE"}, rows)
+					p.Table([]string{"KEY", "VALUE", "SOURCE"}, a.resolved.Rows())
 					p.Blank()
 					p.Line("%s", p.Dim("file: "+a.resolved.Path))
 				},
