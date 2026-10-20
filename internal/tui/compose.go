@@ -237,7 +237,7 @@ func others(addresses []string, skip ...string) []string {
 func quote(original *mail.Message) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "On %s, %s wrote:\n", formatLongDate(original.DateReceived), sanitizeLine(original.Sender))
-	for _, line := range strings.Split(sanitizeBody(original.Content), "\n") {
+	for _, line := range sanitizeBodyLines(original.Content) {
 		b.WriteString("> " + line + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
