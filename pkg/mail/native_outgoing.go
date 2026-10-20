@@ -227,14 +227,7 @@ func (n *nativeMail) outgoingVerify(object ae.Value, input OutgoingInput, id, se
 	return nil
 }
 func (n *nativeMail) outgoingPause() error {
-	timer := time.NewTimer(100 * time.Millisecond)
-	defer timer.Stop()
-	select {
-	case <-n.ctx.Done():
-		return n.ctx.Err()
-	case <-timer.C:
-		return nil
-	}
+	return waitForVerificationBackoff(n.ctx, 100*time.Millisecond)
 }
 
 // A rich-text attachment can appear before Mail has published its file name.
