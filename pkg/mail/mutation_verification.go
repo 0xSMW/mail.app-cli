@@ -100,7 +100,8 @@ func (identity StableIdentity) rfcEnvelopeKey() string {
 func (identity StableIdentity) matchesEnvelope(message Message) bool {
 	actual := StableIdentityFromMessage(message)
 	if rfc := validRFCMessageID(identity.RFCMessageID); rfc != "" {
-		return identity.rfcEnvelopeKey() != "" && identity.rfcEnvelopeKey() == actual.rfcEnvelopeKey() && actual.RFCMessageID == rfc
+		expectedKey := identity.rfcEnvelopeKey()
+		return expectedKey != "" && expectedKey == actual.rfcEnvelopeKey() && actual.RFCMessageID == rfc
 	}
 	return identity.envelopeKey() == actual.envelopeKey() && identity.hasFallback() && identity.MessageSize == actual.MessageSize
 }
