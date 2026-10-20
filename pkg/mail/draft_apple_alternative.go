@@ -256,13 +256,13 @@ func appleAttachmentObjectID(span *html.Node) (string, bool) {
 	}
 	width, err := strconv.Atoi(attrs["width"])
 	id := strings.TrimPrefix(attrs["data"], "cid:")
-	if err != nil || width < 1 || width > 4096 || !strings.HasPrefix(attrs["data"], "cid:") || !appleAttachmentContentID(id) || !appleWrapperElement(object, "object", map[string]string{"type": "application/x-apple-msg-attachment", "width": attrs["width"], "data": "cid:" + id}) || object.FirstChild != nil {
+	if err != nil || width < 1 || width > 4096 || !strings.HasPrefix(attrs["data"], "cid:") || !isAppleDraftUUID(id) || !appleWrapperElement(object, "object", map[string]string{"type": "application/x-apple-msg-attachment", "width": attrs["width"], "data": "cid:" + id}) || object.FirstChild != nil {
 		return "", false
 	}
 	return id, true
 }
 
-func appleAttachmentContentID(id string) bool {
+func isAppleDraftUUID(id string) bool {
 	if len(id) != 36 {
 		return false
 	}
@@ -340,7 +340,7 @@ func appleRelatedDraftParts(source io.Reader, params map[string]string) (string,
 		}
 		headerID := part.Header.Get("Content-Id")
 		id := strings.TrimSuffix(strings.TrimPrefix(headerID, "<"), ">")
-		if headerID != "<"+id+">" || !appleAttachmentContentID(id) {
+		if headerID != "<"+id+">" || !isAppleDraftUUID(id) {
 			return reject()
 		}
 		for _, previous := range contentIDs {
