@@ -577,7 +577,7 @@ func TestSanitizeLineStripsEscapes(t *testing.T) {
 	if got := sanitizeLine("evil\x1b[31m subject\r\n"); got != "evil[31m subject" {
 		t.Fatalf("sanitizeLine = %q", got)
 	}
-	if got := sanitizeBody("  indented\n\tcode\x07 \n"); got != "  indented\n    code\n" {
+	if got := strings.Join(sanitizeBodyLines("  indented\n\tcode\x07 \n"), "\n"); got != "  indented\n    code\n" {
 		t.Fatalf("sanitizeBody = %q", got)
 	}
 }
