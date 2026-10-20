@@ -14,7 +14,7 @@ import (
 func localMIMETransferReader(body io.Reader, encoding string) (io.Reader, bool) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "base64":
-		return base64.NewDecoder(base64.StdEncoding, newlineStripper{bufio.NewReader(body)}), true
+		return base64.NewDecoder(base64.StdEncoding, bufio.NewReader(body)), true
 	case "quoted-printable":
 		return quotedprintable.NewReader(body), true
 	case "", "7bit", "8bit", "binary":
