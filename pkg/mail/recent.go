@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -444,8 +445,7 @@ func normalizeRecentTerms(terms []string) []string {
 }
 
 func mergeRecentTerms(existing, next []string) []string {
-	merged := append(normalizeRecentTerms(existing), normalizeRecentTerms(next)...)
-	return normalizeRecentTerms(merged)
+	return normalizeRecentTerms(slices.Concat(existing, next))
 }
 
 func recentEntryToMessage(entry RecentMessage) Message {
