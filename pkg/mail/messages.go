@@ -394,11 +394,7 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
 	}
 	if message := envelope.Message; message != nil {
-		if bodyDiagnostics != nil && !c.shared.bodyAlternatives {
-			for i := range bodyDiagnostics.Alternatives {
-				bodyDiagnostics.Alternatives[i].Text = ""
-			}
-		}
+		trimBodyAlternatives(bodyDiagnostics, c.shared.bodyAlternatives)
 		message.BodyDiagnostics = bodyDiagnostics
 		message.ContentSource = "mail"
 		if haveDiskBody {
