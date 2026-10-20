@@ -62,18 +62,7 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 		if err != nil {
 			return nil, err
 		}
-		if mailboxes, ok, err := c.getMailboxesFromIndex(*account); err != nil {
-			return nil, err
-		} else if ok {
-			return mailboxes, nil
-		}
-
-		// If the Envelope Index cannot provide mailbox rows, use a single JXA call.
-		mailboxes, err := c.getMailboxesForSingleAccount(accountName)
-		if err != nil {
-			return nil, err
-		}
-		return c.enrichArchiveMailboxes(accountName, mailboxes), nil
+		return c.mailboxesForAccount(*account)
 	}
 
 	accounts, err := c.GetAccountsJSON()
@@ -87,52 +76,13 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 
 	// If only one account total, no need for parallelization
 	if len(accounts) == 1 {
-		if mailboxes, ok, err := c.getMailboxesFromIndex(accounts[0]); err != nil {
-			return nil, err
-		} else if ok {
-			return mailboxes, nil
-		}
-		mailboxes, err := c.getMailboxesForSingleAccount(accounts[0].Name)
-		if err != nil {
-			return nil, err
-		}
-		return c.enrichArchiveMailboxes(accounts[0].Name, mailboxes), nil
+		return c.mailboxesForAccount(accounts[0])
 	}
 
-	// Use channel to collect results from goroutines
-	type result struct {
-		mailboxes []Mailbox
-		err       error
-	}
-	results := make(chan result, len(accounts))
-
-	// Launch bounded goroutines for account mailbox retrieval.
-	runWithMailCommandLimit(accounts, func(account Account) {
-		mailboxes, ok, err := c.getMailboxesFromIndex(account)
-		if err != nil {
-			results <- result{err: err}
-			return
-		}
-		if !ok {
-			mailboxes, err = c.getMailboxesForSingleAccount(account.Name)
-			if err == nil {
-				mailboxes = c.enrichArchiveMailboxes(account.Name, mailboxes)
-			}
-		}
-		results <- result{mailboxes: mailboxes, err: err}
-	})
-
-	// Collect results
 	var allMailboxes []Mailbox
-	var errors []error
-	for i := 0; i < len(accounts); i++ {
-		res := <-results
-		if res.err != nil {
-			errors = append(errors, res.err)
-		} else {
-			allMailboxes = append(allMailboxes, res.mailboxes...)
-		}
-	}
+	errors := collectMailCommands(accounts, c.mailboxesForAccount, func(mailboxes []Mailbox) {
+		allMailboxes = append(allMailboxes, mailboxes...)
+	})
 
 	// Return partial results even if some accounts failed
 	if len(errors) > 0 && len(allMailboxes) == 0 {
@@ -140,6 +90,21 @@ func (c *Client) GetMailboxesJSON(accountName string) ([]Mailbox, error) {
 	}
 
 	return allMailboxes, nil
+}
+
+func (c *Client) mailboxesForAccount(account Account) ([]Mailbox, error) {
+	if mailboxes, ok, err := c.getMailboxesFromIndex(account); err != nil {
+		return nil, err
+	} else if ok {
+		return mailboxes, nil
+	}
+
+	// If the Envelope Index cannot provide mailbox rows, use a single live call.
+	mailboxes, err := c.getMailboxesForSingleAccount(account.Name)
+	if err != nil {
+		return nil, err
+	}
+	return c.enrichArchiveMailboxes(account.Name, mailboxes), nil
 }
 
 func (c *Client) enrichArchiveMailboxes(accountName string, mailboxes []Mailbox) []Mailbox {
