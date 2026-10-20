@@ -76,7 +76,7 @@ func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID s
 	if len(rows) == 0 {
 		return nil, false, nil
 	}
-	message := indexMessagesToMessages([]indexMessage{rows[0].indexMessage})[0]
+	message := rows[0].indexMessage.message()
 	path, err := messageFilePathForMailbox(id, rows[0].OwnerURL)
 	if err != nil {
 		if denied := c.nativeDiskAccessError(err); denied != nil {
