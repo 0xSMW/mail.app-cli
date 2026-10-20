@@ -153,14 +153,9 @@ try {
 JSON.stringify(result);
 `, escapeJSString(mailboxName), string(encodedIDs), jxaMailboxLookupHelper(), jxaMessageByIdHelper(), escapeJSString(accountName), jxaMailboxLookupExpression(mailboxName))
 
-	output, err := c.runJXAWithTimeout(script, timeout)
-	if err != nil {
-		return nil, err
-	}
-
 	var contentByID map[string]string
-	if err := json.Unmarshal([]byte(output), &contentByID); err != nil {
-		return nil, fmt.Errorf("failed to parse content JSON: %w", err)
+	if err := c.runJXAJSON(script, timeout, "content", &contentByID); err != nil {
+		return nil, err
 	}
 	return contentByID, nil
 }
