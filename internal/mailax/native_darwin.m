@@ -17,9 +17,6 @@
 @property(copy) NSString *windowID;
 @property NSUInteger cursor;
 @property NSTimeInterval lookupDeadline;
-@property BOOL mainAttributeSet;
-@property BOOL focusedAttributeSet;
-@property BOOL rootFocusedWindowSet;
 @end
 @implementation MailArchiveAXSession
 @end
@@ -87,11 +84,6 @@ static NSRunningApplication *FreshFrontApplication(void) {
     if (!app) Fail(@"Cannot identify the focused running application", 2);
     return app;
 }
-static NSString *FrontApplication(void) {
-    NSString *bundle = FreshFrontApplication().bundleIdentifier;
-    if (![bundle isKindOfClass:[NSString class]] || !bundle.length) Fail(@"Cannot identify the previous foreground application", 2);
-    return bundle;
-}
 static NSRunningApplication *MailApplication(void) {
     NSArray *apps = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.mail"];
     if (apps.count != 1) Fail(@"Mail must be running as exactly one application", 2);
@@ -105,35 +97,6 @@ static id OwnedWindow(MailArchiveAXSession *s, BOOL ready) {
     if (matches.count != 1) Fail(@"Owned Mail viewer window is unavailable or ambiguous", ready && matches.count == 0 ? 1 : 2);
     if (s.window && !Same(s.window, matches.firstObject)) Fail(@"Owned Mail viewer window changed", 2);
     return matches.firstObject;
-}
-static BOOL OwnedFocus(MailArchiveAXSession *s) {
-    if (![FrontApplication() isEqual:@"com.apple.mail"]) return NO;
-    id focused = Attribute(s.root, kAXFocusedWindowAttribute, NO);
-    return HasID(focused, s.windowID) && Same(focused, s.window);
-}
-static BOOL SetWritableFocusAttribute(id element, CFStringRef attribute, CFTypeRef value) {
-    if (NSProcessInfo.processInfo.systemUptime >= operationDeadline) Fail(@"Mail Accessibility operation timed out",2);
-    Boolean writable = false;
-    AXError status = AXUIElementIsAttributeSettable(Element(element),attribute,&writable);
-    if (status == kAXErrorAttributeUnsupported) return NO;
-    if (status != kAXErrorSuccess) Fail([NSString stringWithFormat:@"Mail focus attribute %@ availability failed: %d",(__bridge NSString *)attribute,status],2);
-    if (!writable) return NO;
-    status = AXUIElementSetAttributeValue(Element(element),attribute,value);
-    if (status != kAXErrorSuccess) Fail([NSString stringWithFormat:@"Mail focus attribute %@ failed: %d",(__bridge NSString *)attribute,status],2);
-    return YES;
-}
-static BOOL RequestOwnedFocus(MailArchiveAXSession *s) {
-    OwnedWindow(s,NO);
-    // Do not set a window's focus attributes before activation has actually
-    // reached Mail. NSRunningApplication's activation reply is asynchronous.
-    if (FreshFrontApplication().processIdentifier != MailApplication().processIdentifier) return NO;
-    s.mainAttributeSet = SetWritableFocusAttribute(s.window,kAXMainAttribute,kCFBooleanTrue);
-    s.focusedAttributeSet = SetWritableFocusAttribute(s.window,kAXFocusedAttribute,kCFBooleanTrue);
-    s.rootFocusedWindowSet = SetWritableFocusAttribute(s.root,kAXFocusedWindowAttribute,(__bridge CFTypeRef)s.window);
-    if (FreshFrontApplication().processIdentifier != MailApplication().processIdentifier) Fail(@"Mail focus changed during owned viewer preparation",2);
-    AXError raised = AXUIElementPerformAction(Element(s.window),kAXRaiseAction);
-    if (raised != kAXErrorSuccess) Fail(@"Could not raise the exact owned Mail viewer after focusing it",2);
-    return YES;
 }
 static NSDictionary *FocusDiagnostic(MailArchiveAXSession *s, NSString *op) {
     // Diagnostic collection cannot authorize an action. It is opt-in, carries
@@ -154,9 +117,6 @@ static NSDictionary *FocusDiagnostic(MailArchiveAXSession *s, NSString *op) {
             result[@"ownedIdentifierMatches"] = @(HasID(focused, s.windowID));
             result[@"sameWindow"] = @(Same(focused, s.window));
             result[@"mailFrontmostAX"] = @([Attribute(s.root, kAXFrontmostAttribute, NO) isEqual:@YES]);
-            result[@"mainAttributeSet"] = @(s.mainAttributeSet);
-            result[@"focusedAttributeSet"] = @(s.focusedAttributeSet);
-            result[@"rootFocusedWindowSet"] = @(s.rootFocusedWindowSet);
             NSMutableArray *identifiers = [NSMutableArray array];
             for (id window in ArrayAttribute(s.root,kAXWindowsAttribute,NO)) {
                 if (identifiers.count >= 32) break;
@@ -169,36 +129,73 @@ static NSDictionary *FocusDiagnostic(MailArchiveAXSession *s, NSString *op) {
     }
     return result;
 }
+// All mutation authority is derived from the owned window's current tree.
+// The foreground application and Mail's key/main windows are irrelevant.
+static void CollectID(id element, NSString *identifier, NSUInteger depth, NSMutableArray *matches) {
+    if (!element || depth > 8) return;
+    id currentID = Attribute(element, kAXIdentifierAttribute, NO);
+    if ([currentID isEqual:identifier]) { [matches addObject:element]; return; }
+    // Window-level discovery must never enumerate message rows or sidebar
+    // contents. Continue through sibling branches to reject duplicate controls.
+    if ([currentID isEqual:@"Mail.messageList"] || [currentID isEqual:@"MailboxesOutlineView"]) return;
+    for (id child in ArrayAttribute(element, kAXChildrenAttribute, NO)) CollectID(child, identifier, depth+1, matches);
+}
+static id OwnedTable(MailArchiveAXSession *s, BOOL ready) {
+    id window = OwnedWindow(s, ready);
+    NSMutableArray *matches = [NSMutableArray array];
+    CollectID(window, @"Mail.messageList", 0, matches);
+    if (matches.count != 1) Fail(@"Owned Mail message list is unavailable or ambiguous", ready && matches.count == 0 ? 1 : 2);
+    id table = matches.firstObject;
+    if (s.table && !Same(s.table, table)) Fail(@"Owned Mail message list changed", 2);
+    return table;
+}
+static void RequireRowMembership(MailArchiveAXSession *s, id row) {
+    NSUInteger matches = 0;
+    for (id current in ArrayAttribute(s.table, kAXRowsAttribute, YES)) if (Same(current, row)) matches++;
+    if (matches != 1) Fail(@"Owned Mail row is unavailable or ambiguous", 2);
+}
 static void Guard(MailArchiveAXSession *s) {
-    OwnedWindow(s, NO);
-    if (!OwnedFocus(s)) Fail(@"Mail focus changed", 2);
+    OwnedTable(s, NO);
+    RequireRowMembership(s, s.selected);
     NSArray *selected = ArrayAttribute(s.table, kAXSelectedRowsAttribute, YES);
     if (selected.count != 1 || !Same(selected.firstObject, s.selected)) Fail(@"Mail message selection changed", 2);
     if (Find(s.selected, @"Mail.messageList.cell.view.disclosureButton", 0)) Fail(@"Conversation archive is not allowed for an individual message", 2);
 }
-static void CollectArchive(id element, NSUInteger depth, NSMutableArray *matches) {
-    if (!element || depth > 4) return;
-    if (HasID(element, @"Mail.menuBar.messageMenu.archive")) [matches addObject:element];
-    for (id child in ArrayAttribute(element, kAXChildrenAttribute, NO)) CollectArchive(child, depth+1, matches);
+static void CollectToolbar(id element, NSUInteger depth, NSMutableArray *matches) {
+    if (!element || depth > 8) return;
+    id currentID = Attribute(element, kAXIdentifierAttribute, NO);
+    if ([currentID isEqual:@"Mail.messageList"] || [currentID isEqual:@"MailboxesOutlineView"]) return;
+    if ([Attribute(element, kAXRoleAttribute, NO) isEqual:(__bridge NSString *)kAXToolbarRole]) { [matches addObject:element]; return; }
+    for (id child in ArrayAttribute(element, kAXChildrenAttribute, NO)) CollectToolbar(child, depth+1, matches);
+}
+static void CollectArchiveButton(id element, NSString *title, NSUInteger depth, NSMutableArray *matches) {
+    if (!element || depth > 5) return;
+    if ([Attribute(element, kAXRoleAttribute, NO) isEqual:(__bridge NSString *)kAXButtonRole] &&
+        [Attribute(element, kAXDescriptionAttribute, NO) isEqual:title]) { [matches addObject:element]; return; }
+    for (id child in ArrayAttribute(element, kAXChildrenAttribute, NO)) CollectArchiveButton(child, title, depth+1, matches);
 }
 static id ArchiveControl(MailArchiveAXSession *s) {
+    id window = OwnedWindow(s, NO);
+    // The global menu supplies a localized title only. Its enabled state and
+    // responder-chain target never authorize an action on the owned viewer.
     id bar = Attribute(s.root, kAXMenuBarAttribute, YES);
-    NSMutableArray *menus = [NSMutableArray array];
-    for (id top in ArrayAttribute(bar, kAXChildrenAttribute, YES)) {
-        if (HasID(top, @"Mail.menuBar.messageMenu")) [menus addObject:top];
-    }
-    if (menus.count != 1) Fail(@"Mail Message menu is unavailable or ambiguous", 2);
+    NSMutableArray *menuItems = [NSMutableArray array];
+    CollectID(bar, @"Mail.menuBar.messageMenu.archive", 0, menuItems);
+    if (menuItems.count != 1 || ![Attribute(menuItems.firstObject, kAXRoleAttribute, YES) isEqual:(__bridge NSString *)kAXMenuItemRole]) Fail(@"Mail Archive title is unavailable or ambiguous", 2);
+    id title = Attribute(menuItems.firstObject, kAXTitleAttribute, YES);
+    if (![title isKindOfClass:[NSString class]] || ![title length]) Fail(@"Mail Archive title is unavailable", 2);
+    NSMutableArray *toolbars = [NSMutableArray array];
+    CollectToolbar(window, 0, toolbars);
+    if (toolbars.count != 1) Fail(@"Owned Mail toolbar is unavailable or ambiguous", 2);
     NSMutableArray *matches = [NSMutableArray array];
-    CollectArchive(menus.firstObject, 0, matches);
-    if (matches.count != 1) Fail(@"Mail native Archive control is unavailable or ambiguous", 2);
+    CollectArchiveButton(toolbars.firstObject, title, 0, matches);
+    if (matches.count != 1) Fail(@"Owned Mail Archive button is unavailable or ambiguous", 2);
     id control = matches.firstObject;
-    if (![Attribute(control, kAXRoleAttribute, YES) isEqual:(__bridge NSString *)kAXMenuItemRole] ||
-        ![Attribute(control, kAXEnabledAttribute, YES) isEqual:@YES]) Fail(@"Mail native Archive is disabled", 2);
-    NSArray *actions = nil;
+    if (![Attribute(control, kAXEnabledAttribute, YES) isEqual:@YES]) Fail(@"Owned Mail Archive button is disabled", 2);
     CFArrayRef copied = NULL;
     AXError status = AXUIElementCopyActionNames(Element(control), &copied);
-    actions = CFBridgingRelease(copied);
-    if (status != kAXErrorSuccess || ![actions containsObject:(__bridge NSString *)kAXPressAction]) Fail(@"Mail native Archive cannot be pressed", 2);
+    NSArray *actions = CFBridgingRelease(copied);
+    if (status != kAXErrorSuccess || ![actions containsObject:(__bridge NSString *)kAXPressAction]) Fail(@"Owned Mail Archive button cannot be pressed", 2);
     return control;
 }
 static NSArray *Candidates(id table) {
@@ -244,26 +241,7 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
             } else {
                 if (!AXIsProcessTrusted()) Fail(@"Native Gmail archive requires Accessibility access for the app running mail-app-cli", 2);
                 if ([op isEqual:@"trusted"]) reply = @{};
-                else if ([op isEqual:@"front"]) reply = @{@"text":FrontApplication()};
-                else if ([op isEqual:@"focus"]) {
-                    long long viewer = [request[@"viewer"] longLongValue];
-                    if (viewer <= 0) Fail(@"Invalid owned Mail viewer", 2);
-                    s = [MailArchiveAXSession new];
-                    s.windowID = [NSString stringWithFormat:@"Mail.messageViewer.window.%lld", viewer];
-                    s.root = CFBridgingRelease(AXUIElementCreateApplication(MailApplication().processIdentifier));
-                    AXUIElementSetMessagingTimeout(Element(s.root), 0.5);
-                    s.window = OwnedWindow(s, NO);
-                    reply = @{@"value":@(OwnedFocus(s))};
-                }
-                else if ([op isEqual:@"restore"]) {
-                    NSString *bundle = request[@"bundle"];
-                    // Never steal focus after the user switched to another app.
-                    if ([FrontApplication() isEqual:@"com.apple.mail"] && bundle.length && ![bundle isEqual:@"com.apple.mail"]) {
-                        NSArray *apps = [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle];
-                        if (apps.count == 1 && ![apps.firstObject activateWithOptions:0]) Fail(@"Could not restore the previous application", 2);
-                    }
-                    reply = @{};
-                } else if ([op isEqual:@"prepare"]) {
+                else if ([op isEqual:@"prepare"]) {
                     long long viewer = [request[@"viewer"] longLongValue];
                     if (viewer <= 0 || *handle) Fail(@"Invalid owned Mail viewer", 2);
                     s = [MailArchiveAXSession new];
@@ -271,28 +249,17 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                     s.root = CFBridgingRelease(AXUIElementCreateApplication(MailApplication().processIdentifier));
                     AXUIElementSetMessagingTimeout(Element(s.root), 0.5);
                     s.window = OwnedWindow(s, YES);
-                    s.table = Find(s.window, @"Mail.messageList", 0);
-                    if (!s.table) Fail(@"Owned Mail message list did not become ready", 1);
-                    if (![MailApplication() activateWithOptions:0]) Fail(@"Could not focus Mail", 2);
+                    s.table = OwnedTable(s, YES);
                     s.candidates = Candidates(s.table);
                     s.lookupDeadline = NSProcessInfo.processInfo.systemUptime + 5;
                     *handle = (uintptr_t)CFBridgingRetain(s);
                     reply = @{};
                 } else {
                     if (!s) Fail(@"Mail Accessibility session is unavailable", 2);
-                    if ([op isEqual:@"focusowned"]) reply = @{@"value":@(RequestOwnedFocus(s))};
-                    else if ([op isEqual:@"ownedfocus"]) {
-                        if (budget) AXUIElementSetMessagingTimeout(Element(s.root), MAX(0.001,MIN(0.5,budget.doubleValue/1000.0)));
-                        BOOL owned = NO;
-                        @try { owned = OwnedFocus(s); }
-                        @finally { if (budget) AXUIElementSetMessagingTimeout(Element(s.root), 0.5); }
-                        reply = @{@"value":@(owned)};
-                    }
-                    else if ([op isEqual:@"guard"]) { Guard(s); reply = @{}; }
+                    if ([op isEqual:@"guard"]) { Guard(s); reply = @{}; }
                     else if ([op isEqual:@"archive"]) { Guard(s); s.archive = ArchiveControl(s); reply = @{}; }
                     else if ([op isEqual:@"select"]) {
-                        OwnedWindow(s, NO);
-                        if (!OwnedFocus(s)) Fail(@"Mail focus changed", 2);
+                        OwnedTable(s, NO);
                         NSString *subject = request[@"subject"];
                         BOOL found = NO;
                         while (s.cursor < s.candidates.count && NSProcessInfo.processInfo.systemUptime < s.lookupDeadline) {
@@ -300,6 +267,8 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                             id label = Find(row, @"Mail.messageList.cell.view.subjectLabel", 0);
                             if (!label || ![Attribute(label, kAXValueAttribute, YES) isEqual:subject]) continue;
                             if (Find(row, @"Mail.messageList.cell.view.disclosureButton", 0)) continue;
+                            OwnedTable(s, NO);
+                            RequireRowMembership(s, row);
                             AXError status = AXUIElementSetAttributeValue(Element(s.table), kAXSelectedRowsAttribute, (__bridge CFTypeRef)@[row]);
                             if (status != kAXErrorSuccess) Fail(@"Could not select exact Mail row", 2);
                             s.selected = row; found = YES; break;
@@ -309,6 +278,8 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                         Guard(s);
                         id archive = ArchiveControl(s);
                         if (!s.archive || !Same(archive, s.archive)) Fail(@"Mail Archive control changed", 2);
+                        Guard(s);
+                        if (NSProcessInfo.processInfo.systemUptime >= operationDeadline) Fail(@"Mail Accessibility operation timed out before Archive dispatch", 2);
                         *attempted = 1;
                         AXError status = AXUIElementPerformAction(Element(archive), kAXPressAction);
                         if (status != kAXErrorSuccess) Fail([NSString stringWithFormat:@"Mail Archive action returned %d; do not retry", status], 2);
@@ -320,7 +291,7 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
             reply = @{@"error":exception.reason ?: @"Mail Accessibility failed", @"code":exception.userInfo[@"code"] ?: @2};
         }
         if ([request[@"diagnostic"] boolValue] && ![op isEqual:@"release"] &&
-            ([op isEqual:@"front"] || [op isEqual:@"prepare"] || [op isEqual:@"focusowned"] || [op isEqual:@"ownedfocus"] || [op isEqual:@"guard"] || [op isEqual:@"focus"])) {
+            ([op isEqual:@"prepare"] || [op isEqual:@"guard"])) {
             // Keep diagnostics separate from the action deadline and result.
             operationDeadline = NSProcessInfo.processInfo.systemUptime + 0.25;
             NSMutableDictionary *annotated = [reply mutableCopy];
