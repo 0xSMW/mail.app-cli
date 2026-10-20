@@ -153,7 +153,7 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 		{"ambiguous-window", 0, true}, {"changed-window", 0, true}, {"late-ambiguous-window", 0, true},
 		{"ambiguous-table", 0, true}, {"changed-table", 0, true}, {"late-ambiguous-table", 0, true},
 		{"missing-current-row", 0, true}, {"duplicate-current-row", 0, true}, {"changed-selected-row", 0, true}, {"late-conversation", 0, true},
-		{"disabled-button", 0, true}, {"ambiguous-button", 0, true}, {"unsupported-button", 0, true}, {"action-query-error", 0, true},
+		{"boxed-action-names", 1, false}, {"boxed-unsupported-button", 0, true}, {"disabled-button", 0, true}, {"ambiguous-button", 0, true}, {"unsupported-button", 0, true}, {"action-query-error", 0, true},
 		{"changed-button", 0, true}, {"late-disabled-button", 0, true}, {"late-ambiguous-button", 0, true},
 	} {
 		t.Run(tt.scenario, func(t *testing.T) {
