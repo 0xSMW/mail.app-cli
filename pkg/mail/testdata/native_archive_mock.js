@@ -72,7 +72,7 @@ Object.assign(dollar,{
   return 0;
  },
  AXUIElementCopyActionNames:(node,ref)=>{
-  ref[0] = scenario === 'unsupported-button' ? [] : ['AXPress'];
+  ref[0] = scenario === 'unsupported-button' ? [] : scenario === 'boxed-action-names' ? {objcArray:[{objcString:'AXPress'}]} : scenario === 'boxed-unsupported-button' ? {objcArray:[{objcString:'AXShowMenu'}]} : ['AXPress'];
   if (scenario === 'changed-button') toolbar.attributes.AXChildren = [makeButton()];
   if (scenario === 'late-disabled-button') button.attributes.AXEnabled = false;
   if (scenario === 'late-ambiguous-button') toolbar.attributes.AXChildren.push(makeButton());
@@ -92,9 +92,15 @@ Object.assign(dollar,{
   return {};
  }})}}
 });
+// NSArray unwrapping is shallow; deep unwrapping also converts its NSStrings.
+const unwrap = value => value && value.objcArray ? value.objcArray : value && typeof value.objcString === 'string' ? value.objcString : value;
+function deepUnwrap(value) {
+ const unwrapped = unwrap(value);
+ return Array.isArray(unwrapped) ? unwrapped.map(deepUnwrap) : unwrapped;
+}
 const context = {
  request:{account:'Test',id:7,apply:scenario !== 'prepare'},owner:{viewerId:42},
- ObjC:{import:()=>{},bindFunction:()=>{},unwrap:x=>x,deepUnwrap:x=>x},
+ ObjC:{import:()=>{},bindFunction:()=>{},unwrap,deepUnwrap},
  $:dollar,Ref:()=>[],Application:()=>mail,delay:()=>{},
  emitPhase:event=>events.push(event),
  phase:(name,fn)=>{events.push({name,state:'start'});try {const result=fn();events.push({name,state:'done'});return result;} catch(err){events.push({name,state:'failed'});throw err;}}
