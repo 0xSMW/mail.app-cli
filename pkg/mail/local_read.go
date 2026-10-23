@@ -53,7 +53,11 @@ func (c *Client) nativeDiskAccessError(err error) error {
 // A partial/missing/undecodable file returns handled=false, retaining index
 // metadata and diagnostics for callers that ask Mail for unavailable content.
 func (c *Client) getMessageDetailsFromDisk(accountName, mailboxName, messageID string) (*Message, bool, error) {
-	if c.shared.bodyFromMail {
+	return c.getMessageDetailsFromDiskMode(accountName, mailboxName, messageID, !c.shared.bodyFromMail)
+}
+
+func (c *Client) getMessageDetailsFromDiskMode(accountName, mailboxName, messageID string, enabled bool) (*Message, bool, error) {
+	if !enabled {
 		return nil, false, nil
 	}
 	id, err := strconv.ParseInt(strings.TrimSpace(messageID), 10, 64)
@@ -102,13 +106,17 @@ func (c *Client) hydrateLocalMessage(message *Message, path string) (bool, error
 		message.ContentError = err.Error()
 		return false, c.nativeDiskAccessError(err)
 	}
-	if err := populateMIMEEnvelope(message, rfc.Header); err != nil {
-		message.ContentError = err.Error()
-		return false, nil
-	}
+	envelopeErr := populateMIMEEnvelope(message, rfc.Header)
 	body, diagnostics, err := extractEMLXBody(rfc, path)
+	populateDiskLinks(message, diagnostics, err)
 	trimBodyAlternatives(diagnostics, c.shared.bodyAlternatives)
 	message.BodyDiagnostics = diagnostics
+	if envelopeErr != nil {
+		message.ContentError = envelopeErr.Error()
+		message.LinkStatus.Complete = false
+		message.LinkStatus.Warnings = append(message.LinkStatus.Warnings, "Envelope metadata: "+envelopeErr.Error())
+		return false, nil
+	}
 	if err != nil {
 		message.ContentError = err.Error()
 		return false, nil
@@ -138,6 +146,7 @@ func headerWordDecoder() *mime.WordDecoder {
 }
 
 func populateMIMEEnvelope(message *Message, header netmail.Header) error {
+	populateUnsubscribe(message, header)
 	decoder := headerWordDecoder()
 	message.InReplyTo = header.Get("In-Reply-To")
 	message.References = header.Get("References")
