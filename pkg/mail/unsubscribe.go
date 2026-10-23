@@ -183,16 +183,23 @@ func canonicalListID(raw string) string {
 	if start < 0 || end != len(strings.TrimSpace(raw))-1 || end <= start+1 || strings.ContainsAny(raw[:start], "<>") {
 		return ""
 	}
-	id := raw[start+1 : end]
-	if !strings.Contains(id, ".") || strings.ContainsAny(id, "@<> \t\r\n") {
+	// RFC 2919 uses dot-atom-text for both label and namespace, compares
+	// case-insensitively, and asks clients to ignore inserted whitespace.
+	id := strings.Map(func(ch rune) rune {
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			return -1
+		}
+		return ch
+	}, raw[start+1:end])
+	if len(id) > 255 || !strings.Contains(id, ".") {
 		return ""
 	}
 	for _, part := range strings.Split(id, ".") {
-		if part == "" || part[0] == '-' || part[len(part)-1] == '-' {
+		if part == "" {
 			return ""
 		}
 		for _, ch := range part {
-			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || ch == '-' || ch == '_') {
+			if !(ch >= 'a' && ch <= 'z' || ch >= 'A' && ch <= 'Z' || ch >= '0' && ch <= '9' || strings.ContainsRune("!#$%&'*+-/=?^_`{|}~", ch)) {
 				return ""
 			}
 		}
