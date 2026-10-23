@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,41 @@ import (
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
+
+func TestUnsubscribeAllAccountsSkipsDisabledInventory(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(map[bool]string{true: "mixed", false: "all disabled"}[enabled], func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			bin := t.TempDir()
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			accounts, err := json.Marshal([]mail.Account{{Name: "Disabled", Enabled: false}, {Name: "Enabled", Enabled: enabled}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(bin, "osascript"), []byte("#!/bin/sh\nprintf '%s' '"+string(accounts)+"'\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			// The expired discovery budget exposes constructed scopes without
+			// asking the fake transport to enumerate any message or mailbox.
+			code, stdout, stderr := run(t, "unsubscribe", "scan", "INBOX", "--all-accounts", "--budget", "1ns", "--checkpoint", filepath.Join(t.TempDir(), "discovery.json"), "--json")
+			if !enabled {
+				if code == 0 || !strings.Contains(stderr, "no enabled Mail accounts") {
+					t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout, stderr)
+				}
+				return
+			}
+			var env struct {
+				Data mail.UnsubscribeScanResult `json:"data"`
+			}
+			if err = json.Unmarshal([]byte(stdout), &env); err != nil {
+				t.Fatalf("exit=%d decode=%v stdout=%s stderr=%s", code, err, stdout, stderr)
+			}
+			if code != 5 || len(env.Data.Coverage) != 1 || env.Data.Coverage[0].Account != "Enabled" {
+				t.Fatalf("exit=%d coverage=%+v stderr=%s", code, env.Data.Coverage, stderr)
+			}
+		})
+	}
+}
 
 func TestUnsubscribeShowRetainsPartialControlsAndExactURLs(t *testing.T) {
 	for _, complete := range []bool{true, false} {
