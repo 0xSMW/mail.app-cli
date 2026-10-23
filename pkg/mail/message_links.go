@@ -304,7 +304,10 @@ func populateDiskLinks(message *Message, diagnostics *BodyDiagnostics, err error
 		}
 	}
 	message.Links = append(headers, diagnostics.links...)
-	message.LinkStatus = &LinkExtractionStatus{Complete: (err == nil || err.Error() == "message file holds no text body") && !diagnostics.PartialFile, Source: "disk"}
+	// Empty visible text is compatible with complete image-only HTML
+	// discovery, but unsupported/encrypted bodies cannot establish coverage.
+	supportedBody := len(diagnostics.linkRenderableParts) > 0
+	message.LinkStatus = &LinkExtractionStatus{Complete: supportedBody && (err == nil || err.Error() == "message file holds no text body") && !diagnostics.PartialFile, Source: "disk"}
 	if diagnostics.PartialFile {
 		message.LinkStatus.Warnings = append(message.LinkStatus.Warnings, "Local message source is partial; additional links may be missing.")
 	}
