@@ -375,7 +375,7 @@ statuses, and 'help agents' for how to drive it from a script or an agent.`,
 	)
 
 	for _, cmd := range []*cobra.Command{
-		a.tuiCmd, a.inboxCmd, a.unreadCmd, a.showCmd, a.linksCmd, a.searchCmd,
+		a.tuiCmd, a.inboxCmd, a.unreadCmd, a.showCmd, a.linksCmd, a.unsubscribeCmd, a.searchCmd,
 		a.seenCmd, a.unseenCmd, a.flagCmd, a.unflagCmd, a.archiveCmd, a.deleteCmd, a.moveCmd, a.sendCmd,
 	} {
 		cmd.GroupID = groupMail
