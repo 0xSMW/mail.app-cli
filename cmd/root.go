@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "3.0.0"
+const version = "3.1.0"
 
 const (
 	groupMail   = "mail"
@@ -375,7 +375,7 @@ statuses, and 'help agents' for how to drive it from a script or an agent.`,
 	)
 
 	for _, cmd := range []*cobra.Command{
-		a.tuiCmd, a.inboxCmd, a.unreadCmd, a.showCmd, a.searchCmd,
+		a.tuiCmd, a.inboxCmd, a.unreadCmd, a.showCmd, a.linksCmd, a.searchCmd,
 		a.seenCmd, a.unseenCmd, a.flagCmd, a.unflagCmd, a.archiveCmd, a.deleteCmd, a.moveCmd, a.sendCmd,
 	} {
 		cmd.GroupID = groupMail
