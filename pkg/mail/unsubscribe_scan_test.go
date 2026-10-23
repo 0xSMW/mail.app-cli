@@ -384,6 +384,8 @@ func TestUnsubscribeScanUnavailableRetryRetainsRecoveredControlsAndListIdentity(
 		observations, _ := unsubscribeSyntheticLocal(ctx, messages)
 		observations[0].Complete = false
 		observations[0].Error = "synthetic partial source"
+		observations[0].HasHTTPSUnsubscribe = true
+		observations[0].OneClickAdvertised = true
 		observations[0].Destinations[0].Evidence = []UnsubscribeEvidence{evidence}
 		return observations, nil
 	}
@@ -414,6 +416,9 @@ func TestUnsubscribeScanUnavailableRetryRetainsRecoveredControlsAndListIdentity(
 	observation := state.Observations[0]
 	if observation.HeaderStatus != "unavailable" || observation.Error != "synthetic source disappeared" || observation.Complete || observation.ListID != "synthetic.example.invalid" {
 		t.Fatalf("retry must preserve current failure and known list identity: %+v", observation)
+	}
+	if !observation.HasHTTPSUnsubscribe || !observation.OneClickAdvertised || !result.Groups[0].Latest.HasHTTPSUnsubscribe || !result.Groups[0].Latest.OneClickAdvertised {
+		t.Fatalf("advertisement flags lost with retained header evidence: %+v", observation)
 	}
 	if len(observation.Destinations) != 1 || observation.Destinations[0].URL != "https://example.invalid/unsubscribe" || !reflect.DeepEqual(observation.Destinations[0].Evidence, []UnsubscribeEvidence{evidence}) {
 		t.Fatalf("recovered destination or evidence lost: %+v", observation.Destinations)
