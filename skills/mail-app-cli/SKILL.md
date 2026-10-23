@@ -34,6 +34,9 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Inspect body alternatives | `mail-app-cli messages read 12345 --body-alternatives --json` |
 | Search | `mail-app-cli search "sample invoice" --json --limit 20` |
 | Read a message | `mail-app-cli show 12345 --json` |
+| Inspect local unsubscribe opportunities | `mail-app-cli unsubscribe show 12345 --json` |
+| Discover and group unsubscribe opportunities in folders | `mail-app-cli unsubscribe scan INBOX Archive -a "Example Account" --json` |
+| Resume unsubscribe discovery | `mail-app-cli unsubscribe scan INBOX Archive -a "Example Account" --checkpoint /private/discovery.json --json` |
 | Discover all link destinations | `mail-app-cli links 12345 --json` |
 | Discover unsubscribe and preferences links | `mail-app-cli links 12345 --unsubscribe --json` |
 | Print all links alongside the body | `mail-app-cli show 12345 --links --plain` |
@@ -124,6 +127,31 @@ Mail Today's aggregate counts cannot prove handled-identity cleanup and are not
 a completion gate; use fresh direct source/destination checks.
 
 ## Link discovery
+
+For unsubscribe-specific tasks, use `unsubscribe show ID` or `unsubscribe scan
+MAILBOX...`. Both inspect local headers and every supported body alternative,
+without per-message Mail header/body fallback. Groups use List-Id where available;
+fallback sender/header-host grouping is provisional. Exact destinations retain
+all provenance, older-only controls, and message/folder evidence. RFC-identical
+copies count once within a group. Freshness and one-click eligibility remain
+unverified.
+
+`unsubscribe scan` enumerates every page until exhausted or the invocation budget
+is reached. `--page-size` is not sampling; `--since` explicitly bounds receipt
+dates. Use `--all-accounts` only when all enabled accounts are requested. Every
+run has a private checkpoint, generated automatically unless `--checkpoint` is
+given. Repeat the returned checkpoint with the original scopes/filter to resume;
+`--max-pages 1` bounds one invocation. Pending work is persisted before advancing.
+A completed checkpoint replays stored results; use `--restart-checkpoint` for
+fresh observations. `--retry-incomplete` rechecks earlier partial/missing sources.
+
+Always inspect `complete`, `traversalComplete`, `pending`, `coverage`,
+`readability`, and `exceptions`. Exit 5 retains groups and means unresolved
+coverage or extraction; a known control does not establish complete discovery.
+Never fall back automatically to broad `list --with-content` or repeated Mail
+rendering for missing sources. An exhausted traversal is still a sequence of
+observations, not an atomic snapshot. Discovery does not authorize visiting links
+or performing unsubscribe actions.
 
 Use `links ID --json` to retrieve destinations without opening URLs, fetching
 remote resources, sending mail, or unsubscribing. It reads local MIME, including
