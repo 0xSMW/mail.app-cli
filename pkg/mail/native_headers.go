@@ -26,6 +26,7 @@ func (n *nativeMail) messageHeaders(ref appleevents.Value, message *Message) err
 	if err != nil {
 		return fmt.Errorf("parse Mail message headers: %w", err)
 	}
+	populateUnsubscribe(message, parsed.Header)
 	message.InReplyTo = strings.TrimSpace(parsed.Header.Get("In-Reply-To"))
 	message.References = strings.TrimSpace(parsed.Header.Get("References"))
 	return nil
