@@ -109,7 +109,7 @@ delete, and move commands do the same work and accept several IDs.`,
 		Short: "Show message details (same as top-level show)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.showMessage(args[0], false)
+			return a.showMessage(args[0], false, false)
 		},
 	}
 	a.messagesMarkCmd = &cobra.Command{

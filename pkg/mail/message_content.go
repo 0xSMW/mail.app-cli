@@ -36,6 +36,13 @@ func (c *Client) enrichMessagesWithContent(accountName, mailboxName string, mess
 	if len(messages) == 0 {
 		return messages
 	}
+	defer func() {
+		for i := range messages {
+			if messages[i].LinkStatus == nil {
+				populateMailLinks(&messages[i])
+			}
+		}
+	}()
 
 	const chunkSize = 10
 	deadline := time.Now().Add(mailContentFetchBudget())

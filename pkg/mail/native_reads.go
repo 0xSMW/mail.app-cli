@@ -372,6 +372,7 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 	var message *Message
 	trace := &PhaseTrace{Phases: []AutomationPhase{}}
 	var diskDiagnostics *BodyDiagnostics
+	var diskMessage *Message
 	recheckMembership := false
 	if preferDisk && !verification {
 		started := time.Now()
@@ -390,6 +391,7 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 		}
 		if cached != nil {
 			diskDiagnostics = cached.BodyDiagnostics
+			diskMessage = cached
 		} else {
 			recheckMembership = true
 		}
@@ -507,6 +509,36 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 	if errors.As(err, &timeoutErr) {
 		trace.PendingMs = timeoutErr.Trace.PendingMs
 		timeoutErr.Trace = trace
+	}
+	if !verification {
+		if message == nil && err != nil && diskMessage != nil {
+			message = diskMessage
+		}
+		if message != nil {
+			if diskMessage != nil && diskMessage.LinkStatus != nil {
+				if message.Unsubscribe != nil && message.Unsubscribe.HeaderStatus == "available" {
+					headers := []MessageLink{}
+					for _, link := range message.Links {
+						if link.Source == "header" {
+							headers = append(headers, link)
+						}
+					}
+					for _, link := range diskMessage.Links {
+						if link.Source != "header" {
+							headers = append(headers, link)
+						}
+					}
+					message.Links = headers
+				} else {
+					message.Links = diskMessage.Links
+				}
+				message.LinkStatus = diskMessage.LinkStatus
+				if message.Unsubscribe == nil || message.Unsubscribe.HeaderStatus != "available" {
+					message.Unsubscribe = diskMessage.Unsubscribe
+				}
+			}
+			populateMailLinks(message)
+		}
 	}
 	return message, trace, err
 }

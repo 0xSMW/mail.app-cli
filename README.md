@@ -35,6 +35,7 @@ Actions apply on screen right away and the list refreshes from the index two sec
 
 - Inbox, unread, search, and per-mailbox listings from Mail's local Envelope Index (about 0.1s)
 - Read, mark, flag, archive, delete, and move by message ID, one or many, with `--dry-run` on every mutation
+- Extract HTML links, plain-text URLs, and unsubscribe headers without opening destinations
 - Bulk operations by query, sender, or domain with receipts, chunking, verification, and report files
 - Drafts, sending with attachments and signatures, rules, smart mailboxes, threads, signatures, VIP mail
 - Export messages and attachments; validate exported JSON
@@ -59,6 +60,83 @@ CGO_ENABLED=1 go install github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli@lates
 The named command installs `mail-app-cli` into `GOBIN` (or `$(go env GOPATH)/bin`). The legacy module-root install remains supported but produces `mail.app-cli` with a dot.
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.
+
+## Links and unsubscribe discovery in 3.1.0
+
+Find unsubscribe opportunities in one message or across entire local folders:
+
+```bash
+mail-app-cli unsubscribe show 100001 --json
+mail-app-cli unsubscribe scan INBOX -a "Example Account" --json
+mail-app-cli unsubscribe scan INBOX Archive -a "Example Account" --checkpoint /private/discovery.json --json
+```
+
+`unsubscribe scan` inspects every enumerated message's local headers and supported
+body alternatives. Results group by mailing-list identity when `List-Id` is
+available; sender-based fallback groups are explicitly provisional. Exact
+destinations are deduplicated with their evidence retained. Groups include the
+newest representative, every observed message and folder membership, and controls
+found only in older messages. Identical RFC Message-ID copies count once per
+group. Varying destinations are reported without visiting them or claiming they
+are still valid.
+
+The scan follows all mailbox pages within its time budget. `--page-size` changes
+pagination, not the requested scope. Use `--since` to explicitly restrict receipt
+dates, or `--all-accounts` to scan the named folders in every enabled account.
+Coverage is based on sequential observations, not an atomic mailbox snapshot.
+
+Discovery always saves a private checkpoint and reports its path. Resume by
+repeating the original accounts, folders, and date filter with `--checkpoint`;
+page size and time budget may change. For a bounded invocation, `--max-pages 1`
+processes one new page before saving. Pending extraction is saved before the scan
+advances, so interrupted work can be resumed. A completed checkpoint replays its
+stored observations; `--restart-checkpoint` starts a fresh traversal. After local
+message files become available, `--retry-incomplete` reinspects earlier partial
+or unavailable messages and continues pending work.
+
+`complete: true` requires exhausted folders, no pending messages, and complete
+local extraction for every observed message. Otherwise the command exits 5 while
+retaining discovered groups, per-folder coverage, and extraction exceptions.
+Finding an unsubscribe header does not bypass body inspection or certify complete
+discovery. Missing local files are reported without asking Mail to render or
+download them. `unsubscribe show` uses the same local-only extraction policy.
+These commands never open URLs, fetch remote content, send mail, or unsubscribe.
+
+General link discovery remains available:
+
+```bash
+mail-app-cli links 100001 --json
+mail-app-cli links 100001 --unsubscribe --plain
+mail-app-cli show 100001 --links
+mail-app-cli links 100001 --unsubscribe --jq '.data.links[] | {text, url, source, kind}'
+```
+
+`links` reads the message's local MIME file and lists destinations without opening
+or fetching them. It does not send mail or unsubscribe. If the local file is
+missing, it requests headers from Mail without asking Mail to render the body.
+Partial files and header-only fallback retain recovered destinations, report
+`linkStatus.complete: false`, and exit 5. An empty result from an incomplete
+source does not establish that the message has no links.
+
+Full `show` and `messages read` JSON results include `links`, `linkStatus`, and
+`unsubscribe` alongside the existing body text. Each link records its exact
+`url`, label in `text`, `source` (`html`, `plain`, or `header`), `mimePart`,
+`selected`, `kind`, and `openable`. Links from alternate MIME renderings remain
+distinguishable. Relative destinations are resolved when the HTML supplies a
+usable base URL; unresolved or unsupported destinations have `openable: false`.
+Body classification identifies unsubscribe and preferences candidates; it does
+not establish what visiting a page will do.
+
+Human `show` output includes unsubscribe and preferences destinations. Add
+`--links` to print all labels and full URLs, or use `links --unsubscribe` to
+retrieve only unsubscribe and preferences candidates. JSON always includes the
+structured inventory independently of the human-output flag.
+
+`unsubscribe` preserves `List-Unsubscribe` and `List-Unsubscribe-Post` header
+values and reports header availability. Header destinations also appear in
+`links`. `oneClickAdvertised` records the sender's declaration; it does not verify
+DKIM or authorize a POST. Personalized query strings are preserved, so treat
+the output with the same privacy as the message itself.
 
 ## Native transport in 3.0.0
 
