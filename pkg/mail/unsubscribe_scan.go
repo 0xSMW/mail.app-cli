@@ -108,6 +108,8 @@ func scanUnsubscribe(parent context.Context, req UnsubscribeScanRequest,
 					observation.Mailboxes = unionUnsubscribeStrings(previous.Mailboxes, observation.Mailboxes)
 					if !observation.Complete {
 						observation.Destinations = mergeUnsubscribeDestinations(previous.Destinations, observation.Destinations)
+						observation.HasHTTPSUnsubscribe = observation.HasHTTPSUnsubscribe || previous.HasHTTPSUnsubscribe
+						observation.OneClickAdvertised = observation.OneClickAdvertised || previous.OneClickAdvertised
 						if observation.ListID == "" {
 							observation.ListID = previous.ListID
 						}
