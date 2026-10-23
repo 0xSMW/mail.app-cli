@@ -75,6 +75,10 @@ func renderMessages(messages []mail.Message, showLocation bool) func(*output.Pri
 }
 
 func renderMessage(m *mail.Message, metadataOnly bool) func(*output.Printer) {
+	return renderMessageWithLinks(m, metadataOnly, false)
+}
+
+func renderMessageWithLinks(m *mail.Message, metadataOnly, allLinks bool) func(*output.Printer) {
 	return func(p *output.Printer) {
 		state := []string{}
 		if !m.Read {
@@ -128,6 +132,8 @@ func renderMessage(m *mail.Message, metadataOnly bool) func(*output.Printer) {
 				}
 			}
 		}
+		renderLinkInventory(p, m.Links, !allLinks)
+		renderLinkStatus(p, m.LinkStatus, m.Unsubscribe)
 	}
 }
 
