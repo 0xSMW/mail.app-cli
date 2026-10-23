@@ -95,6 +95,7 @@ type application struct {
 	inboxCmd                *cobra.Command
 	unreadCmd               *cobra.Command
 	showCmd                 *cobra.Command
+	linksCmd                *cobra.Command
 	seenCmd                 *cobra.Command
 	unseenCmd               *cobra.Command
 	flagCmd                 *cobra.Command
