@@ -96,6 +96,7 @@ type application struct {
 	unreadCmd               *cobra.Command
 	showCmd                 *cobra.Command
 	linksCmd                *cobra.Command
+	unsubscribeCmd          *cobra.Command
 	seenCmd                 *cobra.Command
 	unseenCmd               *cobra.Command
 	flagCmd                 *cobra.Command
@@ -164,6 +165,7 @@ func newApplication() *application {
 	a.buildThreadsCommands()
 	a.buildTUICommand()
 	a.buildVerbsCommands()
+	a.buildUnsubscribeCommands()
 	a.buildVersionCommands()
 	a.messagesCmd.AddCommand(a.newMessagesReadCmd(), a.newMessagesReconcileCmd(), a.newMessagesScanCmd())
 	a.buildRootCommands()
