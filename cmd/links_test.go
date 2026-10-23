@@ -91,6 +91,36 @@ func TestLinkHumanOutputPreservesFullURLsAndEscapesControls(t *testing.T) {
 	}
 }
 
+func TestLinkHumanOutputEscapesFormatControlsWithoutChangingJSON(t *testing.T) {
+	m := &mail.Message{Links: []mail.MessageLink{{
+		URL:  "https://example.test/\u202eevil\u2069?token=\U000e0001",
+		Text: "Unsubscribe\u2066 now\u200d", Source: "html", Kind: "unsubscribe", Openable: true,
+	}}}
+	var b bytes.Buffer
+	renderLinkInventory(&output.Printer{Out: &b}, m.Links, false)
+	for _, want := range []string{`\u202e`, `\u2069`, `\U000e0001`, `\u2066`, `\u200d`} {
+		if !strings.Contains(b.String(), want) {
+			t.Fatalf("format control %s was not escaped: %q", want, b.String())
+		}
+	}
+	for _, control := range []rune{'\u202e', '\u2069', '\U000e0001', '\u2066', '\u200d'} {
+		if strings.ContainsRune(b.String(), control) {
+			t.Fatalf("format control %U reached terminal output", control)
+		}
+	}
+	encoded, err := json.Marshal(linkResult(m, false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded messageLinksResult
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Links[0].URL != m.Links[0].URL || decoded.Links[0].Text != m.Links[0].Text {
+		t.Fatalf("JSON changed exact link data: %s", encoded)
+	}
+}
+
 func TestShowLinksHumanOutputAndMetadataIsolation(t *testing.T) {
 	m := linkTestMessage()
 	for _, tc := range []struct{ metadata, all, article, unsubscribe bool }{
