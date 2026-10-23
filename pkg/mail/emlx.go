@@ -264,6 +264,20 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			}
 		}
 		if mediaType == "multipart/alternative" {
+			if diagnostics != nil {
+				chosen := ""
+				if len(richAlternatives) > 0 {
+					chosen = diagnostics.Alternatives[richAlternatives[len(richAlternatives)-1]].Part
+				} else if len(plainAlternatives) > 0 {
+					chosen = diagnostics.Alternatives[plainAlternatives[len(plainAlternatives)-1]].Part
+				}
+				for i := range diagnostics.links {
+					link := &diagnostics.links[i]
+					if strings.HasPrefix(link.MIMEPart, partPath+".") && link.MIMEPart != chosen && !strings.HasPrefix(link.MIMEPart, chosen+".") {
+						link.Selected = false
+					}
+				}
+			}
 			// The parts are renderings of one body. Mail.app shows the last
 			// one it can display, which is the HTML part when there is one.
 			if len(rich) > 0 {
@@ -287,7 +301,13 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			return "", err
 		}
 		if mediaType == "text/html" {
+			if diagnostics != nil {
+				diagnostics.links = append(diagnostics.links, htmlMessageLinks(text, partPath)...)
+			}
 			return htmlToTextWithDiagnostics(text, diagnostics), nil
+		}
+		if diagnostics != nil {
+			diagnostics.links = append(diagnostics.links, plainMessageLinks(text, partPath)...)
 		}
 		return unquotePlainText(text), nil
 	}
