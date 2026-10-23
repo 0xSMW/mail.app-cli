@@ -35,6 +35,7 @@ Actions apply on screen right away and the list refreshes from the index two sec
 
 - Inbox, unread, search, and per-mailbox listings from Mail's local Envelope Index (about 0.1s)
 - Read, mark, flag, archive, delete, and move by message ID, one or many, with `--dry-run` on every mutation
+- Extract HTML links, plain-text URLs, and unsubscribe headers without opening destinations
 - Bulk operations by query, sender, or domain with receipts, chunking, verification, and report files
 - Drafts, sending with attachments and signatures, rules, smart mailboxes, threads, signatures, VIP mail
 - Export messages and attachments; validate exported JSON
@@ -59,6 +60,42 @@ CGO_ENABLED=1 go install github.com/0xSMW/mail.app-cli/v3/cmd/mail-app-cli@lates
 The named command installs `mail-app-cli` into `GOBIN` (or `$(go env GOPATH)/bin`). The legacy module-root install remains supported but produces `mail.app-cli` with a dot.
 
 Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, your editor, your agent host) so it can read Mail's Envelope Index. Without it, reads fall back to Mail.app automation and cross-mailbox search is refused. `mail-app-cli doctor` tells you which is the case.
+
+## Links and unsubscribe discovery in 3.1.0
+
+```bash
+mail-app-cli links 100001 --json
+mail-app-cli links 100001 --unsubscribe --plain
+mail-app-cli show 100001 --links
+mail-app-cli links 100001 --unsubscribe --jq '.data.links[] | {text, url, source, kind}'
+```
+
+`links` reads the message's local MIME file and lists destinations without opening
+or fetching them. It does not send mail or unsubscribe. If the local file is
+missing, it requests headers from Mail without asking Mail to render the body.
+Partial files and header-only fallback retain recovered destinations, report
+`linkStatus.complete: false`, and exit 5. An empty result from an incomplete
+source does not establish that the message has no links.
+
+Full `show` and `messages read` JSON results include `links`, `linkStatus`, and
+`unsubscribe` alongside the existing body text. Each link records its exact
+`url`, label in `text`, `source` (`html`, `plain`, or `header`), `mimePart`,
+`selected`, `kind`, and `openable`. Links from alternate MIME renderings remain
+distinguishable. Relative destinations are resolved when the HTML supplies a
+usable base URL; unresolved or unsupported destinations have `openable: false`.
+Body classification identifies unsubscribe and preferences candidates; it does
+not establish what visiting a page will do.
+
+Human `show` output includes unsubscribe and preferences destinations. Add
+`--links` to print all labels and full URLs, or use `links --unsubscribe` to
+retrieve only unsubscribe and preferences candidates. JSON always includes the
+structured inventory independently of the human-output flag.
+
+`unsubscribe` preserves `List-Unsubscribe` and `List-Unsubscribe-Post` header
+values and reports header availability. Header destinations also appear in
+`links`. `oneClickAdvertised` records the sender's declaration; it does not verify
+DKIM or authorize a POST. Personalized query strings are preserved, so treat
+the output with the same privacy as the message itself.
 
 ## Native transport in 3.0.0
 
