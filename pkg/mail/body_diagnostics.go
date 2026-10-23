@@ -12,6 +12,7 @@ import (
 type BodyDiagnostics struct {
 	links               []MessageLink
 	linkRenderableParts map[string]bool
+	richRenderableParts map[string]bool
 	ExtractionError     string            `json:"extractionError,omitempty"`
 	PartialFile         bool              `json:"partialFile"`
 	MIMEPartCount       int               `json:"mimePartCount"`
