@@ -10,6 +10,7 @@ import (
 // root entity and every visited MIME part. On a parser error they describe only
 // the portion visited before the error. No image is fetched or rendered.
 type BodyDiagnostics struct {
+	links               []MessageLink
 	ExtractionError     string            `json:"extractionError,omitempty"`
 	PartialFile         bool              `json:"partialFile"`
 	MIMEPartCount       int               `json:"mimePartCount"`
