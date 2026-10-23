@@ -496,5 +496,19 @@ unseen --help (-h)
 unseen --settle
 unseen --verify
 unseen --verify-budget
+unsubscribe
+unsubscribe --help (-h)
+unsubscribe scan
+unsubscribe scan --all-accounts
+unsubscribe scan --budget
+unsubscribe scan --checkpoint
+unsubscribe scan --help (-h)
+unsubscribe scan --max-pages
+unsubscribe scan --page-size
+unsubscribe scan --restart-checkpoint
+unsubscribe scan --retry-incomplete
+unsubscribe scan --since
+unsubscribe show
+unsubscribe show --help (-h)
 version
 version --help (-h)
