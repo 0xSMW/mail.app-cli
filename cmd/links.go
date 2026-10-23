@@ -90,8 +90,12 @@ func (a *application) writeMessageLinks(message *mail.Message, unsubscribeOnly b
 func linkDisplay(value string) string {
 	var b strings.Builder
 	for _, r := range value {
-		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
-			fmt.Fprintf(&b, "\\u%04x", r)
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+			if r <= 0xffff {
+				fmt.Fprintf(&b, "\\u%04x", r)
+			} else {
+				fmt.Fprintf(&b, "\\U%08x", r)
+			}
 		} else {
 			b.WriteRune(r)
 		}
