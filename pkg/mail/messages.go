@@ -240,6 +240,7 @@ func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID str
 	if c.nativeEnabled() {
 		return c.nativeMessageDetails(accountName, mailboxName, messageID, timeout, preferDisk, false)
 	}
+	var diskLinks *Message
 	var diskPhase *AutomationPhase
 	var bodyDiagnostics *BodyDiagnostics
 	diskBody, haveDiskBody := "", false
@@ -247,6 +248,18 @@ func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID str
 		started := time.Now()
 		body, diagnostics, err := c.readMessageBodyFromDiskWithDiagnostics(messageID)
 		bodyDiagnostics = diagnostics
+		diskLinks = &Message{ID: messageID, Account: accountName, Mailbox: mailboxName}
+		if path, pathErr := c.messageFilePath(messageID); pathErr == nil {
+			if rfc, readErr := readEMLXMessage(path); readErr == nil {
+				populateUnsubscribe(diskLinks, rfc.Header)
+			}
+		}
+		populateDiskLinks(diskLinks, diagnostics, err)
+		diskLinks.BodyDiagnostics = diagnostics
+		diskLinks.Content, diskLinks.ContentSource = body, BodySourceDisk
+		if err != nil {
+			diskLinks.ContentError = err.Error()
+		}
 		diskPhase = &AutomationPhase{Name: "disk_body", ElapsedMs: time.Since(started).Milliseconds()}
 		if err != nil {
 			if ctxErr := c.Done(); ctxErr != nil {
@@ -289,6 +302,7 @@ function recipientAddresses(recipients) {
 
 let message = null;
 let failure = null;
+let headerText = null;
 try {
 	phase('bridge_start', () => null);
 	const acc = phase('resolve_account', () => {
@@ -322,6 +336,7 @@ try {
 		});
 	}
 	if (msg !== null) {
+        try { headerText = msg.allHeaders(); } catch (e) { if (isTransportError(e)) throw e; }
 		let content = '';
 		let contentError = '';
 		if (!skipContent) phase('content', (step) => {
@@ -349,21 +364,28 @@ try {
 	failure = {phase: currentPhase, message: describeError(e), number: e && e.errorNumber !== undefined ? e.errorNumber : 0};
 }
 
-JSON.stringify({message: message, failure: failure, phases: phaseLog});
+JSON.stringify({message: message, headerText: headerText, failure: failure, phases: phaseLog});
 `, escapeJSString(mailboxName), escapeJSString(accountName), escapeJSString(messageID), jxaBool(haveDiskBody), jxaMailboxLookupHelper()+jxaRFCMessageIDHelper()+jxaPhaseHelper(), jxaMailboxLookupExpression(mailboxName), jxaMessageProjection{ID: "String(msg.id())", Size: "msg.messageSize()", Mailbox: "mbox.name()", Account: "acc.name()", RFCMessageID: "rfcMessageId(msg)", Content: "content: content,\ncontentError: contentError,"}.fields())
 
 	output, err := c.runJXAWithTimeout(script, timeout)
 	if err != nil {
 		var timeoutErr *AutomationTimeoutError
 		if errors.As(err, &timeoutErr) {
+			if diskLinks != nil && diskLinks.LinkStatus != nil {
+				return diskLinks, withDiskPhase(timeoutErr.Trace), err
+			}
 			return nil, withDiskPhase(timeoutErr.Trace), err
+		}
+		if diskLinks != nil && diskLinks.LinkStatus != nil {
+			return diskLinks, withDiskPhase(nil), err
 		}
 		return nil, withDiskPhase(nil), err
 	}
 
 	var envelope struct {
-		Message *Message `json:"message"`
-		Failure *struct {
+		Message    *Message `json:"message"`
+		HeaderText *string  `json:"headerText"`
+		Failure    *struct {
 			Phase   string `json:"phase"`
 			Message string `json:"message"`
 			Number  int    `json:"number"`
@@ -397,6 +419,15 @@ JSON.stringify({message: message, failure: failure, phases: phaseLog});
 		trimBodyAlternatives(bodyDiagnostics, c.shared.bodyAlternatives)
 		message.BodyDiagnostics = bodyDiagnostics
 		message.ContentSource = "mail"
+		if diskLinks != nil {
+			message.Links, message.LinkStatus, message.Unsubscribe = diskLinks.Links, diskLinks.LinkStatus, diskLinks.Unsubscribe
+		}
+		if envelope.HeaderText != nil {
+			if h, e := headerTextMessage(*envelope.HeaderText); e == nil {
+				populateUnsubscribe(message, h)
+			}
+		}
+		populateMailLinks(message)
 		if haveDiskBody {
 			message.Content, message.ContentSource = diskBody, "disk"
 		}
