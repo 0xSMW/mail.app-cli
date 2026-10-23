@@ -34,6 +34,9 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Inspect body alternatives | `mail-app-cli messages read 12345 --body-alternatives --json` |
 | Search | `mail-app-cli search "sample invoice" --json --limit 20` |
 | Read a message | `mail-app-cli show 12345 --json` |
+| Discover all link destinations | `mail-app-cli links 12345 --json` |
+| Discover unsubscribe and preferences links | `mail-app-cli links 12345 --unsubscribe --json` |
+| Print all links alongside the body | `mail-app-cli show 12345 --links --plain` |
 | Read selected bodies | `mail-app-cli messages read 12345 67890 --timeout 10s --budget 45s --json` |
 | Mark read before relocating | `mail-app-cli messages batch archive 12345 67890 --mark-read --verify --dry-run --json`, then without `--dry-run` |
 | Headers only, no body fetch | `mail-app-cli show 12345 --metadata-only --json` |
@@ -119,3 +122,24 @@ other extracted renderings without remote fetching. Counts and alternate-text
 differences establish extraction facts, not the meaning of omitted content.
 Mail Today's aggregate counts cannot prove handled-identity cleanup and are not
 a completion gate; use fresh direct source/destination checks.
+
+## Link discovery
+
+Use `links ID --json` to retrieve destinations without opening URLs, fetching
+remote resources, sending mail, or unsubscribing. It reads local MIME, including
+partial files, and uses a header-only fallback when the file is unavailable.
+It never requests Mail body rendering. Exit 5 retains recovered links with
+`linkStatus.complete: false`; an incomplete empty inventory is unknown.
+
+Full `show` and `messages read` results also carry `links`, `linkStatus`, and
+`unsubscribe`. Link fields are `url`, `text`, `source` (`html`, `plain`, or
+`header`), `mimePart`, `selected`, `kind` (`link`, `unsubscribe`, or
+`preferences`), and `openable`. `selected: false` denotes a MIME alternative.
+`--unsubscribe` filters both unsubscribe and preferences candidates. Preserve
+exact destinations, including personalized query strings; do not infer an
+unsubscribe URL from a homepage. Check provenance and available candidates.
+
+Unsubscribe metadata includes raw `listUnsubscribe` and `listUnsubscribePost`
+header values, `headerStatus`, and `oneClickAdvertised`. An advertisement is
+not verified one-click eligibility. Retrieving destinations does not authorize
+opening one, sending a mailto request, or performing an unsubscribe POST.
