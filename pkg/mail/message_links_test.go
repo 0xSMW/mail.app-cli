@@ -255,3 +255,42 @@ func TestMessageLinksSelectRenderableAlternativeWithoutChangingText(t *testing.T
 		})
 	}
 }
+
+func TestMessageLinksCompletenessRequiresSupportedBody(t *testing.T) {
+	for _, test := range []struct {
+		name, contentType, body string
+		complete                bool
+		linkCount               int
+	}{
+		{"encrypted-only MIME", "application/pkcs7-mime; smime-type=enveloped-data", "opaque encrypted payload", false, 1},
+		{"image-only HTML", "text/html", `<a href="https://body.test/leave"><img src="cid:button"></a>`, true, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "1.emlx")
+			writeEMLX(t, path, "List-Unsubscribe: <https://headers.test/leave>\nContent-Type: "+test.contentType+"\n\n"+test.body)
+			rfc, err := readEMLXMessage(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			message := &Message{}
+			populateUnsubscribe(message, rfc.Header)
+			content, diagnostics, extractionErr := extractEMLXBody(rfc, path)
+			if content != "" || extractionErr == nil || extractionErr.Error() != "message file holds no text body" {
+				t.Fatalf("unexpected text projection content=%q err=%v", content, extractionErr)
+			}
+			populateDiskLinks(message, diagnostics, extractionErr)
+			if message.LinkStatus == nil || message.LinkStatus.Complete != test.complete || len(message.Links) != test.linkCount {
+				t.Fatalf("status=%+v links=%+v", message.LinkStatus, message.Links)
+			}
+			if message.Links[0].URL != "https://headers.test/leave" || message.Links[0].Source != "header" || message.Unsubscribe.HeaderStatus != "available" {
+				t.Fatalf("header control lost: %+v", message)
+			}
+			if test.complete && len(message.LinkStatus.Warnings) != 0 {
+				t.Fatalf("image-only HTML incorrectly warned incomplete: %+v", message.LinkStatus)
+			}
+			if !test.complete && len(message.LinkStatus.Warnings) != 1 {
+				t.Fatalf("unsupported MIME should retain one extraction warning: %+v", message.LinkStatus)
+			}
+		})
+	}
+}
