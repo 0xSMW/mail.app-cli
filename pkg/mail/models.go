@@ -27,19 +27,22 @@ type Message struct {
 	ID string `json:"id"`
 	// RFCMessageID is the RFC 5322 Message-ID header when Mail.app exposes it.
 	// It deliberately differs from the numeric local id above.
-	RFCMessageID string `json:"rfcMessageId,omitempty"`
-	InReplyTo    string `json:"inReplyTo,omitempty"`
-	References   string `json:"references,omitempty"`
-	Subject      string `json:"subject"`
-	Sender       string `json:"sender"`
-	DateSent     string `json:"dateSent"`
-	DateReceived string `json:"dateReceived"`
-	Read         bool   `json:"read"`
-	Flagged      bool   `json:"flagged"`
-	Deleted      bool   `json:"deleted"`
-	MessageSize  int    `json:"messageSize"`
-	Content      string `json:"content"`
-	ContentError string `json:"contentError,omitempty"`
+	RFCMessageID string                `json:"rfcMessageId,omitempty"`
+	InReplyTo    string                `json:"inReplyTo,omitempty"`
+	References   string                `json:"references,omitempty"`
+	Subject      string                `json:"subject"`
+	Sender       string                `json:"sender"`
+	DateSent     string                `json:"dateSent"`
+	DateReceived string                `json:"dateReceived"`
+	Read         bool                  `json:"read"`
+	Flagged      bool                  `json:"flagged"`
+	Deleted      bool                  `json:"deleted"`
+	MessageSize  int                   `json:"messageSize"`
+	Content      string                `json:"content"`
+	Links        []MessageLink         `json:"links,omitempty"`
+	LinkStatus   *LinkExtractionStatus `json:"linkStatus,omitempty"`
+	Unsubscribe  *MessageUnsubscribe   `json:"unsubscribe,omitempty"`
+	ContentError string                `json:"contentError,omitempty"`
 	// ContentSource is "disk" when the body was read from Mail.app's message
 	// file and "mail" when Mail.app rendered it.
 	ContentSource string `json:"contentSource,omitempty"`
