@@ -57,8 +57,8 @@ type Message struct {
 	BccRecipients []string `json:"bccRecipients"`
 }
 
-// MarshalJSON keeps recipient lists as arrays so consumers can always
-// iterate them; a nil slice would otherwise serialize as null.
+// MarshalJSON keeps recipient lists and inspected link inventories as arrays
+// so consumers can always iterate them; nil slices would otherwise be null.
 func (m Message) MarshalJSON() ([]byte, error) {
 	type plain Message
 	p := plain(m)
@@ -70,6 +70,15 @@ func (m Message) MarshalJSON() ([]byte, error) {
 	}
 	if p.BccRecipients == nil {
 		p.BccRecipients = []string{}
+	}
+	if p.LinkStatus != nil {
+		if p.Links == nil {
+			p.Links = []MessageLink{}
+		}
+		return json.Marshal(struct {
+			plain
+			Links []MessageLink `json:"links"`
+		}{plain: p, Links: p.Links})
 	}
 	return json.Marshal(p)
 }
