@@ -111,15 +111,26 @@ func messageDataDirectory(id int64) string {
 }
 
 func (c *Client) readMessageBodyFromDiskWithDiagnostics(messageID string) (string, *BodyDiagnostics, error) {
+	_, body, diagnostics, err := c.readMessageFromDiskWithDiagnostics(messageID)
+	return body, diagnostics, err
+}
+
+// readMessageFromDiskWithDiagnostics resolves and opens the local file once.
+// The returned RFC envelope remains usable after body extraction consumes Body.
+func (c *Client) readMessageFromDiskWithDiagnostics(messageID string) (*mail.Message, string, *BodyDiagnostics, error) {
 	path, err := c.messageFilePath(messageID)
 	if err != nil {
-		return "", nil, err
+		return nil, "", nil, err
 	}
-	body, diagnostics, err := readEMLXBodyWithDiagnostics(path)
+	message, err := readEMLXMessage(path)
+	if err != nil {
+		return nil, "", failedEMLXDiagnostics(path, err), err
+	}
+	body, diagnostics, err := extractEMLXBody(message, path)
 	if err == nil && diagnostics.PartialFile {
-		return body, diagnostics, errPartialBodyOnDisk
+		err = errPartialBodyOnDisk
 	}
-	return body, diagnostics, err
+	return message, body, diagnostics, err
 }
 
 func readEMLXBody(path string) (string, error) {
@@ -227,6 +238,9 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 		var plain, rich []string
 		var plainAlternatives, richAlternatives []int
 		partNumber := 0
+		// Link rendering selection is independent of the legacy nonempty-text
+		// projection. Even an image-only HTML part is a supported rendering.
+		linkChosenPath, relatedRootPath := "", ""
 		for {
 			part, err := reader.NextRawPart()
 			if err == io.EOF {
@@ -241,6 +255,15 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			text, err := mimeBodyTextWithDiagnostics(part.Header.Get, part, false, depth+1, childPath, diagnostics)
 			if err != nil {
 				return "", err
+			}
+			if diagnostics != nil {
+				if mediaType == "multipart/related" {
+					if params["start"] == "" && partNumber == 1 || params["start"] != "" && strings.TrimSpace(part.Header.Get("Content-ID")) == strings.TrimSpace(params["start"]) {
+						relatedRootPath = childPath
+					}
+				} else if diagnostics.linkRenderableParts[childPath] {
+					linkChosenPath = childPath
+				}
 			}
 			alternativeIndex := -1
 			if diagnostics != nil && mediaType == "multipart/alternative" {
@@ -263,17 +286,21 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 				plainAlternatives = append(plainAlternatives, alternativeIndex)
 			}
 		}
+		if diagnostics != nil {
+			if mediaType == "multipart/related" {
+				if diagnostics.linkRenderableParts[relatedRootPath] {
+					linkChosenPath = relatedRootPath
+				}
+			}
+			if linkChosenPath != "" {
+				diagnostics.linkRenderableParts[partPath] = true
+			}
+		}
 		if mediaType == "multipart/alternative" {
 			if diagnostics != nil {
-				chosen := ""
-				if len(richAlternatives) > 0 {
-					chosen = diagnostics.Alternatives[richAlternatives[len(richAlternatives)-1]].Part
-				} else if len(plainAlternatives) > 0 {
-					chosen = diagnostics.Alternatives[plainAlternatives[len(plainAlternatives)-1]].Part
-				}
 				for i := range diagnostics.links {
 					link := &diagnostics.links[i]
-					if strings.HasPrefix(link.MIMEPart, partPath+".") && link.MIMEPart != chosen && !strings.HasPrefix(link.MIMEPart, chosen+".") {
+					if strings.HasPrefix(link.MIMEPart, partPath+".") && link.MIMEPart != linkChosenPath && !strings.HasPrefix(link.MIMEPart, linkChosenPath+".") {
 						link.Selected = false
 					}
 				}
@@ -299,6 +326,12 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 		text, err := decodeCharset(raw, params["charset"])
 		if err != nil {
 			return "", err
+		}
+		if diagnostics != nil {
+			if diagnostics.linkRenderableParts == nil {
+				diagnostics.linkRenderableParts = make(map[string]bool)
+			}
+			diagnostics.linkRenderableParts[partPath] = true
 		}
 		if mediaType == "text/html" {
 			if diagnostics != nil {
