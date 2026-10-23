@@ -221,6 +221,7 @@ func TestMessageLinksEnvelopeFailureStillExtractsBody(t *testing.T) {
 func TestMessageLinksSelectRenderableAlternativeWithoutChangingText(t *testing.T) {
 	plain := "Content-Type: text/plain\n\nhttps://plain.test/body\n"
 	imageHTML := "Content-Type: text/html\n\n<a href=\"https://html.test/leave\"><img src=\"cid:button\"></a>\n"
+	richHTML := "Content-Type: text/html\n\n<a href=\"https://html.test/leave\">HTML rendering</a>\n"
 	tests := []struct {
 		name        string
 		body        string
@@ -231,6 +232,14 @@ func TestMessageLinksSelectRenderableAlternativeWithoutChangingText(t *testing.T
 		{"image-only HTML", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\n" + imageHTML + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
 		{"HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/html\n\n<a href=\"https://html.test/leave\">HTML rendering</a>\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
 		{"image-only HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + imageHTML + "--a\n" + plain + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
+		{"related HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/related; boundary=r\n\n--r\n" + richHTML + "--r--\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
+		{"nested HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + richHTML + "--b--\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
+		{"mixed HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/mixed; boundary=b\n\n--b\n" + richHTML + "--b--\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
+		{"related declared HTML root before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/related; boundary=r; start=\"<root>\"\n\n--r\nContent-Type: image/png\n\nimage\n--r\nContent-ID: <root>\n" + richHTML + "--r--\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
+		{"related image-only HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/related; boundary=r\n\n--r\n" + imageHTML + "--r--\n--a\n" + plain + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
+		{"plain composite before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\nContent-Type: text/plain\n\nhttps://earlier.test/body\n--b--\n--a\n" + plain + "--a--\n", "https://plain.test/body", "https://plain.test/body", 2},
+		{"related auxiliary HTML does not make root rich", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/related; boundary=r\n\n--r\nContent-Type: text/plain\n\nhttps://earlier.test/body\n--r\n" + richHTML + "--r--\n--a\n" + plain + "--a--\n", "https://plain.test/body", "https://plain.test/body", 3},
+		{"related auxiliary links remain unselected", "Content-Type: multipart/related; boundary=r\n\n--r\n" + plain + "--r\n" + richHTML + "--r--\n", "https://plain.test/body\nHTML rendering", "https://plain.test/body", 2},
 		{"related root selected by Content-ID", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\nContent-Type: multipart/related; boundary=r; start=\"<root>\"\n\n--r\nContent-Type: image/png\nContent-ID: <button>\n\nimage\n--r\nContent-ID: <root>\n" + imageHTML + "--r--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
 		{"nested alternatives", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\nhttps://outer.test/body\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 3},
 		{"discarded nested rendering remains unselected", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a\nContent-Type: text/html\n\n<a href=\"https://final.test/body\">Final rendering</a>\n--a--\n", "Final rendering", "https://final.test/body", 3},
