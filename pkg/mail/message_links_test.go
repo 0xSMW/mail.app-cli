@@ -229,6 +229,8 @@ func TestMessageLinksSelectRenderableAlternativeWithoutChangingText(t *testing.T
 		wantLinks   int
 	}{
 		{"image-only HTML", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\n" + imageHTML + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
+		{"HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/html\n\n<a href=\"https://html.test/leave\">HTML rendering</a>\n--a\n" + plain + "--a--\n", "HTML rendering", "https://html.test/leave", 2},
+		{"image-only HTML before plain", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + imageHTML + "--a\n" + plain + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
 		{"related root selected by Content-ID", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\nContent-Type: multipart/related; boundary=r; start=\"<root>\"\n\n--r\nContent-Type: image/png\nContent-ID: <button>\n\nimage\n--r\nContent-ID: <root>\n" + imageHTML + "--r--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
 		{"nested alternatives", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\nhttps://outer.test/body\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 3},
 		{"discarded nested rendering remains unselected", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a\nContent-Type: text/html\n\n<a href=\"https://final.test/body\">Final rendering</a>\n--a--\n", "Final rendering", "https://final.test/body", 3},
