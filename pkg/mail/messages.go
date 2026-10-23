@@ -246,13 +246,11 @@ func (c *Client) getMessageDetailsTraced(accountName, mailboxName, messageID str
 	diskBody, haveDiskBody := "", false
 	if preferDisk {
 		started := time.Now()
-		body, diagnostics, err := c.readMessageBodyFromDiskWithDiagnostics(messageID)
+		rfc, body, diagnostics, err := c.readMessageFromDiskWithDiagnostics(messageID)
 		bodyDiagnostics = diagnostics
 		diskLinks = &Message{ID: messageID, Account: accountName, Mailbox: mailboxName}
-		if path, pathErr := c.messageFilePath(messageID); pathErr == nil {
-			if rfc, readErr := readEMLXMessage(path); readErr == nil {
-				populateUnsubscribe(diskLinks, rfc.Header)
-			}
+		if rfc != nil {
+			populateUnsubscribe(diskLinks, rfc.Header)
 		}
 		populateDiskLinks(diskLinks, diagnostics, err)
 		diskLinks.BodyDiagnostics = diagnostics
