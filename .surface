@@ -171,6 +171,9 @@ labels remove --help (-h)
 labels remove --label
 labels show
 labels show --help (-h)
+links
+links --help (-h)
+links --unsubscribe
 mailboxes
 mailboxes --help (-h)
 mailboxes list
@@ -433,6 +436,7 @@ show
 show --body-alternatives
 show --body-source
 show --help (-h)
+show --links
 show --metadata-only
 signatures
 signatures --help (-h)
