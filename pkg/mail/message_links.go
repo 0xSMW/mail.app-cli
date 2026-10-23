@@ -46,6 +46,8 @@ type LinkExtractionStatus struct {
 // does not verify the sender, endpoint, or successful unsubscribe behavior.
 // HeaderStatus distinguishes unavailable headers from available absent controls.
 type MessageUnsubscribe struct {
+	// ListID preserves the advertised raw List-Id header value.
+	ListID              string   `json:"listId,omitempty"`
 	ListUnsubscribe     []string `json:"listUnsubscribe"`
 	ListUnsubscribePost []string `json:"listUnsubscribePost"`
 	OneClickAdvertised  bool     `json:"oneClickAdvertised"`
@@ -258,6 +260,9 @@ var unsubscribeDestination = regexp.MustCompile(`<([^<>]+)>`)
 func populateUnsubscribe(message *Message, header netmail.Header) {
 	u := &MessageUnsubscribe{ListUnsubscribe: []string{}, ListUnsubscribePost: []string{}, HeaderStatus: "available"}
 	for name, values := range header {
+		if strings.EqualFold(name, "List-Id") {
+			u.ListID = strings.Join(values, "\n")
+		}
 		if strings.EqualFold(name, "List-Unsubscribe") {
 			u.ListUnsubscribe = append(u.ListUnsubscribe, values...)
 		}
