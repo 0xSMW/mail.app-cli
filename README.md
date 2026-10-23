@@ -63,6 +63,47 @@ Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, you
 
 ## Links and unsubscribe discovery in 3.1.0
 
+Find unsubscribe opportunities in one message or across entire local folders:
+
+```bash
+mail-app-cli unsubscribe show 100001 --json
+mail-app-cli unsubscribe scan INBOX -a "Example Account" --json
+mail-app-cli unsubscribe scan INBOX Archive -a "Example Account" --checkpoint /private/discovery.json --json
+```
+
+`unsubscribe scan` inspects every enumerated message's local headers and supported
+body alternatives. Results group by mailing-list identity when `List-Id` is
+available; sender-based fallback groups are explicitly provisional. Exact
+destinations are deduplicated with their evidence retained. Groups include the
+newest representative, every observed message and folder membership, and controls
+found only in older messages. Identical RFC Message-ID copies count once per
+group. Varying destinations are reported without visiting them or claiming they
+are still valid.
+
+The scan follows all mailbox pages within its time budget. `--page-size` changes
+pagination, not the requested scope. Use `--since` to explicitly restrict receipt
+dates, or `--all-accounts` to scan the named folders in every enabled account.
+Coverage is based on sequential observations, not an atomic mailbox snapshot.
+
+Discovery always saves a private checkpoint and reports its path. Resume by
+repeating the original accounts, folders, and date filter with `--checkpoint`;
+page size and time budget may change. For a bounded invocation, `--max-pages 1`
+processes one new page before saving. Pending extraction is saved before the scan
+advances, so interrupted work can be resumed. A completed checkpoint replays its
+stored observations; `--restart-checkpoint` starts a fresh traversal. After local
+message files become available, `--retry-incomplete` reinspects earlier partial
+or unavailable messages and continues pending work.
+
+`complete: true` requires exhausted folders, no pending messages, and complete
+local extraction for every observed message. Otherwise the command exits 5 while
+retaining discovered groups, per-folder coverage, and extraction exceptions.
+Finding an unsubscribe header does not bypass body inspection or certify complete
+discovery. Missing local files are reported without asking Mail to render or
+download them. `unsubscribe show` uses the same local-only extraction policy.
+These commands never open URLs, fetch remote content, send mail, or unsubscribe.
+
+General link discovery remains available:
+
 ```bash
 mail-app-cli links 100001 --json
 mail-app-cli links 100001 --unsubscribe --plain
