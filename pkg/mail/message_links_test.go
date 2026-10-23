@@ -217,3 +217,41 @@ func TestMessageLinksEnvelopeFailureStillExtractsBody(t *testing.T) {
 		t.Fatalf("m=%+v", m)
 	}
 }
+
+func TestMessageLinksSelectRenderableAlternativeWithoutChangingText(t *testing.T) {
+	plain := "Content-Type: text/plain\n\nhttps://plain.test/body\n"
+	imageHTML := "Content-Type: text/html\n\n<a href=\"https://html.test/leave\"><img src=\"cid:button\"></a>\n"
+	tests := []struct {
+		name        string
+		body        string
+		wantContent string
+		selectedURL string
+		wantLinks   int
+	}{
+		{"image-only HTML", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\n" + imageHTML + "--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
+		{"related root selected by Content-ID", "Content-Type: multipart/alternative; boundary=a\n\n--a\n" + plain + "--a\nContent-Type: multipart/related; boundary=r; start=\"<root>\"\n\n--r\nContent-Type: image/png\nContent-ID: <button>\n\nimage\n--r\nContent-ID: <root>\n" + imageHTML + "--r--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 2},
+		{"nested alternatives", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: text/plain\n\nhttps://outer.test/body\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a--\n", "https://plain.test/body", "https://html.test/leave", 3},
+		{"discarded nested rendering remains unselected", "Content-Type: multipart/alternative; boundary=a\n\n--a\nContent-Type: multipart/alternative; boundary=b\n\n--b\n" + plain + "--b\n" + imageHTML + "--b--\n--a\nContent-Type: text/html\n\n<a href=\"https://final.test/body\">Final rendering</a>\n--a--\n", "Final rendering", "https://final.test/body", 3},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "1.emlx")
+			writeEMLX(t, path, test.body)
+			content, d, err := readEMLXBodyWithDiagnostics(path)
+			if err != nil || content != test.wantContent || len(d.links) != test.wantLinks {
+				t.Fatalf("content=%q links=%+v err=%v", content, d.links, err)
+			}
+			for _, link := range d.links {
+				if link.Selected != (link.URL == test.selectedURL) {
+					t.Fatalf("selection=%+v expected selected URL %s", d.links, test.selectedURL)
+				}
+			}
+			if test.name == "image-only HTML" {
+				// Legacy diagnostics continue describing the nonempty text projection.
+				if len(d.Alternatives) != 2 || !d.Alternatives[0].Selected || d.Alternatives[1].Selected {
+					t.Fatalf("legacy diagnostics changed: %+v", d.Alternatives)
+				}
+			}
+		})
+	}
+}
