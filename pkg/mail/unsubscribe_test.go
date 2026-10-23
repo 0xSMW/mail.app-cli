@@ -118,10 +118,42 @@ func TestUnsubscribeMalformedEnvelopeStillKeepsBodyControls(t *testing.T) {
 	}
 }
 func TestUnsubscribeListIDValidation(t *testing.T) {
-	for raw, want := range map[string]string{"News <NEWS.Example.test>": "news.example.test", "<one.example.test>": "one.example.test", "bad": "", "<space bad.example>": "", "<a@example.test>": "", "<.example.test>": "", "<one.example.test> suffix": ""} {
+	for raw, want := range map[string]string{
+		"News <NEWS.Example.test>":           "news.example.test",
+		"<one.example.test>":                 "one.example.test",
+		"<space bad.example>":                "spacebad.example",
+		"< NEWS\r\n\t+DAILY .example.test >": "news+daily.example.test",
+		"<-news-.example.test>":              "-news-.example.test",
+		"bad":                                "",
+		"<a@example.test>":                   "",
+		"<.example.test>":                    "",
+		"<one.example.test> suffix":          "",
+		"<one..example.test>":                "",
+		"<one.example.test.>":                "",
+		"<one(abc).example.test>":            "",
+		"<café.example.test>":                "",
+		"<one\x00.example.test>":             "",
+	} {
 		if got := canonicalListID(raw); got != want {
 			t.Fatalf("raw=%q got=%q want=%q", raw, got, want)
 		}
+	}
+	for _, ch := range "!#$%&'*+-/=?^_`{|}~" {
+		id := "news" + string(ch) + "daily.example.test"
+		if got := canonicalListID("<" + id + ">"); got != id {
+			t.Fatalf("valid dot-atom character %q rejected: %q", ch, got)
+		}
+	}
+	maxID := strings.Repeat("a", 252) + ".ex"
+	if canonicalListID("<"+maxID+">") != maxID || canonicalListID("<a"+maxID+">") != "" {
+		t.Fatal("List-Id must accept 255 octets and reject longer identifiers")
+	}
+	groups := GroupUnsubscribeObservations([]UnsubscribeObservation{
+		unsubscribeTestObservation("1", "news+daily.example.test", "old@example.test", "2026-10-20T00:00:00Z", "https://example.test/old"),
+		unsubscribeTestObservation("2", "news+daily.example.test", "new@example.test", "2026-10-22T00:00:00Z", "https://example.test/new"),
+	})
+	if len(groups) != 1 || groups[0].Provisional || groups[0].MessageCount != 2 || groups[0].KeySource != "list-id" {
+		t.Fatalf("valid List-Id lost stable grouping: %+v", groups)
 	}
 }
 
