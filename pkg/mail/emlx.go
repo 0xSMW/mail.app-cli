@@ -240,7 +240,7 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 		partNumber := 0
 		// Link rendering selection is independent of the legacy nonempty-text
 		// projection. Even an image-only HTML part is a supported rendering.
-		linkChosenPath, relatedRootPath := "", ""
+		linkChosenPath, linkRichPath, relatedRootPath := "", "", ""
 		for {
 			part, err := reader.NextRawPart()
 			if err == io.EOF {
@@ -263,6 +263,9 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 					}
 				} else if diagnostics.linkRenderableParts[childPath] {
 					linkChosenPath = childPath
+					if partType == "text/html" {
+						linkRichPath = childPath
+					}
 				}
 			}
 			alternativeIndex := -1
@@ -287,6 +290,9 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			}
 		}
 		if diagnostics != nil {
+			if mediaType == "multipart/alternative" && linkRichPath != "" {
+				linkChosenPath = linkRichPath
+			}
 			if mediaType == "multipart/related" {
 				if diagnostics.linkRenderableParts[relatedRootPath] {
 					linkChosenPath = relatedRootPath
