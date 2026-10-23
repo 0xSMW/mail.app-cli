@@ -188,3 +188,33 @@ func TestDetailReadTimeoutKeepsDiskPhase(t *testing.T) {
 		t.Fatalf("trace = %+v, %v", trace, err)
 	}
 }
+
+func TestLegacyDetailReadExtractsEnvelopeAndBodyFromSingleLocalRead(t *testing.T) {
+	fakeMailStore(t, recordScript+`printf '%s\n' '{"message":{"id":"256493","subject":"synthetic","content":""},"failure":null,"phases":[{"name":"metadata","elapsedMs":1}]}'
+`)
+	path := filepath.Join(os.Getenv("HOME"), "Library/Mail/V10/ABC/[Gmail].mbox/Spam.mbox/UUID/Data/6/5/2/Messages/256493.emlx")
+	writeEMLX(t, path, "List-Unsubscribe: <https://header.test/leave>\nContent-Type: text/html\n\n<p><a href=\"https://body.test/leave\">Unsubscribe</a></p>")
+	c := NewClient()
+	if err := c.SetBackend(BackendLegacy); err != nil {
+		t.Fatal(err)
+	}
+	before := LocalReadStatistics()
+	message, trace, err := c.getMessageDetailsTraced("Work", "Spam", "256493", 5*time.Second, true)
+	after := LocalReadStatistics()
+	if err != nil || message == nil || message.Content != "Unsubscribe" || message.ContentSource != BodySourceDisk {
+		t.Fatalf("message=%+v err=%v", message, err)
+	}
+	if after.FilesRead-before.FilesRead != 1 || after.BodyExtractions-before.BodyExtractions != 1 {
+		t.Fatalf("disk operations before=%+v after=%+v", before, after)
+	}
+	if message.Unsubscribe == nil || len(message.Unsubscribe.ListUnsubscribe) != 1 || len(message.Links) != 2 || !message.LinkStatus.Complete {
+		t.Fatalf("links/envelope=%+v", message)
+	}
+	if len(trace.Phases) != 2 || trace.Phases[0].Name != "disk_body" || trace.Phases[0].Note != "" {
+		t.Fatalf("trace=%+v", trace)
+	}
+	script, readErr := os.ReadFile(os.Getenv("MAIL_APP_CLI_OSA_LOG"))
+	if readErr != nil || !strings.Contains(string(script), "const skipContent = true;") {
+		t.Fatalf("render requested or script unreadable: %v", readErr)
+	}
+}
