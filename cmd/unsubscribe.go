@@ -99,7 +99,9 @@ func (a *application) newUnsubscribeScanCmd() *cobra.Command {
 					return err
 				}
 				for _, account := range inventory {
-					accounts = append(accounts, account.Name)
+					if account.Enabled {
+						accounts = append(accounts, account.Name)
+					}
 				}
 				if len(accounts) == 0 {
 					return clierr.New(clierr.CodeNotFound, "no enabled Mail accounts")
