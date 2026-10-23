@@ -263,7 +263,7 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 					}
 				} else if diagnostics.linkRenderableParts[childPath] {
 					linkChosenPath = childPath
-					if partType == "text/html" {
+					if diagnostics.richRenderableParts[childPath] {
 						linkRichPath = childPath
 					}
 				}
@@ -281,7 +281,7 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			if strings.TrimSpace(text) == "" {
 				continue
 			}
-			if partType == "text/html" {
+			if partType == "text/html" || mediaType == "multipart/alternative" && diagnostics != nil && diagnostics.richRenderableParts[childPath] {
 				rich = append(rich, text)
 				richAlternatives = append(richAlternatives, alternativeIndex)
 			} else {
@@ -300,9 +300,13 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 			}
 			if linkChosenPath != "" {
 				diagnostics.linkRenderableParts[partPath] = true
+				if diagnostics.richRenderableParts == nil {
+					diagnostics.richRenderableParts = make(map[string]bool)
+				}
+				diagnostics.richRenderableParts[partPath] = diagnostics.richRenderableParts[linkChosenPath] || mediaType != "multipart/related" && linkRichPath != ""
 			}
 		}
-		if mediaType == "multipart/alternative" {
+		if mediaType == "multipart/alternative" || mediaType == "multipart/related" {
 			if diagnostics != nil {
 				for i := range diagnostics.links {
 					link := &diagnostics.links[i]
@@ -311,6 +315,8 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 					}
 				}
 			}
+		}
+		if mediaType == "multipart/alternative" {
 			// The parts are renderings of one body. Mail.app shows the last
 			// one it can display, which is the HTML part when there is one.
 			if len(rich) > 0 {
@@ -341,6 +347,10 @@ func mimeBodyTextWithDiagnostics(header func(string) string, body io.Reader, dec
 		}
 		if mediaType == "text/html" {
 			if diagnostics != nil {
+				if diagnostics.richRenderableParts == nil {
+					diagnostics.richRenderableParts = make(map[string]bool)
+				}
+				diagnostics.richRenderableParts[partPath] = true
 				diagnostics.links = append(diagnostics.links, htmlMessageLinks(text, partPath)...)
 			}
 			return htmlToTextWithDiagnostics(text, diagnostics), nil
