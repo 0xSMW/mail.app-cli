@@ -109,7 +109,7 @@ func specialMailboxCandidates(kind string) ([]string, bool) {
 	}
 }
 
-func (a *application) showMessage(id string, metadataOnly bool) error {
+func (a *application) showMessage(id string, metadataOnly, allLinks bool) error {
 	refs, notices, err := a.locateMessages([]string{id})
 	if err != nil {
 		return err
@@ -129,6 +129,7 @@ func (a *application) showMessage(id string, metadataOnly bool) error {
 		}
 		if metadataOnly {
 			message.Content = ""
+			message.Links, message.LinkStatus, message.Unsubscribe = nil, nil, nil
 		}
 	}
 	_ = mail.RecordRecentMessage(*message, "show")
@@ -137,7 +138,7 @@ func (a *application) showMessage(id string, metadataOnly bool) error {
 		Summary: fmt.Sprintf("%s from %s", output.Truncate(message.Subject, 60), displaySender(message.Sender)),
 		Notices: notices,
 		Meta:    map[string]any{"account": message.Account, "mailbox": message.Mailbox, "metadataOnly": metadataOnly},
-		Plain:   renderMessage(message, metadataOnly),
+		Plain:   renderMessageWithLinks(message, metadataOnly, allLinks),
 	})
 }
 
@@ -177,6 +178,7 @@ func (a *application) buildVerbsCommands() {
 		verbBodySource       string
 		verbBodyAlternatives bool
 		verbMetadataOnly     bool
+		verbLinks            bool
 		verbMoveTo           string
 	)
 
@@ -206,16 +208,20 @@ func (a *application) buildVerbsCommands() {
 		Short: "Show a message with its body",
 		Args:  cobra.ExactArgs(1),
 		Annotations: map[string]string{
-			annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. The body is read from Mail.app's message file and contentSource says where it came from. --metadata-only skips the body.",
+			annotationAgentNotes: "The mailbox is found through the Envelope Index; pass --account and --mailbox only when you know better. The body is read from Mail.app's message file and contentSource says where it came from. JSON includes links, linkStatus, and unsubscribe metadata. --links prints every destination in the human view. --metadata-only skips the body. Use links for discovery without Mail body rendering. Reading links never opens URLs or unsubscribes.",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.mailClient.SetBodySource(verbBodySource); err != nil {
 				return clierr.Usage(`--body-source must be "disk" or "mail"`)
 			}
 			a.mailClient.SetBodyAlternatives(verbBodyAlternatives)
-			return a.showMessage(args[0], verbMetadataOnly)
+			if verbMetadataOnly && verbLinks {
+				return clierr.Usage("--links cannot be combined with --metadata-only")
+			}
+			return a.showMessage(args[0], verbMetadataOnly, verbLinks)
 		},
 	}
+	a.linksCmd = a.newLinksCmd()
 	a.seenCmd = a.newIDVerb("seen", "Mark messages read", "mark", func() (batchOptions, mail.Mutator) {
 		return batchOptions{Read: true}, mail.MarkMutator(true)
 	})
@@ -246,6 +252,7 @@ func (a *application) buildVerbsCommands() {
 	a.showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
 	a.showCmd.Flags().BoolVar(&verbBodyAlternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
 	a.showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
+	a.showCmd.Flags().BoolVar(&verbLinks, "links", false, "Print all extracted link labels and full destinations in the human view")
 
 	a.moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")
 	_ = a.moveCmd.MarkFlagRequired("to")
