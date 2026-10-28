@@ -1,0 +1,32 @@
+❯ mail-app-cli unsubscribe scan INBOX --all-accounts \
+  --checkpoint ./agent.json \
+  --jq '.data | {complete, inspected: .readability.inspected,
+    lists: [.groups[] | {listId, messageCount,
+      unsubscribe: [.destinations[] | select(.kind == "unsubscribe") | .url]}]}'
+{
+  "complete": true,
+  "inspected": 8,
+  "lists": [
+    {
+      "listId": "newsletter.github.com",
+      "messageCount": 2,
+      "unsubscribe": [
+        "https://github.com/unsubscribe/demo-publication"
+      ]
+    },
+    {
+      "listId": "newsletter.raycast.com",
+      "messageCount": 1,
+      "unsubscribe": [
+        "https://raycast.com/unsubscribe/demo-publication"
+      ]
+    },
+    {
+      "listId": "newsletter.substack.com",
+      "messageCount": 2,
+      "unsubscribe": [
+        "https://substack.com/unsubscribe/demo-publication"
+      ]
+    }
+  ]
+}

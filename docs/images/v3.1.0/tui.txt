@@ -1,0 +1,32 @@
+mail  All inboxes  (8 messages)
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+▸1All inboxes             │ •⚑ 09:40  Maya Chen      Ready for the au… Studio/INB… │Small tools, better days
+Studio                    │ •  09:15  Northwind Bil… Your October inv… Studio/INB… │From     Cedar Weekly <hello@cedar.example.test>
+ 2  INBOX                2│▸   08:30  Cedar Weekly   Small tools, bet… Studio/INB… │To       alex@studio.example.test
+ 3  Archive               │ •  08:10  Jamie Park     Coffee on Saturd… Personal/I… │Date     Fri, 23 Oct 2026 08:30
+ 4  Drafts                │ •  Oct 22 Orbit Journal  A little inspira… Personal/I… │In       Studio / INBOX  id 100246
+ 5  Sent                  │    Oct 21 Cedar Weekly   A quieter kind o… Studio/INB… │────────────────────────────────────────────────────────────────────
+ 6  Trash                 │    Oct 20 Build Notes    Five things we l… Studio/INB… │Hi Alex,
+Personal                  │    Oct 19 Orbit Journal  Ideas to take ou… Personal/I… │
+ 7  INBOX                2│                                                        │A few ideas for a calmer, more useful week.
+ 8  Archive               │                                                        │
+ 9  Drafts                │                                                        │IN THIS ISSUE
+    Sent                  │                                                        │
+    Trash                 │                                                        │1. Small tools, better days
+                          │                                                        │Three habits that make room for deep work.
+                          │                                                        │
+                          │                                                        │2. What we are reading
+                          │                                                        │Good notes from independent builders.
+                          │                                                        │
+                          │                                                        │3. A weekend project
+                          │                                                        │Make something just for the fun of it.
+                          │                                                        │
+                          │                                                        │Thanks for reading,
+                          │                                                        │The Cedar team
+                          │                                                        │
+                          │                                                        │Manage preferences or unsubscribe below.
+                          │                                                        │
+                          │                                                        │Unsubscribe here
+                          │                                                        │
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+j/k scroll  n/p next/prev  e archive  # trash  m move  u read/unread  ! flag  r reply  R reply all  f forward  esc back

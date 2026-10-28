@@ -1,0 +1,73 @@
+{
+  "description": "Fictional publication fixture. Unsubscribe examples use public service domains with invented sender addresses, list identities, and URL paths. No private inbox data or live unsubscribe tokens.",
+  "unsubscribeExamples": {
+    "hello@cedar.example.test": {
+      "sender": "Substack", "email": "newsletter@substack.com",
+      "listId": "newsletter.substack.com",
+      "unsubscribe": "https://substack.com/unsubscribe/demo-publication",
+      "preferences": "https://substack.com/preferences/demo-publication"
+    },
+    "letters@orbit.example.test": {
+      "sender": "GitHub", "email": "newsletter@github.com",
+      "listId": "newsletter.github.com",
+      "unsubscribe": "https://github.com/unsubscribe/demo-publication"
+    },
+    "digest@buildnotes.example.test": {
+      "sender": "Raycast", "email": "newsletter@raycast.com",
+      "listId": "newsletter.raycast.com",
+      "unsubscribe": "https://raycast.com/unsubscribe/demo-publication"
+    }
+  },
+  "accounts": [
+    {"id": "DEMO-STUDIO", "name": "Studio", "emailAddress": "alex@studio.example.test", "enabled": true},
+    {"id": "DEMO-PERSONAL", "name": "Personal", "emailAddress": "alex@personal.example.test", "enabled": true}
+  ],
+  "messages": [
+    {
+      "id": 100248, "account": "Studio", "sender": "Maya Chen", "email": "maya@studio.example.test",
+      "subject": "Ready for the autumn launch", "date": "2026-10-23T09:40:00+07:00", "read": false, "flagged": true,
+      "body": "Hi Alex,\n\nThe launch brief is ready for your review.\n\nThe preview, checklist, and final copy are all in the workspace. Let me know what you think before Thursday.\n\nThanks,\nMaya",
+      "html": "<p>Hi Alex,</p><p>The launch brief is ready for your review.</p><p>Open the <a href=\"https://studio.example.test/launch/brief\">launch brief</a> or review the <a href=\"https://studio.example.test/launch/checklist\">release checklist</a>.</p><p>Thanks,<br>Maya</p>"
+    },
+    {
+      "id": 100247, "account": "Studio", "sender": "Northwind Billing", "email": "billing@northwind.example.test",
+      "subject": "Your October invoice is ready", "date": "2026-10-23T09:15:00+07:00", "read": false,
+      "body": "Hi Alex,\n\nYour October invoice is ready. Thank you for working with us.\n\nThe Northwind team"
+    },
+    {
+      "id": 100246, "account": "Studio", "sender": "Cedar Weekly", "email": "hello@cedar.example.test",
+      "subject": "Small tools, better days", "date": "2026-10-23T08:30:00+07:00", "read": true,
+      "listId": "weekly.cedar.example.test", "unsubscribe": "https://cedar.example.test/u/demo", "preferences": "https://cedar.example.test/preferences/demo", "oneClick": true,
+      "body": "Hi Alex,\n\nA few ideas for a calmer, more useful week.\n\nIN THIS ISSUE\n\n1. Small tools, better days\n   Three habits that make room for deep work.\n\n2. What we are reading\n   Good notes from independent builders.\n\n3. A weekend project\n   Make something just for the fun of it.\n\nThanks for reading,\nThe Cedar team\n\nManage preferences or unsubscribe below."
+    },
+    {
+      "id": 100245, "account": "Personal", "sender": "Jamie Park", "email": "jamie@friends.example.test",
+      "subject": "Coffee on Saturday?", "date": "2026-10-23T08:10:00+07:00", "read": false,
+      "body": "Hey Alex,\n\nWant to grab coffee on Saturday morning? There is a new place near the park.\n\nJamie"
+    },
+    {
+      "id": 100244, "account": "Personal", "sender": "Orbit Journal", "email": "letters@orbit.example.test",
+      "subject": "A little inspiration for the weekend", "date": "2026-10-22T17:45:00+07:00", "read": false,
+      "listId": "journal.orbit.example.test", "unsubscribe": "https://orbit.example.test/unsubscribe/demo",
+      "body": "A few things worth slowing down for.\n\nThis week: a short walk, a good book, and an idea for your next project.\n\nThanks for reading Orbit Journal."
+    },
+    {
+      "id": 100243, "account": "Studio", "sender": "Cedar Weekly", "email": "hello@cedar.example.test",
+      "subject": "A quieter kind of productivity", "date": "2026-10-21T08:30:00+07:00", "read": true,
+      "listId": "weekly.cedar.example.test", "unsubscribe": "https://cedar.example.test/u/demo", "preferences": "https://cedar.example.test/preferences/demo",
+      "body": "Welcome to Cedar Weekly.\n\nToday we are making a little more space for the work that matters."
+    },
+    {
+      "id": 100242, "account": "Studio", "sender": "Build Notes", "email": "digest@buildnotes.example.test",
+      "subject": "Five things we learned shipping this week", "date": "2026-10-20T10:00:00+07:00", "read": true,
+      "listId": "digest.buildnotes.example.test", "unsubscribe": "https://buildnotes.example.test/leave/demo",
+      "body": "Build Notes, issue 24.\n\nA weekly collection of lessons from people making useful software."
+    },
+    {
+      "id": 100241, "account": "Personal", "sender": "Orbit Journal", "email": "letters@orbit.example.test",
+      "subject": "Ideas to take outside", "date": "2026-10-19T17:45:00+07:00", "read": true,
+      "listId": "journal.orbit.example.test", "unsubscribe": "https://orbit.example.test/unsubscribe/demo",
+      "body": "Thank you for reading Orbit Journal.\n\nHere is a small collection of ideas for a slower Sunday."
+    }
+  ]
+}

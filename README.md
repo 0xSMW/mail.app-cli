@@ -63,6 +63,8 @@ Grant Full Disk Access to the app that runs `mail-app-cli` (Terminal, iTerm, you
 
 ## Links and unsubscribe discovery in 3.1.0
 
+Screenshots with fictional mail are available for the [human CLI, agent output, TUI, and unsubscribe discovery](docs/publication/README.md).
+
 Find unsubscribe opportunities in one message or across entire local folders:
 
 ```bash
