@@ -128,6 +128,8 @@ func Classify(err error) *Error {
 	var mutation *mail.MutationError
 	var native *appleevents.Error
 	switch {
+	case errors.Is(err, mail.ErrSendingDisabled):
+		return Wrap(CodeUsage, err, err.Error()).WithHint("use drafts create or --dry-run; inspect the sending restriction with 'mail-app-cli config show'")
 	case errors.As(err, &mutation):
 		if mutation.Phase == "sender_selection" && !mutation.Attempted {
 			return Wrap(CodeUsage, err, err.Error()).WithHint("choose a sender address configured on the selected account")

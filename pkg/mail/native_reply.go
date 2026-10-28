@@ -41,6 +41,11 @@ func (c *Client) SaveThreadedOutgoing(input ThreadedOutgoingInput) (*OutgoingRes
 }
 
 func (c *Client) composeThreadedOutgoing(input ThreadedOutgoingInput, action string) (*OutgoingResult, error) {
+	if action == "send" {
+		if err := c.checkSendingAllowed(); err != nil {
+			return nil, err
+		}
+	}
 	switch input.Mode {
 	case ReplyToSender, ReplyToAll, ForwardMessage:
 	default:

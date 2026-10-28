@@ -62,3 +62,32 @@ func TestLegacyComposeReplyKeepsExistingDispatch(t *testing.T) {
 		t.Fatalf("legacy dispatch unexpectedly required original identity: %v", done.err)
 	}
 }
+
+func TestRestrictedTUIComposeRetainsTextAfterBlockedSend(t *testing.T) {
+	for _, backend := range []string{mail.BackendNative, mail.BackendLegacy} {
+		for _, mode := range []composeMode{composeNew, composeReply, composeReplyAll, composeForward} {
+			m := loadedModel(t)
+			m.client = m.client.WithSendingDisabled()
+			if err := m.client.SetBackend(backend); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			m.writeCtx = ctx
+			c := newComposeModal(mode, "Work", &mail.Message{Account: "Work", Mailbox: "INBOX", ID: "42", Sender: "sender@example.test"}, nil)
+			c.inputs[fieldTo].SetValue("to@example.test")
+			c.inputs[fieldSubject].SetValue("Review")
+			c.body.SetValue("Keep this text")
+			m.modal = c
+			done := c.submit(&m, false)().(writeDoneMsg).inner.(composeDoneMsg)
+			if done.err != mail.ErrSendingDisabled {
+				t.Fatalf("%s/%d: %v", backend, mode, done.err)
+			}
+			next, _ := m.onComposeDone(done)
+			kept, ok := next.(model).modal.(*composeModal)
+			if !ok || kept.body.Value() != "Keep this text" || kept.sending || !strings.Contains(kept.status, "email sending is disabled") {
+				t.Fatalf("editor lost after refusal: %+v", kept)
+			}
+		}
+	}
+}

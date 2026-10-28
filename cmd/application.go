@@ -15,6 +15,7 @@ type application struct {
 	flagAccount string
 	flagMailbox string
 	flagBackend string
+	flagNoSend  bool
 	outFlags    output.Flags
 	writer      *output.Writer
 	// Retain failed loads for fallback formatting without reading config twice.

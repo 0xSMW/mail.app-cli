@@ -52,6 +52,11 @@ func (c *Client) SendOutgoing(input OutgoingInput) (*OutgoingResult, error) {
 }
 
 func (c *Client) composeOutgoing(input OutgoingInput, action string) (*OutgoingResult, error) {
+	if action == "send" {
+		if err := c.checkSendingAllowed(); err != nil {
+			return nil, err
+		}
+	}
 	if action != "send" && action != "save" && action != "preview" {
 		return nil, fmt.Errorf("invalid outgoing action %q", action)
 	}

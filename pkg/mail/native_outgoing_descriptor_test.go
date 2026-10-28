@@ -392,8 +392,9 @@ func TestNativeDescriptorOutgoingPreviewNeverComposes(t *testing.T) {
 }
 
 func TestNativeDescriptorOutgoingSaveVerifiesStoredFingerprint(t *testing.T) {
-	for _, ambiguous := range []bool{false, true} {
-		t.Run(fmt.Sprintf("ambiguous_%t", ambiguous), func(t *testing.T) {
+	for _, tc := range []struct{ disabled, ambiguous bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+		disabled, ambiguous := tc.disabled, tc.ambiguous
+		t.Run(fmt.Sprintf("disabled_%t/ambiguous_%t", disabled, ambiguous), func(t *testing.T) {
 			f := newOutgoingDescriptorFixture()
 			box := ruleFixtureRef("draftbox")
 			account := ae.Index("mact", 1, ae.Null())
@@ -457,6 +458,9 @@ func TestNativeDescriptorOutgoingSaveVerifiesStoredFingerprint(t *testing.T) {
 				return f.get(v)
 			}
 			c := NewClient()
+			if disabled {
+				c = c.WithSendingDisabled()
+			}
 			c.shared.backend = BackendNative
 			c.shared.nativeSender = func(ctx context.Context, event ae.Event) (ae.Value, ae.Stats, error) {
 				if event.Class+event.ID == "coregetd" {

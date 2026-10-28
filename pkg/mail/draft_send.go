@@ -73,6 +73,9 @@ func (c *Client) PreviewDraftSend(accountName, draftID string) (*OutgoingResult,
 // attachments preserve filenames and exported bytes; Mail chooses their MIME
 // metadata from those files when it composes the replacement.
 func (c *Client) SendDraftResult(accountName, draftID string) (*DraftSendResult, error) {
+	if err := c.checkSendingAllowed(); err != nil {
+		return nil, err
+	}
 	result := &DraftSendResult{DraftID: draftID, Account: accountName, Status: "not_submitted"}
 	fail := func(phase string, err error) (*DraftSendResult, error) {
 		attempted := result.Submitted

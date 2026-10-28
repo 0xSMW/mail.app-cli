@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -36,6 +37,25 @@ type Client struct {
 	// Only a local cross-mailbox search copy sets this immutable named-account
 	// snapshot. It never marks the shared global account cache as complete.
 	readAccountSnapshot *Account
+	sendingDisabled     bool
+}
+
+// ErrSendingDisabled means the client refused a send before contacting Mail.
+var ErrSendingDisabled = errors.New("email sending is disabled")
+
+// WithSendingDisabled returns a restricted client. Drafts and previews remain
+// available, and all context-derived copies retain the restriction.
+func (c *Client) WithSendingDisabled() *Client {
+	copy := *c
+	copy.sendingDisabled = true
+	return &copy
+}
+
+func (c *Client) checkSendingAllowed() error {
+	if c.sendingDisabled {
+		return ErrSendingDisabled
+	}
+	return nil
 }
 
 func NewClient() *Client {
@@ -48,7 +68,7 @@ func (c *Client) WithContext(ctx context.Context) *Client {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return &Client{ctx: ctx, shared: c.shared, readAccountSnapshot: c.readAccountSnapshot}
+	return &Client{ctx: ctx, shared: c.shared, readAccountSnapshot: c.readAccountSnapshot, sendingDisabled: c.sendingDisabled}
 }
 
 // Context is the context the client's subprocesses run under.

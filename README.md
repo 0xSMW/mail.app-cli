@@ -366,6 +366,7 @@ KEY      VALUE   SOURCE
 account  Example Account  config
 mailbox  INBOX   default
 output   auto    default
+send.enabled true default
 ```
 
 Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, and `attachments` look the mailbox up in the Envelope Index, so `-a` and `-m` are only needed to override. Pass `-m` when the index has not seen a message yet. On Gmail, `archive` acts from INBOX when the message carries that label and from All Mail otherwise (reported as skipped, exit 0), so it never strips a user label; `move` and `delete` act from a user label when the message has one.
@@ -373,6 +374,36 @@ Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, 
 After archive, delete, or move, Mail.app gives the message a new ID in the destination mailbox. The receipt reports the ID you passed; find the message again with `search` or `recent search` before touching it a second time.
 
 ## Mutations
+
+### Disable sending
+
+Sending is enabled by default. To keep reading and managing drafts while blocking
+email sending, set a persistent restriction or pass the global `--no-send` flag:
+
+```bash
+mail-app-cli config set send.enabled false
+mail-app-cli config show
+mail-app-cli --no-send tui
+mail-app-cli --no-send drafts create -a "Example Account" --to recipient@example.test --subject "For review" --body "Draft text"
+```
+
+The setting is stored as `{"send":{"enabled":false}}` in
+`~/.config/mail-app-cli/config.json` (or the configured config path). `config show`
+reports its effective value and source. `--no-send` applies to one invocation and
+can appear before or after subcommands; `--no-send=false` cannot override a stored
+restriction. There is no environment variable that overrides this setting.
+
+When disabled, `send` (including reply, reply-all, and forward) and `drafts send`
+exit with status **1** (`usage`) and "email sending is disabled" before contacting
+Mail. The TUI reports the same error and keeps the composed text available for
+saving as a draft. Draft creation, listing, reading, updating, deletion, and
+`--dry-run` previews remain available on both mail backends.
+
+Restore the default with `mail-app-cli config unset send.enabled`, or explicitly
+enable sending with `mail-app-cli config set send.enabled true`. This controls
+sending through mail-app-cli; it does not change Mail.app's own Send button.
+
+### Mutation receipts
 
 Every message mutation (`seen`, `unseen`, `flag`, `unflag`, `archive`, `delete`, `move`, the `messages *` spellings, `messages batch`, and `threads archive`) returns the same receipt and accepts `--dry-run` and `--verify`. Other mutations (`send`, `drafts *`, `rules *`) accept `--dry-run` and return their own shape.
 
