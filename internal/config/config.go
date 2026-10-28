@@ -1,5 +1,5 @@
 // Package config reads and writes the user configuration file and resolves
-// each setting from flag, environment, file, or default in that order.
+// defaults from flags, environment, or file. Sending restrictions are additive.
 package config
 
 import (
@@ -9,13 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 const (
-	KeyAccount = "account"
-	KeyMailbox = "mailbox"
-	KeyOutput  = "output"
+	KeyAccount     = "account"
+	KeyMailbox     = "mailbox"
+	KeyOutput      = "output"
+	KeySendEnabled = "send.enabled"
 
 	EnvConfigPath = "MAIL_APP_CLI_CONFIG"
 	EnvAccount    = "MAIL_APP_CLI_ACCOUNT"
@@ -31,14 +33,20 @@ const (
 // Config is the on-disk shape. Empty values are omitted so the file only
 // records what the user set.
 type Config struct {
-	Account string `json:"account,omitempty"`
-	Mailbox string `json:"mailbox,omitempty"`
-	Output  string `json:"output,omitempty"`
+	Account string      `json:"account,omitempty"`
+	Mailbox string      `json:"mailbox,omitempty"`
+	Output  string      `json:"output,omitempty"`
+	Send    *SendConfig `json:"send,omitempty"`
+}
+
+// SendConfig keeps an omitted setting distinct from an explicit false.
+type SendConfig struct {
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // Keys lists the settable keys in display order.
 func Keys() []string {
-	return []string{KeyAccount, KeyMailbox, KeyOutput}
+	return []string{KeyAccount, KeyMailbox, KeyOutput, KeySendEnabled}
 }
 
 var outputValues = []string{"auto", "json", "plain"}
@@ -104,6 +112,11 @@ func (c Config) Get(key string) (string, error) {
 		return c.Mailbox, nil
 	case KeyOutput:
 		return c.Output, nil
+	case KeySendEnabled:
+		if c.Send != nil && c.Send.Enabled != nil {
+			return strconv.FormatBool(*c.Send.Enabled), nil
+		}
+		return "", nil
 	}
 	return "", unknownKey(key)
 }
@@ -121,6 +134,16 @@ func (c *Config) Set(key, value string) error {
 			return fmt.Errorf("output must be one of %s", strings.Join(outputValues, ", "))
 		}
 		c.Output = value
+	case KeySendEnabled:
+		if value == "" {
+			c.Send = nil
+			break
+		}
+		if value != "true" && value != "false" {
+			return fmt.Errorf("send.enabled must be true or false")
+		}
+		enabled := value == "true"
+		c.Send = &SendConfig{Enabled: &enabled}
 	default:
 		return unknownKey(key)
 	}
@@ -148,14 +171,16 @@ type Value struct {
 
 // Resolved holds every setting after precedence is applied.
 type Resolved struct {
-	Account Value  `json:"account"`
-	Mailbox Value  `json:"mailbox"`
-	Output  Value  `json:"output"`
-	Path    string `json:"path"`
+	Account     Value  `json:"account"`
+	Mailbox     Value  `json:"mailbox"`
+	Output      Value  `json:"output"`
+	SendEnabled Value  `json:"send.enabled"`
+	Path        string `json:"path"`
 }
 
-// Resolve applies flag > env > config > default for each key. flags holds
-// only the flags the user explicitly set.
+// Resolve applies flag > env > config > default to account, mailbox, and output.
+// Sending defaults to enabled; either config or the disabling flag can restrict it.
+// flags holds only the flags the user explicitly set.
 func Resolve(flags map[string]string, cfg Config, getenv func(string) string) Resolved {
 	resolve := func(key, envName, fileValue, fallback string) Value {
 		if v, ok := flags[key]; ok && strings.TrimSpace(v) != "" {
@@ -170,11 +195,20 @@ func Resolve(flags map[string]string, cfg Config, getenv func(string) string) Re
 		return Value{Value: fallback, Source: SourceDefault}
 	}
 	path, _ := Path()
+	sendEnabled := Value{Value: "true", Source: SourceDefault}
+	if value, _ := cfg.Get(KeySendEnabled); value != "" {
+		sendEnabled = Value{Value: value, Source: SourceConfig}
+	}
+	// --no-send can only restrict sending; false never overrides the file.
+	if flags[KeySendEnabled] == "false" {
+		sendEnabled = Value{Value: "false", Source: SourceFlag}
+	}
 	return Resolved{
-		Account: resolve(KeyAccount, EnvAccount, cfg.Account, ""),
-		Mailbox: resolve(KeyMailbox, EnvMailbox, cfg.Mailbox, "INBOX"),
-		Output:  resolve(KeyOutput, EnvOutput, cfg.Output, "auto"),
-		Path:    path,
+		Account:     resolve(KeyAccount, EnvAccount, cfg.Account, ""),
+		Mailbox:     resolve(KeyMailbox, EnvMailbox, cfg.Mailbox, "INBOX"),
+		Output:      resolve(KeyOutput, EnvOutput, cfg.Output, "auto"),
+		Path:        path,
+		SendEnabled: sendEnabled,
 	}
 }
 
@@ -184,6 +218,7 @@ func (r Resolved) Rows() [][]string {
 		{KeyAccount, r.Account.Value, r.Account.Source},
 		{KeyMailbox, r.Mailbox.Value, r.Mailbox.Source},
 		{KeyOutput, r.Output.Value, r.Output.Source},
+		{KeySendEnabled, r.SendEnabled.Value, r.SendEnabled.Source},
 	}
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i][0] < rows[j][0] })
 	return rows

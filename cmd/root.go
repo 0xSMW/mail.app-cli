@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "3.1.0"
+const version = "3.2.0"
 
 const (
 	groupMail   = "mail"
@@ -204,6 +204,9 @@ func (a *application) prepare(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("mailbox") {
 		flags[config.KeyMailbox] = a.flagMailbox
 	}
+	if a.flagNoSend {
+		flags[config.KeySendEnabled] = "false"
+	}
 	a.resolved = config.Resolve(flags, a.cfg, os.Getenv)
 
 	tty := output.IsTerminal(cmd.OutOrStdout())
@@ -229,6 +232,15 @@ func (a *application) prepare(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	a.mailClient = mail.NewClient().WithContext(cmd.Context())
+	if a.resolved.SendEnabled.Value == "false" {
+		a.mailClient = a.mailClient.WithSendingDisabled()
+		if cmd == a.sendCmd || cmd == a.draftsSendCmd {
+			dryRun, _ := cmd.Flags().GetBool("dry-run")
+			if !dryRun {
+				return mail.ErrSendingDisabled
+			}
+		}
+	}
 	if err := a.mailClient.SetBackend(a.flagBackend); err != nil {
 		return clierr.Usage(err.Error())
 	}
@@ -355,6 +367,7 @@ statuses, and 'help agents' for how to drive it from a script or an agent.`,
 	a.rootCmd.SetHelpFunc(a.agentAwareHelp(a.rootCmd.HelpFunc()))
 
 	pf := a.rootCmd.PersistentFlags()
+	pf.BoolVar(&a.flagNoSend, "no-send", false, "Disable email sending for this invocation; drafts and previews remain available")
 	pf.StringVar(&a.flagBackend, "backend", "", "Mail transport: native, legacy, or auto (default: native when available)")
 	pf.StringVarP(&a.flagAccount, "account", "a", "", "Mail.app account name (default: config, or the only account)")
 	pf.StringVarP(&a.flagMailbox, "mailbox", "m", "", "Mailbox name (default: config, or INBOX)")

@@ -9,6 +9,7 @@
 (root) --json
 (root) --mailbox (-m)
 (root) --no-color
+(root) --no-send
 (root) --plain
 (root) --quiet (-q)
 accounts

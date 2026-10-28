@@ -121,6 +121,8 @@ const agentsTopic = `Agents
   5. 'search' fails closed (exit 5) when a mailbox could not be searched; add
      --allow-partial only when incomplete results are acceptable.
   6. 'send' cannot be undone. Use --dry-run, or 'drafts create' for review.
+     Set 'config set send.enabled false' or pass --no-send to block sending,
+     including drafts send and TUI sends. Drafts and previews remain available.
   7. 'commands --json' lists every command with flags and agentNotes;
      '--agent --help' on any command prints the same record for that command.
   8. 'mail-app-cli skill' prints a SKILL.md with the full workflow; 'skill install'

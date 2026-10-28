@@ -12,14 +12,17 @@ import (
 func (a *application) buildConfigCommands() {
 	a.configCmd = &cobra.Command{
 		Use:   "config",
-		Short: "Read and write the default account, mailbox, and output format",
+		Short: "Read and write defaults and the sending restriction",
 		Long: `Settings live in ` + "`~/.config/mail-app-cli/config.json`" + ` (or $XDG_CONFIG_HOME, or
-$MAIL_APP_CLI_CONFIG). Each key resolves as flag > env > config > default.
+$MAIL_APP_CLI_CONFIG). Account, mailbox, and output resolve as flag > env > config > default.
+Sending is enabled by default. Either send.enabled=false or --no-send disables it;
+--no-send=false cannot override a configured restriction. There is no sending env override.
 
 Keys:
   account   default for --account       env MAIL_APP_CLI_ACCOUNT
   mailbox   default for --mailbox       env MAIL_APP_CLI_MAILBOX   (default INBOX)
-  output    auto | json | plain          env MAIL_APP_CLI_OUTPUT    (default auto)`,
+  output    auto | json | plain          env MAIL_APP_CLI_OUTPUT    (default auto)
+  send.enabled  true | false             --no-send can restrict    (default true)`,
 		Annotations: map[string]string{
 			annotationAgentNotes: "'config show' reports each value with its source, so you can tell a flag from a stale default.",
 		},

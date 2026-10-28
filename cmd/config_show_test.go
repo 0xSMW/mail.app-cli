@@ -14,10 +14,11 @@ import (
 
 func TestConfigShowPlainAndJSONPreserveValuesAndSources(t *testing.T) {
 	resolved := config.Resolved{
-		Account: config.Value{Value: "Work", Source: config.SourceFlag},
-		Mailbox: config.Value{Value: "Archive", Source: config.SourceEnv},
-		Output:  config.Value{Value: "auto", Source: config.SourceDefault},
-		Path:    "/fixture/config.json",
+		Account:     config.Value{Value: "Work", Source: config.SourceFlag},
+		Mailbox:     config.Value{Value: "Archive", Source: config.SourceEnv},
+		Output:      config.Value{Value: "auto", Source: config.SourceDefault},
+		SendEnabled: config.Value{Value: "true", Source: config.SourceDefault},
+		Path:        "/fixture/config.json",
 	}
 	for _, format := range []output.Format{output.FormatPlain, output.FormatJSON} {
 		t.Run(string(format), func(t *testing.T) {
@@ -41,7 +42,7 @@ func TestConfigShowPlainAndJSONPreserveValuesAndSources(t *testing.T) {
 				t.Fatalf("stderr=%q", stderr.String())
 			}
 			if format == output.FormatPlain {
-				want := "KEY VALUE SOURCE account Work flag mailbox Archive env output auto default file: /fixture/config.json"
+				want := "KEY VALUE SOURCE account Work flag mailbox Archive env output auto default send.enabled true default file: /fixture/config.json"
 				if got := strings.Join(strings.Fields(stdout.String()), " "); got != want {
 					t.Fatalf("plain config=%q, want %q", got, want)
 				}

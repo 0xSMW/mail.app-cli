@@ -1,0 +1,34 @@
+❯ mail-app-cli unsubscribe show 100246
+Message 100246 (Studio / INBOX)
+List: newsletter.substack.com
+  1. Manage preferences [html]
+     https://substack.com/preferences/demo-publication
+  2. Unsubscribe here [header, html, plain]
+     https://substack.com/unsubscribe/demo-publication
+One-click is advertised; authentication and endpoint behavior are unverified.
+
+❯ mail-app-cli unsubscribe scan INBOX --all-accounts \
+  --checkpoint ./unsubscribe.json
+3 unsubscribe groups from 8 inspected messages
+All messages observed in the requested mailboxes; sequential observations, not an atomic snapshot.
+Studio/INBOX: 5 enumerated, exhausted: true
+Personal/INBOX: 3 enumerated, exhausted: true
+
+1. newsletter.github.com
+   2 messages; latest 100244 (2026-10-22T10:45:00Z)
+  1. Unsubscribe here [header, html, plain]
+     https://github.com/unsubscribe/demo-publication
+
+2. newsletter.raycast.com
+   1 messages; latest 100242 (2026-10-20T03:00:00Z)
+  1. Unsubscribe here [header, html, plain]
+     https://raycast.com/unsubscribe/demo-publication
+
+3. newsletter.substack.com
+   2 messages; latest 100246 (2026-10-23T01:30:00Z)
+  1. Manage preferences [html]
+     https://substack.com/preferences/demo-publication
+  2. Unsubscribe here [header, html, plain]
+     https://substack.com/unsubscribe/demo-publication
+Coverage: 8 complete, 0 partial, 0 unavailable, 0 pending; complete: true
+Checkpoint: /private/tmp/mail-demo-4ly8zb03/unsubscribe/unsubscribe.json

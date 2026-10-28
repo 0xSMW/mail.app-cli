@@ -105,7 +105,7 @@ esac
 `), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			code, stdout, stderr := run(t, "drafts", "send", "42", "-a", "Exchange", "--dry-run", "--json")
+			code, stdout, stderr := run(t, "drafts", "send", "42", "-a", "Exchange", "--dry-run", "--no-send", "--json")
 			if contentType == "text/plain" {
 				if code != 0 || !strings.Contains(stdout, `"sender": "alias@example.test"`) || !strings.Contains(stdout, `"dryRun": true`) {
 					t.Fatalf("exit=%d stdout=%s stderr=%s", code, stdout, stderr)

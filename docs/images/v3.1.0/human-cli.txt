@@ -1,0 +1,16 @@
+❯ mail-app-cli inbox --limit 5
+ID      DATE              FROM               SUBJECT                               LOCATION
+100248  Oct 23 09:40  •⚑  Maya Chen          Ready for the autumn launch           Studio/INBOX
+100247  Oct 23 09:15  •   Northwind Billing  Your October invoice is ready         Studio/INBOX
+100246  Oct 23 08:30      Cedar Weekly       Small tools, better days              Studio/INBOX
+100245  Oct 23 08:10  •   Jamie Park         Coffee on Saturday?                   Personal/INBOX
+100244  Oct 22 17:45  •   Orbit Journal      A little inspiration for the weekend  Personal/INBOX
+
+❯ mail-app-cli links 100248
+Message 100248 (Studio/INBOX)
+
+Link destinations:
+  1. launch brief [html part 1.2]
+     https://studio.example.test/launch/brief
+  2. release checklist [html part 1.2]
+     https://studio.example.test/launch/checklist
