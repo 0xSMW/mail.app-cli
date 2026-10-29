@@ -55,6 +55,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 			and ` + indexLabelMembershipCondition("box.ID") + "))"
 		selects = append(selects, fmt.Sprintf(`select %d as VerificationScope,
 		(select ID from %s) as MailboxID,
+		(select Ambiguous from %s) as MailboxAmbiguous,
 		(select URL from %s) as MailboxURL,
 		(select json_group_array(json_object(
 			'ID', m.ROWID, 'Subject', `+indexSubjectExpression+`,
@@ -63,7 +64,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 			'MessageSize', m.size, 'Read', m.read))
 		from messages m join subjects s on s.ROWID = m.subject
 		join addresses a on a.ROWID = m.sender cross join %s box
-		where %s and m.deleted = 0 and (%s)) as Matches`, index, name, name, name, membership, verificationIdentityPredicate(conditions)))
+		where %s and m.deleted = 0 and (%s)) as Matches`, index, name, name, name, name, membership, verificationIdentityPredicate(conditions)))
 	}
 	if len(queried) == 0 {
 		return results
@@ -71,6 +72,7 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 	var rows []struct {
 		VerificationScope int
 		MailboxID         *int
+		MailboxAmbiguous  int
 		MailboxURL        string
 		Matches           string
 	}
@@ -95,6 +97,10 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		}
 		seen[row.VerificationScope] = true
 		scope := queried[row.VerificationScope]
+		if row.MailboxAmbiguous != 0 {
+			results[scope.key] = identityVerificationResult{err: fmt.Errorf("mailbox name is ambiguous in account: %s", scope.key.mailbox)}
+			continue
+		}
 		if row.MailboxID == nil || row.MailboxURL == "" {
 			continue
 		}

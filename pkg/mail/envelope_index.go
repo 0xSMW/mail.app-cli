@@ -24,6 +24,7 @@ type indexMailbox struct {
 	Name        string
 	TotalCount  int
 	UnreadCount int
+	Ambiguous   int
 }
 
 type indexMessage struct {
@@ -130,11 +131,9 @@ func mailboxLeafFromURL(rawURL string) string {
 	if decoded, err := url.PathUnescape(leaf); err == nil {
 		leaf = decoded
 	}
-	// The Envelope Index stores IMAP folder names in NFD (decomposed), but
-	// Mail.app's live Apple Events "pnam" property returns NFC (precomposed).
-	// Normalize here so every caller gets the same form Mail.app itself uses;
-	// otherwise a name with any combining diacritic never resolves.
-	return norm.NFC.String(leaf)
+	// Preserve the indexed spelling; canonical equivalence belongs at lookup
+	// boundaries, not in physical mailbox identities.
+	return leaf
 }
 
 func normalizeMailboxAlias(name string) string {
@@ -281,7 +280,7 @@ func indexAccountMailboxCondition(accountID string) string {
 func indexMailboxSelect(accountID, mailbox string, counts bool) string {
 	projection := "ROWID as ID, url as URL"
 	if counts {
-		projection += ", total_count, unread_count"
+		projection += ", total_count as TotalCount, unread_count as UnreadCount"
 	}
 	return indexMailboxCandidateSelect(accountID, mailbox, projection)
 }
@@ -298,23 +297,20 @@ func escapeMailboxURLPath(name string) string {
 	return strings.Join(components, "/")
 }
 
-// escapeMailboxURLPathForms returns the percent-escaped path for name in
-// every Unicode normalization form a caller-typed mailbox name needs to be
-// checked against. The Envelope Index stores IMAP folder names in whichever
-// form the account's IMAP server happened to report: observed as NFD
-// (decomposed) for at least one real account, and NFC (precomposed) is also
-// a normal stored form (existing fixtures in this package model that case).
-// A caller-typed name is usually NFC, so matching only one direction misses
-// real mailboxes. Returns a single form when NFC and NFD coincide, which is
-// every name without a combining mark (ASCII, by far the common case) and
-// keeps the SQL for that case exactly as before this existed.
+// Keep literal spelling first, including partially normalized names and paths,
+// then add the common canonical forms stored by IMAP servers. These variants
+// do not enumerate every possible partially composed Unicode spelling.
 func escapeMailboxURLPathForms(name string) []string {
-	nfc := norm.NFC.String(name)
-	nfd := norm.NFD.String(name)
-	if nfc == nfd {
-		return []string{escapeMailboxURLPath(nfc)}
+	var forms []string
+	seen := make(map[string]bool)
+	for _, spelling := range []string{name, norm.NFC.String(name), norm.NFD.String(name)} {
+		escaped := escapeMailboxURLPath(spelling)
+		if !seen[escaped] {
+			forms = append(forms, escaped)
+			seen[escaped] = true
+		}
 	}
-	return []string{escapeMailboxURLPath(nfc), escapeMailboxURLPath(nfd)}
+	return forms
 }
 
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
@@ -325,6 +321,20 @@ func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMai
 	account, err := c.accountByName(accountName)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(escapeMailboxURLPathForms(mailboxName)) > 1 && !isArchiveAlias(mailboxName) {
+		var rows []indexMailbox
+		if err := c.runEnvelopeIndexQuery(indexMailboxSelect(account.ID, mailboxName, true)+";", &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
+		}
+		if len(rows) == 0 {
+			return nil, false, nil
+		}
+		if rows[0].Ambiguous != 0 {
+			return nil, false, fmt.Errorf("mailbox name is ambiguous in account: %s", mailboxName)
+		}
+		rows[0].Name = mailboxLeafFromURL(rows[0].URL)
+		return &rows[0], true, nil
 	}
 
 	exact := indexMailboxExactCondition(account.ID, mailboxName)
@@ -787,11 +797,22 @@ func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
 
 func indexMailboxCandidateSelect(accountID, mailbox, projection string) string {
 	preference := indexMailboxPreference(accountID, mailbox)
+	if len(escapeMailboxURLPathForms(mailbox)) > 1 && !isArchiveAlias(mailbox) {
+		// Prefer the literal root, then equivalent roots, then literal nested
+		// paths, then equivalent nested paths. Only newly broadened fallback
+		// tiers reject ties; existing literal nested-leaf ordering is retained.
+		path := indexMailboxPath(accountID)
+		escaped := escapeMailboxURLPath(mailbox)
+		literalExact := path + " = " + sqlQuote(escaped)
+		literalBroad := path + " like " + sqlQuote("%/"+escapeSQLLikePattern(escaped)) + ` escape '\'`
+		rank := "case when " + literalExact + " then 0 when " + preference.exact + " then 1 when " + literalBroad + " then 2 else 3 end"
+		return "select *, case when MailboxRank in (1, 3) and count(*) over (partition by MailboxRank) > 1 then 1 else 0 end as Ambiguous from (select " + projection + ", " + rank + " as MailboxRank from mailboxes where " + preference.exact + " or " + preference.broad + ") order by MailboxRank, ID limit 1"
+	}
 	where := preference.exact + " or " + preference.broad
 	order := "case when " + preference.exact + " then 0 else 3 end"
 	if preference.literal != "" {
 		where += " or " + preference.literal + " or " + preference.nested
 		order = "case when " + preference.exact + " then 0 when " + preference.literal + " then 1 when " + preference.nested + " then 2 else 3 end"
 	}
-	return "select " + projection + " from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
+	return "select " + projection + ", 0 as Ambiguous from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
 }

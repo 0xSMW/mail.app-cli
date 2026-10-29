@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/gmail"
+	"golang.org/x/text/unicode/norm"
 )
 
 // GmailLabelRequest changes one explicit provider label. Mailbox and MessageID
@@ -434,7 +435,7 @@ func (w *GmailLabelWorkflow) Change(ctx context.Context, r GmailLabelRequest) (G
 		out.ProviderConfirmed = true
 		out.MailStatus = "pending"
 		out.MailAfter = out.MailBefore
-		if gmailMailStateMatches(*out.MailBefore, *out.MailBefore, out.Label, out.Add) {
+		if gmailMailLabelNamesUnambiguous(out.Labels) && gmailMailStateMatches(*out.MailBefore, *out.MailBefore, out.Label, out.Add) {
 			out.MailStatus = "verified"
 		}
 		if err := journal.Record("gmail_label_noop", map[string]any{"result": out}); err != nil {
@@ -483,7 +484,7 @@ func (w *GmailLabelWorkflow) observe(ctx context.Context, out GmailLabelResult) 
 	// Read Mail independently after dispatch even when provider readback fails.
 	if after, snapshotErr := w.snapshot(ctx, out.Account, out.Identity); snapshotErr == nil {
 		out.MailAfter = &after
-		if out.MailBefore != nil && gmailMailStateMatches(*out.MailBefore, after, out.Label, out.Add) {
+		if out.MailBefore != nil && gmailMailLabelNamesUnambiguous(out.Labels) && gmailMailStateMatches(*out.MailBefore, after, out.Label, out.Add) {
 			out.MailStatus = "verified"
 		}
 	}
@@ -514,10 +515,45 @@ func (w *GmailLabelWorkflow) observe(ctx context.Context, out GmailLabelResult) 
 	return out, nil
 }
 
+// Mail exposes membership names, not provider IDs. Distinct provider labels
+// sharing a canonical name cannot be independently verified from those names.
+func gmailMailLabelNamesUnambiguous(labels []gmail.Label) bool {
+	ids := make(map[string]string, len(labels))
+	for _, label := range labels {
+		name := norm.NFC.String(label.Name)
+		if id, exists := ids[name]; exists && id != label.ID {
+			return false
+		}
+		ids[name] = label.ID
+	}
+	return true
+}
+
 func gmailMailStateMatches(before, after GmailLabelSnapshot, label gmail.Label, add bool) bool {
-	name := label.Name
+	// These values are mailbox names, unlike the literal provider IDs used
+	// by sameLabels elsewhere. Compare names canonically without rewriting
+	// snapshot evidence or weakening case and compatibility distinctions.
+	canonicalNames := func(names []string) ([]string, bool) {
+		out := make([]string, len(names))
+		spellings := make(map[string]string, len(names))
+		for i, name := range names {
+			out[i] = norm.NFC.String(name)
+			if previous, exists := spellings[out[i]]; exists && previous != name {
+				// Distinct physical memberships must not disappear in set deduplication.
+				return nil, false
+			}
+			spellings[out[i]] = name
+		}
+		return out, true
+	}
+	beforeNames, beforeUnique := canonicalNames(before.Memberships)
+	afterNames, afterUnique := canonicalNames(after.Memberships)
+	if !beforeUnique || !afterUnique {
+		return false
+	}
+	name := norm.NFC.String(label.Name)
 	if label.ID == "IMPORTANT" {
 		name = "Important"
 	}
-	return before.Read == after.Read && sameLabels(after.Memberships, desiredLabels(before.Memberships, name, add))
+	return before.Read == after.Read && sameLabels(afterNames, desiredLabels(beforeNames, name, add))
 }
