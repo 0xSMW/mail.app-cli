@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/mailindex"
+	"golang.org/x/text/unicode/norm"
 )
 
 type indexMailbox struct {
@@ -129,7 +130,11 @@ func mailboxLeafFromURL(rawURL string) string {
 	if decoded, err := url.PathUnescape(leaf); err == nil {
 		leaf = decoded
 	}
-	return leaf
+	// The Envelope Index stores IMAP folder names in NFD (decomposed), but
+	// Mail.app's live Apple Events "pnam" property returns NFC (precomposed).
+	// Normalize here so every caller gets the same form Mail.app itself uses;
+	// otherwise a name with any combining diacritic never resolves.
+	return norm.NFC.String(leaf)
 }
 
 func normalizeMailboxAlias(name string) string {
@@ -293,6 +298,25 @@ func escapeMailboxURLPath(name string) string {
 	return strings.Join(components, "/")
 }
 
+// escapeMailboxURLPathForms returns the percent-escaped path for name in
+// every Unicode normalization form a caller-typed mailbox name needs to be
+// checked against. The Envelope Index stores IMAP folder names in whichever
+// form the account's IMAP server happened to report: observed as NFD
+// (decomposed) for at least one real account, and NFC (precomposed) is also
+// a normal stored form (existing fixtures in this package model that case).
+// A caller-typed name is usually NFC, so matching only one direction misses
+// real mailboxes. Returns a single form when NFC and NFD coincide, which is
+// every name without a combining mark (ASCII, by far the common case) and
+// keeps the SQL for that case exactly as before this existed.
+func escapeMailboxURLPathForms(name string) []string {
+	nfc := norm.NFC.String(name)
+	nfd := norm.NFD.String(name)
+	if nfc == nfd {
+		return []string{escapeMailboxURLPath(nfc)}
+	}
+	return []string{escapeMailboxURLPath(nfc), escapeMailboxURLPath(nfd)}
+}
+
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
 	if accountName == "" || mailboxName == "" {
 		return nil, false, nil
@@ -349,12 +373,11 @@ limit 1;
 	return c.runEnvelopeIndexQuery(query, rows)
 }
 
-func escapedMailboxLeaf(mailboxName string) string {
-	escapedName := escapeMailboxURLPath(mailboxName)
+func escapedMailboxLeafForms(mailboxName string) []string {
 	if isArchiveAlias(mailboxName) {
-		return "All%20Mail"
+		return []string{"All%20Mail"}
 	}
-	return escapedName
+	return escapeMailboxURLPathForms(mailboxName)
 }
 
 func (c *Client) getMailboxesFromIndex(account Account) ([]Mailbox, bool, error) {
@@ -724,16 +747,37 @@ func indexMailboxPreference(accountID, mailbox string) indexMailboxCandidates {
 }
 
 func indexMailboxExactCondition(accountID, mailbox string) string {
-	exact := strings.TrimPrefix(indexMailboxURLPattern(accountID, mailbox), "imap://"+accountID+"/")
-	comparison := indexMailboxPath(accountID) + " = " + sqlQuote(exact)
-	if strings.EqualFold(mailbox, "INBOX") {
-		comparison += " collate nocase"
+	var forms []string
+	if isArchiveAlias(mailbox) {
+		forms = []string{"%5BGmail%5D/All%20Mail"}
+	} else {
+		forms = escapeMailboxURLPathForms(mailbox)
+	}
+	comparisons := make([]string, len(forms))
+	for i, escaped := range forms {
+		comparisons[i] = indexMailboxPath(accountID) + " = " + sqlQuote(escaped)
+		if strings.EqualFold(mailbox, "INBOX") {
+			comparisons[i] += " collate nocase"
+		}
+	}
+	comparison := comparisons[0]
+	if len(comparisons) > 1 {
+		comparison = "(" + strings.Join(comparisons, " or ") + ")"
 	}
 	return "(" + indexAccountMailboxCondition(accountID) + " and " + comparison + ")"
 }
 
 func indexMailboxBroadCondition(accountID, mailbox string) string {
-	return "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(escapedMailboxLeaf(mailbox))) + ` escape '\')`
+	leaves := escapedMailboxLeafForms(mailbox)
+	clauses := make([]string, len(leaves))
+	for i, leaf := range leaves {
+		clauses[i] = indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(leaf)) + ` escape '\'`
+	}
+	clause := clauses[0]
+	if len(clauses) > 1 {
+		clause = "(" + strings.Join(clauses, " or ") + ")"
+	}
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + clause + ")"
 }
 
 func indexMailboxArchiveConditions(accountID string) (literal, nested string) {

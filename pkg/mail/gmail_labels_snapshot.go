@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
 // Keep the index's exact sender spelling for its guarded SQL tuple. Mail's
@@ -112,9 +114,14 @@ func (c *Client) gmailLabelSnapshotWithRead(account string, id StableIdentity, r
 }
 
 func gmailSnapshotMailbox(raw string) string {
+	// This primary branch decodes inline instead of calling
+	// mailboxLeafFromURL (it keeps the whole nested path, not just the leaf),
+	// so it needs its own NFC normalization: the Envelope Index stores this
+	// path in NFD, but Mail.app's live Apple Events lookups expect NFC (see
+	// mailboxLeafFromURL).
 	if u, err := url.Parse(raw); err == nil {
 		if name, err := url.PathUnescape(strings.TrimPrefix(u.EscapedPath(), "/")); err == nil {
-			return name
+			return norm.NFC.String(name)
 		}
 	}
 	return mailboxLeafFromURL(raw)
