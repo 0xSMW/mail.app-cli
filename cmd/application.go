@@ -27,6 +27,8 @@ type application struct {
 	configLoadAttempted     bool
 	gmailAccountEmails      func(ctx context.Context, account string) ([]string, error)
 	gmailProbe              func(ctx context.Context, email string) gmail.AddressStatus
+	messageLocator          func(ids []string) (map[string]mail.MessageLocation, error)                  // test seam; nil reads the Envelope Index
+	gmailLabelApply         func(cmd *cobra.Command, account string, show bool) (gmailLabelApply, error) // test seam; nil builds the Gmail workflow
 	accountsCmd             *cobra.Command
 	accountsListCmd         *cobra.Command
 	attachmentsCmd          *cobra.Command

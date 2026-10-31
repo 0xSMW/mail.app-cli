@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/0xSMW/mail.app-cli/v3/internal/config"
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
+	"github.com/spf13/cobra"
 )
 
 func labelBatchApp(t *testing.T, jq string) (*application, *bytes.Buffer, *bytes.Buffer) {
@@ -259,5 +261,140 @@ func TestLabelsShowSeveralIDsWithJQ(t *testing.T) {
 	batch, err := runGmailLabelBatch(context.Background(), "show", "ignored", false, labelBatchRequests("12345", "12346"), apply)
 	if err != nil || batch.Label != "" || batch.Action != "show" || batch.Succeeded != 2 {
 		t.Fatalf("batch=%+v error=%v", batch, err)
+	}
+}
+
+func TestLabelsSeveralIDsVerifiedChangeWithErrorIsNotSucceeded(t *testing.T) {
+	a, stdout, stderr := labelBatchApp(t, "")
+	var calls []string
+	recordErr := errors.New("record Gmail label result: no space left on device")
+	apply := fakeLabelApply(&calls, map[string]mail.GmailLabelResult{
+		"12345": {Status: "changed_verified", ProviderConfirmed: true, MailStatus: "verified", ReceiptPath: "/private/receipt-1.jsonl"},
+	}, map[string]error{"12345": recordErr})
+	err := a.runGmailLabelRequests(context.Background(), "remove", "IMPORTANT", false, labelBatchRequests("12345", "12346"), nil, apply)
+	failure := clierr.Classify(err)
+	if failure.Code != clierr.CodeMutationFailed || !failure.Reported || !errors.Is(err, recordErr) || !strings.Contains(failure.Hint, "labels reconcile") {
+		t.Fatalf("error = %+v", failure)
+	}
+	if strings.Join(calls, ",") != "12345" {
+		t.Fatalf("later IDs were touched: %v", calls)
+	}
+	envelope := decodeLabelBatch(t, stdout)
+	data := envelope.Data
+	if envelope.OK || envelope.Code != "mutation_failed" || envelope.ExitCode != 6 || data.Attempted != 1 || data.Succeeded != 0 || data.Failed != 1 || data.NotAttempted != 1 {
+		t.Fatalf("envelope=%+v", envelope)
+	}
+	applied := data.Items[0]
+	if applied.Status != "changed_verified" || applied.ReceiptPath != "/private/receipt-1.jsonl" || applied.Error == nil || *applied.Error != recordErr.Error() || !*applied.ProviderConfirmed {
+		t.Fatalf("applied item = %+v", applied)
+	}
+	if data.Items[1].MessageID != "12346" || data.Items[1].Status != "not_attempted" {
+		t.Fatalf("next item = %+v", data.Items[1])
+	}
+	if envelope.Summary != "Gmail labels: 2 messages, 1 failed, 1 not_attempted" || stderr.Len() != 0 {
+		t.Fatalf("summary=%q stderr=%q", envelope.Summary, stderr.String())
+	}
+}
+
+type labelsCLIRun struct {
+	code     int
+	stdout   string
+	stderr   string
+	located  [][]string
+	requests []mail.GmailLabelRequest
+	shows    []bool
+}
+
+// labelsCLI runs one invocation through cobra with a fake Envelope Index and a
+// fake label workflow, so the test needs neither Mail nor Gmail.
+func labelsCLI(t *testing.T, accounts map[string]string, args ...string) labelsCLIRun {
+	t.Helper()
+	t.Setenv(config.EnvConfigPath, filepath.Join(t.TempDir(), "config.json"))
+	t.Setenv(config.EnvAccount, "")
+	t.Setenv(config.EnvMailbox, "")
+	t.Setenv(config.EnvOutput, "")
+	var result labelsCLIRun
+	a := newApplication()
+	a.messageLocator = func(ids []string) (map[string]mail.MessageLocation, error) {
+		result.located = append(result.located, append([]string(nil), ids...))
+		out := map[string]mail.MessageLocation{}
+		for _, id := range ids {
+			if account, ok := accounts[id]; ok {
+				out[id] = mail.MessageLocation{ID: id, Account: account, Mailbox: "INBOX"}
+			}
+		}
+		return out, nil
+	}
+	a.gmailLabelApply = func(_ *cobra.Command, account string, show bool) (gmailLabelApply, error) {
+		result.shows = append(result.shows, show)
+		return func(_ context.Context, r mail.GmailLabelRequest) (mail.GmailLabelResult, error) {
+			if r.Account != account {
+				t.Errorf("request account %q, workflow account %q", r.Account, account)
+			}
+			result.requests = append(result.requests, r)
+			status := "observed"
+			if !show {
+				status = "dry_run"
+			}
+			return mail.GmailLabelResult{Status: status, ProviderConfirmed: true, MailStatus: "observed", Account: r.Account}, nil
+		}, nil
+	}
+	var out, errOut bytes.Buffer
+	result.code = a.run(args, &out, &errOut)
+	result.stdout, result.stderr = out.String(), errOut.String()
+	return result
+}
+
+func TestLabelsShowSeveralIDsFromCommandLine(t *testing.T) {
+	accounts := map[string]string{"12345": "Example Account", "12346": "Example Account"}
+	got := labelsCLI(t, accounts, "labels", "show", "12346", "12345", "--json")
+	if got.code != 0 || got.stderr != "" {
+		t.Fatalf("exit=%d stderr=%q", got.code, got.stderr)
+	}
+	if len(got.located) != 1 || strings.Join(got.located[0], ",") != "12346,12345" || len(got.shows) != 1 || !got.shows[0] {
+		t.Fatalf("located=%v shows=%v", got.located, got.shows)
+	}
+	requests := got.requests
+	if len(requests) != 2 || requests[0].MessageID != "12346" || requests[1].MessageID != "12345" || requests[0].Account != "Example Account" || requests[0].Mailbox != "INBOX" {
+		t.Fatalf("requests=%+v", requests)
+	}
+	var envelope labelBatchEnvelope
+	if err := json.Unmarshal([]byte(got.stdout), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	data := envelope.Data
+	if !envelope.OK || data.Action != "show" || data.Label != "" || data.Succeeded != 2 || data.Items[0].MessageID != "12346" || data.Items[1].MessageID != "12345" {
+		t.Fatalf("envelope=%s", got.stdout)
+	}
+}
+
+func TestLabelsSeveralIDsFromCommandLineRequireOneAccount(t *testing.T) {
+	accounts := map[string]string{"12345": "Example Account", "12346": "Other Account"}
+	got := labelsCLI(t, accounts, "labels", "show", "12345", "12346", "--json")
+	if got.code != 1 || got.stdout != "" || !strings.Contains(got.stderr, "once per account") || len(got.requests) != 0 || len(got.shows) != 0 {
+		t.Fatalf("run=%+v", got)
+	}
+}
+
+func TestLabelsRemoveSeveralIDsFromCommandLineSetsLabelAndDryRun(t *testing.T) {
+	accounts := map[string]string{"12345": "Example Account", "12346": "Example Account"}
+	got := labelsCLI(t, accounts, "labels", "remove", "12345", "12346", "--label", "IMPORTANT", "--dry-run", "--json")
+	if got.code != 0 || got.stderr != "" || len(got.shows) != 1 || got.shows[0] {
+		t.Fatalf("exit=%d stderr=%q shows=%v", got.code, got.stderr, got.shows)
+	}
+	if len(got.requests) != 2 {
+		t.Fatalf("requests=%+v", got.requests)
+	}
+	for i, id := range []string{"12345", "12346"} {
+		if r := got.requests[i]; r.MessageID != id || r.Label != "IMPORTANT" || !r.DryRun || r.Add {
+			t.Fatalf("request %d = %+v", i, r)
+		}
+	}
+	var envelope labelBatchEnvelope
+	if err := json.Unmarshal([]byte(got.stdout), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if data := envelope.Data; !envelope.OK || data.Action != "remove" || data.Label != "IMPORTANT" || !data.DryRun || data.Succeeded != 2 {
+		t.Fatalf("envelope=%s", got.stdout)
 	}
 }

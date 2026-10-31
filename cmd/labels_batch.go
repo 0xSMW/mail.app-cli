@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
+	"github.com/spf13/cobra"
 )
 
 // gmailLabelApply runs one label request. It is GmailLabelWorkflow.Show or
@@ -42,12 +44,35 @@ type gmailLabelBatchItem struct {
 
 const gmailLabelNotAttempted = "not_attempted"
 
+// gmailLabelItemSucceeded counts an item as succeeded only when it has no
+// error. A verified change whose final receipt write failed keeps its status
+// but is a failure.
+func gmailLabelItemSucceeded(item gmailLabelBatchItem) bool {
+	return (item.Error == nil || *item.Error == "") && gmailLabelStatusSucceeded(item.Status)
+}
+
 func gmailLabelStatusSucceeded(status string) bool {
 	switch status {
 	case "changed_verified", "noop", "dry_run", "observed":
 		return true
 	}
 	return false
+}
+
+// gmailLabelApplyFor builds the workflow once for the account and returns its
+// Show or Change method.
+func (a *application) gmailLabelApplyFor(cmd *cobra.Command, account string, show bool) (gmailLabelApply, error) {
+	if a.gmailLabelApply != nil {
+		return a.gmailLabelApply(cmd, account, show)
+	}
+	workflow, err := a.gmailLabelsWorkflow(cmd, account)
+	if err != nil {
+		return nil, err
+	}
+	if show {
+		return workflow.Show, nil
+	}
+	return workflow.Change, nil
 }
 
 // gmailLabelRequests resolves every ID before any provider work. Resolution
@@ -109,21 +134,29 @@ func runGmailLabelBatch(ctx context.Context, action, label string, dryRun bool, 
 		}
 		result, err := apply(ctx, request)
 		batch.Attempted++
+		if err == nil && result.Error != "" {
+			err = errors.New(result.Error)
+		}
 		if err == nil && !gmailLabelStatusSucceeded(result.Status) {
 			err = fmt.Errorf("Gmail label request ended with status %q", result.Status)
 		}
 		if err != nil {
+			// Status and receiptPath stay as returned: a verified change whose
+			// receipt write failed still applied, and its receipt stays visible.
 			result.Error = err.Error()
 			failure = err
-			batch.Failed++
-		} else {
-			batch.Succeeded++
 		}
 		confirmed, message := result.ProviderConfirmed, result.Error
-		batch.Items = append(batch.Items, gmailLabelBatchItem{
+		item := gmailLabelBatchItem{
 			MessageID: request.MessageID, Status: result.Status, ProviderConfirmed: &confirmed,
 			MailStatus: result.MailStatus, ReceiptPath: result.ReceiptPath, Error: &message, Result: &result,
-		})
+		}
+		if gmailLabelItemSucceeded(item) {
+			batch.Succeeded++
+		} else {
+			batch.Failed++
+		}
+		batch.Items = append(batch.Items, item)
 	}
 	return batch, failure
 }
@@ -162,7 +195,7 @@ func gmailLabelBatchSummary(batch gmailLabelBatchResult) string {
 	var order []string
 	counts := map[string]int{}
 	for _, item := range batch.Items {
-		if !gmailLabelStatusSucceeded(item.Status) {
+		if !gmailLabelItemSucceeded(item) {
 			continue
 		}
 		if counts[item.Status] == 0 {

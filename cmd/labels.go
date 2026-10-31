@@ -53,11 +53,11 @@ func (a *application) newLabelsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			workflow, err := a.gmailLabelsWorkflow(cmd, requests[0].Account)
+			apply, err := a.gmailLabelApplyFor(cmd, requests[0].Account, true)
 			if err != nil {
 				return err
 			}
-			return a.runGmailLabelRequests(cmd.Context(), "show", "", false, requests, notices, workflow.Show)
+			return a.runGmailLabelRequests(cmd.Context(), "show", "", false, requests, notices, apply)
 		},
 	}
 	labels.AddCommand(list, show, a.newLabelChangeCmd(true), a.newLabelChangeCmd(false), a.newLabelReconcileCmd(), a.newLabelsAuthCmd())
@@ -111,11 +111,11 @@ func (a *application) newLabelChangeCmd(add bool) *cobra.Command {
 			for i := range requests {
 				requests[i].Label, requests[i].Add, requests[i].DryRun = label, add, dryRun
 			}
-			workflow, err := a.gmailLabelsWorkflow(cmd, requests[0].Account)
+			apply, err := a.gmailLabelApplyFor(cmd, requests[0].Account, false)
 			if err != nil {
 				return err
 			}
-			return a.runGmailLabelRequests(cmd.Context(), verb, label, dryRun, requests, notices, workflow.Change)
+			return a.runGmailLabelRequests(cmd.Context(), verb, label, dryRun, requests, notices, apply)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Canonical Gmail label ID or exact full name (required)")
