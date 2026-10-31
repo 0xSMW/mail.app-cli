@@ -96,7 +96,7 @@ All Mail presence alone does not prove INBOX absence.
 4. After a mutation from outside the CLI, add `--no-cache` to `messages list`; its results are cached for five minutes.
 5. Gmail: archive means "move to All Mail". A message already in All Mail is reported as `status: skipped` with `error: "already in All Mail"`, counted in `skipped`, and the command exits 0; nothing was relocated. `--mark-read` alone does not change skipped items. Add `--mark-read-on-skip` with `--mark-read` to explicitly mark and verify already-archived records.
 6. Moving a message (archive, delete, move) makes Mail.app assign it a new ID in the destination. The receipt reports the old ID; to touch the message again, find it with `search` or `recent search`. Don't chain a second mutation on the same ID after a move.
-7. Gmail archive and move change mailbox membership only. They never remove Important or a user label. Use `labels remove` for that. It needs its own Gmail credentials, separate from Mail.app's sign-in; without them it exits 3 with a hint that names the command to connect them. Several IDs must be in one account, run in order, and stop at the first failure.
+7. Gmail archive removes Inbox membership while preserving Important and user labels. A move may remove its source user-label membership. To remove only Important or a specific user label, use `labels remove`. It needs its own Gmail credentials, separate from Mail.app's sign-in; without them it exits 3 with a hint that names the command to connect them. Several IDs must be in one account, run in order, and stop at the first failure.
 
 ## Migration from 1.x
 
