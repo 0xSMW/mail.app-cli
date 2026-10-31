@@ -68,6 +68,7 @@ delete --settle
 delete --verify
 delete --verify-budget
 doctor
+doctor --gmail
 doctor --help (-h)
 drafts
 drafts --help (-h)
@@ -162,6 +163,8 @@ labels auth connect --help (-h)
 labels auth import
 labels auth import --credentials
 labels auth import --help (-h)
+labels auth status
+labels auth status --help (-h)
 labels list
 labels list --help (-h)
 labels reconcile

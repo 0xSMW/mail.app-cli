@@ -49,12 +49,21 @@ func TestRefreshEstablishesScopeAndCachesToken(t *testing.T) {
 }
 
 func TestRefreshRejectsInsufficientScopeAndRedactsFailure(t *testing.T) {
-	for _, mode := range []string{"scope", "missing-scope", "failure"} {
+	for _, mode := range []string{"scope", "missing-scope", "failure", "described-failure", "described-server-failure"} {
 		t.Run(mode, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if mode == "failure" {
+				switch mode {
+				case "failure":
 					w.WriteHeader(400)
 					io.WriteString(w, "refresh-secret client-secret private response")
+					return
+				case "described-failure":
+					w.WriteHeader(400)
+					io.WriteString(w, `{"error":"invalid_grant","error_description":"private description for refresh-secret","error_uri":"https://private.example.com/secret"}`)
+					return
+				case "described-server-failure":
+					w.WriteHeader(503)
+					io.WriteString(w, `{"error":"Private Upstream Detail","error_description":"client-secret private"}`)
 					return
 				}
 				scope := "gmail.readonly"
@@ -69,8 +78,16 @@ func TestRefreshRejectsInsufficientScopeAndRedactsFailure(t *testing.T) {
 			source := NewCredentialTokenSource(credentials, server.Client())
 			source.tokenURL = server.URL
 			token, err := source.Token(context.Background())
-			if err == nil || token != "" || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private") {
+			if err == nil || token != "" || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "private") || strings.Contains(strings.ToLower(err.Error()), "description") || strings.Contains(err.Error(), "Upstream") {
 				t.Fatalf("unsafe scope/error: %q %v", token, err)
+			}
+			want := map[string]string{
+				"failure":                  "Gmail OAuth token exchange failed (HTTP 400)",
+				"described-failure":        "Gmail OAuth token exchange failed (HTTP 400, invalid_grant)",
+				"described-server-failure": "Gmail OAuth token exchange failed (HTTP 503)",
+			}[mode]
+			if want != "" && err.Error() != want {
+				t.Fatalf("token error = %q, want %q", err, want)
 			}
 		})
 	}

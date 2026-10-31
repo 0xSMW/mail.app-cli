@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,7 @@ import (
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/gmail"
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
@@ -34,6 +37,14 @@ type doctorResult struct {
 	LiveProbeAvailable        bool   `json:"liveProbeAvailable"`
 	LiveProbeError            string `json:"liveProbeError,omitempty"`
 	Healthy                   bool   `json:"healthy"`
+	// Gmail is set only by doctor --gmail. Healthy stays bridge-only.
+	Gmail        *gmailAuthReport `json:"gmail,omitempty"`
+	GmailHealthy *bool            `json:"gmailHealthy,omitempty"`
+}
+
+// doctorHealthy combines the bridge result with the optional Gmail check.
+func doctorHealthy(r doctorResult) bool {
+	return r.Healthy && (r.GmailHealthy == nil || *r.GmailHealthy)
 }
 
 type doctorClient interface {
@@ -124,9 +135,16 @@ func renderDoctor(r doctorResult) func(*output.Printer) {
 			check("Envelope Index", r.EnvelopeIndexAvailable, firstNonEmpty(r.EnvelopeIndexError, "fast reads available")),
 			check("live probe", r.LiveProbeAvailable, r.LiveProbeError),
 		}
+		if r.Gmail != nil && r.GmailHealthy != nil {
+			detail := string(r.Gmail.Status)
+			if r.Gmail.ProviderEmail != "" {
+				detail += " (" + r.Gmail.ProviderEmail + ")"
+			}
+			rows = append(rows, check("Gmail auth", *r.GmailHealthy, detail))
+		}
 		p.Table([]string{"CHECK", "STATUS", "DETAIL"}, rows)
 		p.Blank()
-		if r.Healthy {
+		if doctorHealthy(r) {
 			p.Line("%s", p.Green("healthy"))
 		} else {
 			p.Line("%s", p.Red("not healthy"))
@@ -152,6 +170,13 @@ func mailProcessDetail(r doctorResult) string {
 
 func doctorFailure(r doctorResult) *clierr.Error {
 	if r.Healthy {
+		if r.GmailHealthy != nil && !*r.GmailHealthy && r.Gmail != nil {
+			hint := r.Gmail.Hint
+			if r.Gmail.Status == authAmbiguous {
+				hint = "choose one with --email on 'labels' commands; run 'mail-app-cli labels auth status' to see each address"
+			}
+			return clierr.New(clierr.CodeUnavailable, fmt.Sprintf("Gmail authorization for Mail.app account %q: %s", r.Gmail.Account, r.Gmail.Status)).WithHint(hint)
+		}
 		return nil
 	}
 	if r.MailRunning != nil && *r.MailRunning &&
@@ -174,20 +199,56 @@ func firstNonEmpty(values ...string) string {
 }
 
 func (a *application) buildDoctorCommands() {
+	var checkGmail bool
 	a.doctorCmd = &cobra.Command{
 		Use:   "doctor",
 		Short: "Check Mail.app access, permissions, and index availability",
 		Annotations: map[string]string{
-			annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted.",
+			annotationAgentNotes: "Run this first when any command exits 3. healthy covers the live Mail.app bridge only; envelopeIndexAvailable=false with healthy=true means reads are slow and cross-mailbox search is refused until Full Disk Access is granted. --gmail also checks the selected account's stored Gmail credentials and adds gmail and gmailHealthy; the command fails when either check fails. 'labels auth status' runs the Gmail check alone.",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			result := diagnose(a.mailClient, version, os.Executable)
-			summary := "healthy"
-			if !result.Healthy {
-				summary = "not healthy"
-			}
-			failure := doctorFailure(result)
-			return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: failure})
+			return a.runDoctor(cmd.Context(), a.mailClient, checkGmail)
 		},
 	}
+	a.doctorCmd.Flags().BoolVar(&checkGmail, "gmail", false, "Also check the selected account's stored Gmail label credentials")
+}
+
+func (a *application) runDoctor(ctx context.Context, client doctorClient, checkGmail bool) error {
+	result := diagnose(client, version, os.Executable)
+	if checkGmail {
+		report, err := a.doctorGmail(ctx)
+		if err != nil {
+			return err
+		}
+		healthy := report.Status == gmail.AuthConnected
+		result.Gmail, result.GmailHealthy = &report, &healthy
+	}
+	summary := "healthy"
+	if !doctorHealthy(result) {
+		summary = "not healthy"
+	}
+	return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: doctorFailure(result)})
+}
+
+// doctorGmail returns only usage errors. A Mail.app failure becomes the
+// report detail so the bridge diagnostics are still written.
+func (a *application) doctorGmail(ctx context.Context) (gmailAuthReport, error) {
+	account, err := a.requireAccount()
+	if err == nil {
+		var report gmailAuthReport
+		report, err = a.gmailAuthStatus(ctx, account)
+		if err == nil {
+			return report, nil
+		}
+	}
+	var typed *clierr.Error
+	if errors.As(err, &typed) && typed.Code == clierr.CodeUsage {
+		return gmailAuthReport{}, err
+	}
+	hint := "fix the failed Mail.app checks, then rerun 'mail-app-cli doctor --gmail'"
+	var preflight *mail.GmailLabelError
+	if errors.As(err, &preflight) && preflight.Hint != "" {
+		hint = preflight.Hint
+	}
+	return gmailAuthReport{Account: account, Status: gmail.AuthUnknown, Detail: err.Error(), Hint: hint, Addresses: []gmail.AddressStatus{}}, nil
 }

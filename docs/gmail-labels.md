@@ -51,6 +51,35 @@ The import format uses standard OAuth field names:
 
 `client_id` and `refresh_token` are required. `client_secret` is optional for clients that do not require one. Optional fields include `access_token` and `expiry` (RFC 3339). If `scope` is omitted, a fresh OAuth refresh response must establish the required scope. The standard `authorized_user` format's extra `type` field is accepted. Keep the file private; pass its path, never token values, on the command line. Commands return account and connection status without exposing credentials.
 
+## Check authorization
+
+Mail.app being signed in to Google does not authorize this CLI. The `labels` commands use their own OAuth credentials, stored in macOS Keychain by `labels auth connect` or `labels auth import`. To see whether those credentials work, run either command:
+
+```sh
+mail-app-cli labels auth status -a "Work" --json
+mail-app-cli doctor --gmail -a "Work"
+```
+
+`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google and reads the Gmail profile. The command never prints tokens or secrets. It exits 0 only when exactly one address is `connected`. When more than one address is connected, the account status is `ambiguous_credentials`; pass `--email` to choose. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
+
+| Status | Meaning | Recovery |
+| --- | --- | --- |
+| `connected` | Google accepted the refresh token and the Gmail profile matches the address. | None. |
+| `credentials_missing` | Keychain has no credentials for this address. | Run `labels auth connect` or `labels auth import` for the address. |
+| `keychain_unavailable` | This build cannot read macOS Keychain. | Use a macOS build made with cgo. |
+| `keychain_access` | Keychain refused the read, often because it is locked or the binary's signature changed. | Unlock the login Keychain and use the installed signed build. Reconnect from that build if access is still refused. |
+| `credentials_invalid` | The stored credentials cannot be parsed or lack a required field. | Reconnect or import a valid credential file. |
+| `scope_insufficient` | The credentials do not grant `gmail.modify` or full mail scope. | Reconnect and grant `gmail.modify`. |
+| `token_rejected` | Google rejected the refresh token (`invalid_grant`, another 400 or 401 from the token endpoint, or a Gmail API 401). | Reconnect or import new credentials. |
+| `client_rejected` | Google rejected the OAuth client (`invalid_client` or `unauthorized_client`). | Check that the desktop OAuth client still exists, then reconnect with its client secret file. |
+| `access_denied` | The Gmail API returned 403. | Enable the Gmail API for the OAuth client's project, or connect the correct account. |
+| `network` | Google could not be reached or the request timed out. | Check the network connection and retry. |
+| `provider_error` | Google returned a 5xx, a 429, or a response the CLI could not use. | Retry later. |
+| `account_mismatch` | The credentials work but belong to a different Google account, such as `other@example.com` for `primary@example.com`. | Connect credentials for an address configured on the selected Mail.app account. |
+| `unknown` | Any other failure. With `doctor --gmail`, this includes a Mail.app error that stopped the check. | Read `detail`. |
+
+When several addresses fail, the account status is the first failure other than `credentials_missing`, so a missing alias does not hide a rejected token on the primary address. Other `labels` commands use the same statuses to choose their error hints.
+
 ## Inspect and change labels
 
 ```sh
