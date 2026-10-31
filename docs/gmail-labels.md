@@ -60,13 +60,13 @@ mail-app-cli labels auth status -a "Work" --json
 mail-app-cli doctor --gmail -a "Work"
 ```
 
-`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google for a new access token, saves it to Keychain the same way a label command does, and reads the Gmail profile. A Keychain write problem therefore shows up as `keychain_access`, as it would for a label command. The command never prints tokens or secrets. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
+`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google for a new access token, saves it to Keychain the same way a label command does, and reads the Gmail profile. The profile must match an actual address configured on the Mail.app account; it can differ from the address used to look up the credentials, including when `--email` selects an alias. A Keychain write problem therefore shows up as `keychain_access`, as it would for a label command. The command never prints tokens or secrets. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
 
 The account status follows the rule label commands use to pick credentials. It is `connected`, with exit 0, only when exactly one address has stored credentials and they work. A `keychain_unavailable`, `keychain_access`, `credentials_invalid` or `scope_insufficient` result on any address fails the whole account. Two or more addresses with stored credentials make the account `ambiguous_credentials`, even if only one of them works; pass `--email` to choose. A disabled or non-IMAP Mail.app account is `account_unsupported`, and no address is checked.
 
 | Status | Meaning | Recovery |
 | --- | --- | --- |
-| `connected` | Google accepted the refresh token and the Gmail profile matches the address. | None. |
+| `connected` | Google accepted the refresh token and the Gmail profile matches an actual address of the selected Mail.app account. | None. |
 | `credentials_missing` | Keychain has no credentials for this address. | Run `labels auth connect` or `labels auth import` for the address. |
 | `keychain_unavailable` | This build cannot read macOS Keychain. | Use a macOS build made with cgo. |
 | `keychain_access` | Keychain refused the read, often because it is locked or the binary's signature changed. | Unlock the login Keychain and use the installed signed build. Reconnect from that build if access is still refused. |

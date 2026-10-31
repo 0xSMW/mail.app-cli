@@ -42,7 +42,7 @@ func (a *application) newLabelsAuthStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use: "status", Short: "Check stored Gmail credentials, refreshing and saving the access token as label commands do", Args: cobra.NoArgs,
 		Long:        "Check the Gmail credentials this CLI stores in macOS Keychain for each actual address of the selected Mail.app account. Mail.app's own Google sign-in does not authorize this CLI. Each check exchanges the stored refresh token for a new access token, saves the result to Keychain the same way a label command does, and reads the Gmail profile. A Keychain write failure is reported as keychain_access. A disabled or non-IMAP account reports account_unsupported without reading Keychain.",
-		Annotations: map[string]string{annotationAgentNotes: "Not a mutation, but it saves the refreshed access token to Keychain like any label command. The account status follows operational credential selection: connected only when exactly one address has stored credentials and they work for that address; a Keychain, invalid-credential or scope failure on any address fails the account; two or more stored credential sets are ambiguous_credentials (pass --email). account_unsupported means the Mail.app account is disabled or not IMAP. Each address reports its own status, detail and hint. Exits 0 only when connected."},
+		Annotations: map[string]string{annotationAgentNotes: "Not a mutation, but it saves the refreshed access token to Keychain like any label command. The account status follows operational credential selection: connected only when exactly one address has stored credentials and they work for the account; the Gmail profile may match any actual account address. A Keychain, invalid-credential or scope failure on any address fails the account; two or more stored credential sets are ambiguous_credentials (pass --email). account_unsupported means the Mail.app account is disabled or not IMAP. Each address reports its own status, detail and hint. Exits 0 only when connected."},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			account, err := a.requireAccount()
 			if err != nil {
@@ -80,13 +80,14 @@ func (a *application) probeGmailAddress(ctx context.Context, email string) gmail
 // account. A Mail.app failure is returned as a command error with no report.
 // A disabled or non-IMAP account is a report, with no address probed.
 func (a *application) gmailAuthStatus(ctx context.Context, account string) (gmailAuthReport, error) {
-	emails, err := a.lookupGmailAccountEmails(ctx, account)
+	accountEmails, err := a.lookupGmailAccountEmails(ctx, account)
 	if errors.Is(err, mail.ErrGmailAccountUnsupported) {
 		return gmailAuthReport{Account: account, Status: authAccountUnsupported, Detail: err.Error(), Hint: authAccountUnsupportedHint, Addresses: []gmail.AddressStatus{}}, nil
 	}
 	if err != nil {
 		return gmailAuthReport{}, gmailLabelCommandError(err)
 	}
+	emails := accountEmails
 	if a.labelsEmail != "" {
 		email, err := selectGmailLabelEmail(emails, a.labelsEmail, nil)
 		if err != nil {
@@ -96,24 +97,33 @@ func (a *application) gmailAuthStatus(ctx context.Context, account string) (gmai
 	}
 	report := gmailAuthReport{Account: account, Addresses: make([]gmail.AddressStatus, 0, len(emails))}
 	for _, email := range emails {
-		report.Addresses = append(report.Addresses, checkGmailAddress(a.probeGmailAddress(ctx, email), email))
+		report.Addresses = append(report.Addresses, checkGmailAddress(a.probeGmailAddress(ctx, email), email, accountEmails))
 	}
 	summarizeGmailAuth(&report)
 	return report, nil
 }
 
 // checkGmailAddress applies the account binding: working credentials for a
-// different Google account do not authorize this address.
-func checkGmailAddress(status gmail.AddressStatus, email string) gmail.AddressStatus {
+// different Google account do not authorize this Mail account. The Keychain
+// lookup address can be an alias; bind to any actual account address, as the
+// label workflow does, even when --email selects one credential entry.
+func checkGmailAddress(status gmail.AddressStatus, email string, accountEmails []string) gmail.AddressStatus {
 	status.Email = email
 	if status.Status == "" {
 		status.Status = gmail.AuthUnknown
 	}
 	if status.Status == gmail.AuthConnected {
 		status.Detail, status.Hint = "", ""
-		if !strings.EqualFold(strings.TrimSpace(status.ProviderEmail), email) {
+		matchesAccount := false
+		for _, address := range accountEmails {
+			if strings.EqualFold(strings.TrimSpace(status.ProviderEmail), address) {
+				matchesAccount = true
+				break
+			}
+		}
+		if !matchesAccount {
 			status.Status = gmail.AuthAccountMismatch
-			status.Detail = fmt.Sprintf("stored credentials authorize Gmail account %q, not %q", status.ProviderEmail, email)
+			status.Detail = fmt.Sprintf("stored credentials authorize Gmail account %q, which is not an actual address of the selected Mail account", status.ProviderEmail)
 			status.Hint = gmail.AuthAccountMismatch.Hint()
 		}
 	} else if status.Hint == "" {

@@ -176,6 +176,28 @@ func TestLabelsAuthStatusAccountMismatchKeepsProviderEmail(t *testing.T) {
 	}
 }
 
+func TestLabelsAuthStatusAcceptsSoleStoredAlias(t *testing.T) {
+	for _, selector := range []string{"", "old@example.com"} {
+		t.Run("selector="+selector, func(t *testing.T) {
+			fakes := &gmailAuthFakes{
+				emails: []string{"old@example.com", "current@example.com"},
+				probes: map[string]gmail.AddressStatus{
+					"old@example.com": connectedProbe("old@example.com", "CURRENT@example.com"),
+				},
+			}
+			args := append([]string(nil), authStatusArgs...)
+			if selector != "" {
+				args = append(args, "--email", selector)
+			}
+			code, stdout, stderr := runGmailAuth(t, fakes, args...)
+			report := decodeGmailAuth(t, stdout).Data
+			if code != 0 || stderr != "" || report.Status != gmail.AuthConnected || report.ProviderEmail != "CURRENT@example.com" || report.Addresses[0].Status != gmail.AuthConnected {
+				t.Fatalf("usable account credentials rejected: exit=%d report=%+v stderr=%s", code, report, stderr)
+			}
+		})
+	}
+}
+
 func TestLabelsAuthStatusEmailSelectsOneAddress(t *testing.T) {
 	fakes := &gmailAuthFakes{
 		emails: []string{"alias@example.com", "primary@example.com"},

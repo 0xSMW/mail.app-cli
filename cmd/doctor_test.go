@@ -209,6 +209,21 @@ func TestDoctorGmailConnected(t *testing.T) {
 	}
 }
 
+func TestDoctorGmailAcceptsSoleStoredAlias(t *testing.T) {
+	fakes := &gmailAuthFakes{
+		emails: []string{"old@example.com", "current@example.com"},
+		probes: map[string]gmail.AddressStatus{"old@example.com": connectedProbe("old@example.com", "current@example.com")},
+	}
+	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
+	if err := a.runDoctor(context.Background(), fakeDoctorClient{accountCount: 1}, true); err != nil {
+		t.Fatal(err)
+	}
+	envelope, result, _ := decodeDoctor(t, stdout)
+	if !envelope.OK || result.GmailHealthy == nil || !*result.GmailHealthy || result.Gmail.ProviderEmail != "current@example.com" {
+		t.Fatalf("envelope=%+v result=%+v", envelope, result)
+	}
+}
+
 func TestDoctorGmailWithBrokenBridgeReportsMailError(t *testing.T) {
 	fakes := &gmailAuthFakes{emailsErr: errors.New("Application isn't running. (-600)")}
 	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
