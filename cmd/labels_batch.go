@@ -80,9 +80,29 @@ func (a *application) gmailLabelApplyFor(cmd *cobra.Command, account string, sho
 // account so a single provider binding applies to the whole run.
 func (a *application) gmailLabelRequests(ids []string) ([]mail.GmailLabelRequest, []string, error) {
 	ids = trimAll(ids)
-	refs, notices, err := a.locateMessages(ids)
+	// The label workflow requires indexed identity even with explicit scope.
+	// Do not use locateMessages' guessed refs for an unavailable index or an
+	// explicit mailbox: a later missing ID must stop the whole preflight.
+	located, err := a.locateIndexed(ids)
+	if err != nil {
+		return nil, nil, clierr.Wrap(clierr.CodeUnavailable, err, "cannot resolve Gmail label messages: "+err.Error()).
+			WithHint("Gmail labels require Envelope Index access; run 'mail-app-cli doctor' and restore index access before retrying")
+	}
+	refs, notices, err := a.resolveLocatedMessages(ids, located, nil)
 	if err != nil {
 		return nil, nil, err
+	}
+	if a.mailboxExplicit() {
+		account, err := a.requireAccount()
+		if err != nil {
+			return nil, nil, err
+		}
+		for i := range refs {
+			if refs[i].Account != account {
+				return nil, nil, clierr.New(clierr.CodeNotFound, fmt.Sprintf("message %s is in account %q, not the selected account %q", refs[i].ID, refs[i].Account, account))
+			}
+			refs[i].Mailbox = a.mailboxInScope()
+		}
 	}
 	requests, err := a.gmailLabelRequestsFromRefs(ids, refs)
 	if err != nil {

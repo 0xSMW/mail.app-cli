@@ -398,3 +398,51 @@ func TestLabelsRemoveSeveralIDsFromCommandLineSetsLabelAndDryRun(t *testing.T) {
 		t.Fatalf("envelope=%s", got.stdout)
 	}
 }
+
+func TestLabelsExplicitMailboxPreflightsEveryID(t *testing.T) {
+	for _, verb := range []string{"show", "add", "remove"} {
+		for _, invalid := range []string{"missing", "other account"} {
+			t.Run(verb+"/"+invalid, func(t *testing.T) {
+				accounts := map[string]string{"12345": "Example Account"}
+				if invalid == "other account" {
+					accounts["12346"] = "Other Account"
+				}
+				args := []string{"labels", verb, "12345", "12346", "-a", "Example Account", "-m", "INBOX", "--json"}
+				if verb != "show" {
+					args = append(args, "--label", "IMPORTANT")
+				}
+				got := labelsCLI(t, accounts, args...)
+				if got.code != 2 || got.stdout != "" || len(got.requests) != 0 || len(got.shows) != 0 {
+					t.Fatalf("invalid later ID reached the provider: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestLabelsExplicitMailboxPreservesRequestedLocation(t *testing.T) {
+	accounts := map[string]string{"12345": "Example Account", "12346": "Example Account"}
+	got := labelsCLI(t, accounts, "labels", "show", "12345", "12346", "-a", "Example Account", "-m", "Important", "--json")
+	if got.code != 0 || len(got.requests) != 2 || len(got.located) != 1 {
+		t.Fatalf("run=%+v", got)
+	}
+	for _, request := range got.requests {
+		if request.Account != "Example Account" || request.Mailbox != "Important" {
+			t.Fatalf("explicit scope changed: %+v", request)
+		}
+	}
+}
+
+func TestLabelsPreflightRequiresAvailableIndex(t *testing.T) {
+	a := newApplication()
+	a.resolved.Account = config.Value{Value: "Example Account", Source: config.SourceFlag}
+	a.resolved.Mailbox = config.Value{Value: "INBOX", Source: config.SourceFlag}
+	indexErr := errors.New("index access denied")
+	a.messageLocator = func([]string) (map[string]mail.MessageLocation, error) {
+		return nil, indexErr
+	}
+	requests, _, err := a.gmailLabelRequests([]string{"12345", "12346"})
+	if requests != nil || !errors.Is(err, indexErr) {
+		t.Fatalf("unavailable index fabricated requests: %+v, error=%v", requests, err)
+	}
+}
