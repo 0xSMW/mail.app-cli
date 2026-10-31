@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/appleevents"
+	"golang.org/x/text/unicode/norm"
 )
 
 // collection resolves only the requested container. An unexpected descriptor
@@ -138,8 +139,10 @@ func (n *nativeMail) mailboxExact(account appleevents.Value, name string) (apple
 		return appleevents.Value{}, err
 	}
 	var candidates []nativeMailboxRef
+	comparisonName := norm.NFC.String(name)
 	for _, box := range refs {
-		if box.name == name || (strings.Contains(name, "/") && (box.path == name || strings.HasSuffix(name, "/"+box.name))) || (strings.EqualFold(name, "INBOX") && strings.EqualFold(box.name, "INBOX")) {
+		boxName := norm.NFC.String(box.name)
+		if boxName == comparisonName || (strings.Contains(name, "/") && (norm.NFC.String(box.path) == comparisonName || strings.HasSuffix(comparisonName, "/"+boxName))) || (strings.EqualFold(name, "INBOX") && strings.EqualFold(box.name, "INBOX")) {
 			candidates = append(candidates, box)
 		}
 	}
@@ -164,7 +167,7 @@ func (n *nativeMail) mailboxExact(account appleevents.Value, name string) (apple
 		if err != nil {
 			return appleevents.Value{}, err
 		}
-		if strings.Contains(name, "/") && candidate.name != name && path != name {
+		if strings.Contains(name, "/") && norm.NFC.String(candidate.name) != comparisonName && norm.NFC.String(path) != comparisonName {
 			continue
 		}
 		if !seen[identity] {

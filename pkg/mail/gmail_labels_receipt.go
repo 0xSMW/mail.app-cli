@@ -96,6 +96,7 @@ func (w *GmailLabelWorkflow) Reconcile(ctx context.Context, path string) (GmailL
 		return gmailResultError(out, err)
 	}
 	out.Label = label
+	out.Labels = labels
 	out, err = w.observe(ctx, out)
 	return gmailResultError(out, err)
 }

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/mailindex"
+	"golang.org/x/text/unicode/norm"
 )
 
 type indexMailbox struct {
@@ -23,6 +24,7 @@ type indexMailbox struct {
 	Name        string
 	TotalCount  int
 	UnreadCount int
+	Ambiguous   int
 }
 
 type indexMessage struct {
@@ -129,6 +131,8 @@ func mailboxLeafFromURL(rawURL string) string {
 	if decoded, err := url.PathUnescape(leaf); err == nil {
 		leaf = decoded
 	}
+	// Preserve the indexed spelling; canonical equivalence belongs at lookup
+	// boundaries, not in physical mailbox identities.
 	return leaf
 }
 
@@ -276,7 +280,7 @@ func indexAccountMailboxCondition(accountID string) string {
 func indexMailboxSelect(accountID, mailbox string, counts bool) string {
 	projection := "ROWID as ID, url as URL"
 	if counts {
-		projection += ", total_count, unread_count"
+		projection += ", total_count as TotalCount, unread_count as UnreadCount"
 	}
 	return indexMailboxCandidateSelect(accountID, mailbox, projection)
 }
@@ -293,6 +297,22 @@ func escapeMailboxURLPath(name string) string {
 	return strings.Join(components, "/")
 }
 
+// Keep literal spelling first, including partially normalized names and paths,
+// then add the common canonical forms stored by IMAP servers. These variants
+// do not enumerate every possible partially composed Unicode spelling.
+func escapeMailboxURLPathForms(name string) []string {
+	var forms []string
+	seen := make(map[string]bool)
+	for _, spelling := range []string{name, norm.NFC.String(name), norm.NFD.String(name)} {
+		escaped := escapeMailboxURLPath(spelling)
+		if !seen[escaped] {
+			forms = append(forms, escaped)
+			seen[escaped] = true
+		}
+	}
+	return forms
+}
+
 func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMailbox, bool, error) {
 	if accountName == "" || mailboxName == "" {
 		return nil, false, nil
@@ -301,6 +321,20 @@ func (c *Client) resolveIndexMailbox(accountName, mailboxName string) (*indexMai
 	account, err := c.accountByName(accountName)
 	if err != nil {
 		return nil, false, err
+	}
+	if len(escapeMailboxURLPathForms(mailboxName)) > 1 && !isArchiveAlias(mailboxName) {
+		var rows []indexMailbox
+		if err := c.runEnvelopeIndexQuery(indexMailboxSelect(account.ID, mailboxName, true)+";", &rows); err != nil {
+			return nil, false, c.envelopeIndexReadError(err)
+		}
+		if len(rows) == 0 {
+			return nil, false, nil
+		}
+		if rows[0].Ambiguous != 0 {
+			return nil, false, fmt.Errorf("mailbox name is ambiguous in account: %s", mailboxName)
+		}
+		rows[0].Name = mailboxLeafFromURL(rows[0].URL)
+		return &rows[0], true, nil
 	}
 
 	exact := indexMailboxExactCondition(account.ID, mailboxName)
@@ -349,12 +383,11 @@ limit 1;
 	return c.runEnvelopeIndexQuery(query, rows)
 }
 
-func escapedMailboxLeaf(mailboxName string) string {
-	escapedName := escapeMailboxURLPath(mailboxName)
+func escapedMailboxLeafForms(mailboxName string) []string {
 	if isArchiveAlias(mailboxName) {
-		return "All%20Mail"
+		return []string{"All%20Mail"}
 	}
-	return escapedName
+	return escapeMailboxURLPathForms(mailboxName)
 }
 
 func (c *Client) getMailboxesFromIndex(account Account) ([]Mailbox, bool, error) {
@@ -724,16 +757,37 @@ func indexMailboxPreference(accountID, mailbox string) indexMailboxCandidates {
 }
 
 func indexMailboxExactCondition(accountID, mailbox string) string {
-	exact := strings.TrimPrefix(indexMailboxURLPattern(accountID, mailbox), "imap://"+accountID+"/")
-	comparison := indexMailboxPath(accountID) + " = " + sqlQuote(exact)
-	if strings.EqualFold(mailbox, "INBOX") {
-		comparison += " collate nocase"
+	var forms []string
+	if isArchiveAlias(mailbox) {
+		forms = []string{"%5BGmail%5D/All%20Mail"}
+	} else {
+		forms = escapeMailboxURLPathForms(mailbox)
+	}
+	comparisons := make([]string, len(forms))
+	for i, escaped := range forms {
+		comparisons[i] = indexMailboxPath(accountID) + " = " + sqlQuote(escaped)
+		if strings.EqualFold(mailbox, "INBOX") {
+			comparisons[i] += " collate nocase"
+		}
+	}
+	comparison := comparisons[0]
+	if len(comparisons) > 1 {
+		comparison = "(" + strings.Join(comparisons, " or ") + ")"
 	}
 	return "(" + indexAccountMailboxCondition(accountID) + " and " + comparison + ")"
 }
 
 func indexMailboxBroadCondition(accountID, mailbox string) string {
-	return "(" + indexAccountMailboxCondition(accountID) + " and " + indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(escapedMailboxLeaf(mailbox))) + ` escape '\')`
+	leaves := escapedMailboxLeafForms(mailbox)
+	clauses := make([]string, len(leaves))
+	for i, leaf := range leaves {
+		clauses[i] = indexMailboxPath(accountID) + " like " + sqlQuote("%/"+escapeSQLLikePattern(leaf)) + ` escape '\'`
+	}
+	clause := clauses[0]
+	if len(clauses) > 1 {
+		clause = "(" + strings.Join(clauses, " or ") + ")"
+	}
+	return "(" + indexAccountMailboxCondition(accountID) + " and " + clause + ")"
 }
 
 func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
@@ -743,11 +797,22 @@ func indexMailboxArchiveConditions(accountID string) (literal, nested string) {
 
 func indexMailboxCandidateSelect(accountID, mailbox, projection string) string {
 	preference := indexMailboxPreference(accountID, mailbox)
+	if len(escapeMailboxURLPathForms(mailbox)) > 1 && !isArchiveAlias(mailbox) {
+		// Prefer the literal root, then equivalent roots, then literal nested
+		// paths, then equivalent nested paths. Only newly broadened fallback
+		// tiers reject ties; existing literal nested-leaf ordering is retained.
+		path := indexMailboxPath(accountID)
+		escaped := escapeMailboxURLPath(mailbox)
+		literalExact := path + " = " + sqlQuote(escaped)
+		literalBroad := path + " like " + sqlQuote("%/"+escapeSQLLikePattern(escaped)) + ` escape '\'`
+		rank := "case when " + literalExact + " then 0 when " + preference.exact + " then 1 when " + literalBroad + " then 2 else 3 end"
+		return "select *, case when MailboxRank in (1, 3) and count(*) over (partition by MailboxRank) > 1 then 1 else 0 end as Ambiguous from (select " + projection + ", " + rank + " as MailboxRank from mailboxes where " + preference.exact + " or " + preference.broad + ") order by MailboxRank, ID limit 1"
+	}
 	where := preference.exact + " or " + preference.broad
 	order := "case when " + preference.exact + " then 0 else 3 end"
 	if preference.literal != "" {
 		where += " or " + preference.literal + " or " + preference.nested
 		order = "case when " + preference.exact + " then 0 when " + preference.literal + " then 1 when " + preference.nested + " then 2 else 3 end"
 	}
-	return "select " + projection + " from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
+	return "select " + projection + ", 0 as Ambiguous from mailboxes where " + where + " order by " + order + ", ROWID limit 1"
 }

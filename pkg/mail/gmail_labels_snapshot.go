@@ -112,6 +112,8 @@ func (c *Client) gmailLabelSnapshotWithRead(account string, id StableIdentity, r
 }
 
 func gmailSnapshotMailbox(raw string) string {
+	// Preserve the complete path and its spelling. Native lookup compares
+	// canonical forms while retaining raw names for mailbox identity checks.
 	if u, err := url.Parse(raw); err == nil {
 		if name, err := url.PathUnescape(strings.TrimPrefix(u.EscapedPath(), "/")); err == nil {
 			return name

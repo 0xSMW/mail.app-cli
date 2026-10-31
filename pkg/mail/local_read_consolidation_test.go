@@ -53,7 +53,7 @@ func TestIndexMailboxCandidatePreferenceRetainsStagedQueries(t *testing.T) {
 		{"nested Archive before nested All Mail", "Archive", []string{"Unrelated/All%20Mail", "Nested/Archive"}, 2, 2},
 		{"Archive broad fallback", "Archive", []string{"Unrelated/All%20Mail"}, 1, 3},
 		{"All Mail does not use literal Archive", "All Mail", []string{"Archive", "Unrelated/All%20Mail"}, 2, 2},
-		{"encoded nested leaf", "邮件 café", []string{"Parent/%E9%82%AE%E4%BB%B6%20caf%C3%A9"}, 1, 2},
+		{"encoded nested leaf", "邮件 café", []string{"Parent/%E9%82%AE%E4%BB%B6%20caf%C3%A9"}, 1, 1},
 		{"nested row ordering", "INBOX", []string{"Second/INBOX", "First/INBOX"}, 1, 2},
 		{"missing Archive", "Archive", []string{"Other"}, 0, 3},
 	} {
