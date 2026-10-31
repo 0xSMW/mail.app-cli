@@ -152,6 +152,8 @@ delete, and move commands do the same work and accept several IDs.`,
 			return a.mutateByIDs(args[:1], batchOptions{Action: "move", TargetMailbox: args[1], DryRun: msgDryRun, Verify: msgVerify, Journal: true}, mail.MoveMutator(true))
 		},
 	}
+	addGmailLabelHelp(a.messagesArchiveCmd)
+	addGmailLabelHelp(a.messagesMoveCmd)
 	a.messagesInboxCmd = a.newUnifiedCmd("inbox", "List inbox messages across all accounts", "inbox")
 	a.messagesUnreadCmd = a.newUnifiedCmd("unread", "List unread messages across all accounts", "unread")
 	a.messagesSentCmd = a.newUnifiedCmd("sent", "List sent messages across all accounts", "sent")

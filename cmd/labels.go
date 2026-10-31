@@ -17,7 +17,7 @@ import (
 func (a *application) newLabelsCmd() *cobra.Command {
 	labels := &cobra.Command{
 		Use: "labels", Short: "Inspect and change Gmail labels through an explicit provider adapter", GroupID: groupManage,
-		Long: "Inspect and change Gmail labels using credentials bound to a Mail.app account. Existing archive and move commands keep their Mail.app behavior. See docs/gmail-labels.md for setup and receipt semantics.",
+		Long: "Inspect and change Gmail labels using credentials bound to a Mail.app account. show, add, and remove accept several message IDs from one Mail.app account. Check authorization with 'labels auth status'. Existing archive and move commands keep their Mail.app behavior. See docs/gmail-labels.md for setup and receipt semantics.",
 	}
 	labels.PersistentFlags().StringVar(&a.labelsEmail, "email", "", "Gmail provider email among the selected Mail.app account's actual addresses")
 	list := &cobra.Command{
@@ -45,30 +45,40 @@ func (a *application) newLabelsCmd() *cobra.Command {
 	}
 	markIDList(list)
 	show := &cobra.Command{
-		Use: "show <message-id>", Short: "Show current Gmail labels for a Mail.app message", Args: labelMessageArgs,
+		Use: "show <message-id>...", Short: "Show current Gmail labels for Mail.app messages", Args: labelMessageArgs,
+		Annotations: map[string]string{annotationAgentNotes: "Read-only fresh provider and Mail.app observation. Several IDs must be in one Mail.app account; they are read in argument order and the run stops at the first failure with later IDs reported as not_attempted. One ID returns the single result shape; several return items with per-message results."},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			request, notices, err := a.gmailLabelRequest(args[0])
+			requests, notices, err := a.gmailLabelRequests(args)
 			if err != nil {
 				return err
 			}
-			workflow, err := a.gmailLabelsWorkflow(cmd, request.Account)
+			workflow, err := a.gmailLabelsWorkflow(cmd, requests[0].Account)
 			if err != nil {
 				return err
 			}
-			result, err := workflow.Show(cmd.Context(), request)
-			return a.writeGmailLabelResult(result, notices, err)
+			return a.runGmailLabelRequests(cmd.Context(), "show", "", false, requests, notices, workflow.Show)
 		},
 	}
 	labels.AddCommand(list, show, a.newLabelChangeCmd(true), a.newLabelChangeCmd(false), a.newLabelReconcileCmd(), a.newLabelsAuthCmd())
 	return labels
 }
 
+// labelMessageArgs requires one or more numeric Mail.app message IDs and
+// rejects duplicates, which locateMessages would otherwise collapse silently.
 func labelMessageArgs(cmd *cobra.Command, args []string) error {
-	if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 		return err
 	}
-	if !isNumericID(strings.TrimSpace(args[0])) {
-		return clierr.Usagef("message ID %q is not numeric; use a Mail.app message ID from list or search", args[0])
+	seen := make(map[string]bool, len(args))
+	for _, arg := range args {
+		id := strings.TrimSpace(arg)
+		if !isNumericID(id) {
+			return clierr.Usagef("message ID %q is not numeric; use a Mail.app message ID from list or search", arg)
+		}
+		if seen[id] {
+			return clierr.Usagef("message ID %s is given more than once; pass each ID once", id)
+		}
+		seen[id] = true
 	}
 	return nil
 }
@@ -81,8 +91,8 @@ func (a *application) newLabelChangeCmd(add bool) *cobra.Command {
 	var label string
 	var dryRun bool
 	cmd := &cobra.Command{
-		Use: verb + " <message-id>", Short: strings.ToUpper(verb[:1]) + verb[1:] + " one Gmail label and verify fresh provider state",
-		Annotations: map[string]string{annotationAgentNotes: "Resolve one Mail.app message to one exact Gmail identity. --label accepts a canonical ID or exact full name. Always verifies a fresh provider read after a dispatched mutation; receipt distinguishes provider confirmation from Mail.app convergence. Reconcile the receipt after interruption; do not blindly replay."},
+		Use: verb + " <message-id>...", Short: strings.ToUpper(verb[:1]) + verb[1:] + " one Gmail label for one or more messages and verify fresh provider state",
+		Annotations: map[string]string{annotationAgentNotes: "Resolve each Mail.app message to one exact Gmail identity. Several IDs must be in one Mail.app account; they run in argument order, each with its own receipt and fresh provider verification, and the run stops at the first failure with later IDs reported as not_attempted. One ID returns the single result shape. --label accepts a canonical ID or exact full name. Always verifies a fresh provider read after a dispatched mutation; receipt distinguishes provider confirmation from Mail.app convergence. Reconcile the receipt after interruption; do not blindly replay."},
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := labelMessageArgs(cmd, args); err != nil {
 				return err
@@ -93,32 +103,24 @@ func (a *application) newLabelChangeCmd(add bool) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			request, notices, err := a.gmailLabelRequest(args[0])
+			requests, notices, err := a.gmailLabelRequests(args)
 			if err != nil {
 				return err
 			}
-			request.Label, request.Add, request.DryRun = label, add, dryRun
-			workflow, err := a.gmailLabelsWorkflow(cmd, request.Account)
+			for i := range requests {
+				requests[i].Label, requests[i].Add, requests[i].DryRun = label, add, dryRun
+			}
+			workflow, err := a.gmailLabelsWorkflow(cmd, requests[0].Account)
 			if err != nil {
 				return err
 			}
-			result, err := workflow.Change(cmd.Context(), request)
-			return a.writeGmailLabelResult(result, notices, err)
+			return a.runGmailLabelRequests(cmd.Context(), verb, label, dryRun, requests, notices, workflow.Change)
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "Canonical Gmail label ID or exact full name (required)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Resolve identity and label and read memberships without changing labels")
 	markMutation(cmd)
 	return cmd
-}
-
-func (a *application) gmailLabelRequest(id string) (mail.GmailLabelRequest, []string, error) {
-	refs, notices, err := a.locateMessages([]string{strings.TrimSpace(id)})
-	if err != nil {
-		return mail.GmailLabelRequest{}, nil, err
-	}
-	request, err := a.gmailLabelRequestFromRef(refs[0])
-	return request, notices, err
 }
 
 func (a *application) gmailLabelRequestFromRef(ref messageRef) (mail.GmailLabelRequest, error) {
