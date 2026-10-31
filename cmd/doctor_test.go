@@ -1,12 +1,21 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
+	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/gmail"
+	"github.com/0xSMW/mail.app-cli/v3/internal/output"
+	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 )
 
 type fakeDoctorClient struct {
@@ -125,5 +134,132 @@ func TestDiagnoseKeepsBridgeAvailableWhenAutomationIsDenied(t *testing.T) {
 	}
 	if result.Healthy {
 		t.Fatal("Healthy = true, want false when automation permission is denied")
+	}
+}
+
+func doctorApp(t *testing.T, format output.Format, fakes *gmailAuthFakes) (*application, *bytes.Buffer, *bytes.Buffer) {
+	t.Helper()
+	a := newApplication()
+	a.resolved.Account = config.Value{Value: "Example Account", Source: config.SourceFlag}
+	fakes.install(a)
+	var stdout, stderr bytes.Buffer
+	var err error
+	a.writer, err = output.New(format, &stdout, &stderr, false, "", "doctor", mail.SchemaVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, &stdout, &stderr
+}
+
+type doctorEnvelope struct {
+	OK      bool            `json:"ok"`
+	Summary string          `json:"summary"`
+	Code    string          `json:"code"`
+	Error   string          `json:"error"`
+	Hint    string          `json:"hint"`
+	Data    json.RawMessage `json:"data"`
+}
+
+func decodeDoctor(t *testing.T, stdout *bytes.Buffer) (doctorEnvelope, doctorResult, map[string]any) {
+	t.Helper()
+	var envelope doctorEnvelope
+	if err := json.Unmarshal(stdout.Bytes(), &envelope); err != nil {
+		t.Fatalf("doctor stdout: %v\n%s", err, stdout)
+	}
+	var result doctorResult
+	var raw map[string]any
+	if err := json.Unmarshal(envelope.Data, &result); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(envelope.Data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	return envelope, result, raw
+}
+
+func TestDoctorGmailFailsWhenBridgeIsHealthy(t *testing.T) {
+	fakes := &gmailAuthFakes{
+		emails: []string{"primary@example.com"},
+		probes: map[string]gmail.AddressStatus{"primary@example.com": failedProbe("primary@example.com", gmail.AuthTokenRejected, "Gmail OAuth token exchange failed (HTTP 400, invalid_grant)")},
+	}
+	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
+	err := a.runDoctor(context.Background(), fakeDoctorClient{accountCount: 1, processIDs: []int{42}}, true)
+	failure := clierr.Classify(err)
+	if failure == nil || failure.Code != clierr.CodeUnavailable || !strings.Contains(failure.Message, `"Example Account"`) || !strings.Contains(failure.Message, "token_rejected") || failure.Hint != gmail.AuthTokenRejected.Hint() {
+		t.Fatalf("failure = %+v", failure)
+	}
+	envelope, result, _ := decodeDoctor(t, stdout)
+	if envelope.OK || envelope.Summary != "not healthy" || !result.Healthy || result.GmailHealthy == nil || *result.GmailHealthy {
+		t.Fatalf("envelope = %+v result = %+v", envelope, result)
+	}
+	if result.Gmail == nil || result.Gmail.Status != gmail.AuthTokenRejected || len(result.Gmail.Addresses) != 1 {
+		t.Fatalf("gmail = %+v", result.Gmail)
+	}
+}
+
+func TestDoctorGmailConnected(t *testing.T) {
+	fakes := &gmailAuthFakes{emails: []string{"primary@example.com"}, probes: map[string]gmail.AddressStatus{"primary@example.com": connectedProbe("primary@example.com", "primary@example.com")}}
+	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
+	if err := a.runDoctor(context.Background(), fakeDoctorClient{accountCount: 1, processIDs: []int{42}}, true); err != nil {
+		t.Fatal(err)
+	}
+	envelope, result, _ := decodeDoctor(t, stdout)
+	if !envelope.OK || envelope.Summary != "healthy" || result.GmailHealthy == nil || !*result.GmailHealthy || result.Gmail.ProviderEmail != "primary@example.com" {
+		t.Fatalf("envelope = %+v result = %+v", envelope, result)
+	}
+}
+
+func TestDoctorGmailWithBrokenBridgeReportsMailError(t *testing.T) {
+	fakes := &gmailAuthFakes{emailsErr: errors.New("Application isn't running. (-600)")}
+	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
+	err := a.runDoctor(context.Background(), fakeDoctorClient{bridgeErr: errors.New("Application can't be found. (-2700)")}, true)
+	failure := clierr.Classify(err)
+	if failure == nil || failure.Code != clierr.CodeUnavailable || !strings.Contains(failure.Message, "Mail.app access") {
+		t.Fatalf("failure = %+v", failure)
+	}
+	envelope, result, _ := decodeDoctor(t, stdout)
+	if envelope.OK || result.Healthy || result.GmailHealthy == nil || *result.GmailHealthy || result.Gmail == nil {
+		t.Fatalf("result = %+v", result)
+	}
+	if result.Gmail.Status != gmail.AuthUnknown || !strings.Contains(result.Gmail.Detail, "(-600)") || result.Gmail.Hint == "" || result.Gmail.Account != "Example Account" || len(fakes.probed) != 0 {
+		t.Fatalf("gmail = %+v probed = %v", result.Gmail, fakes.probed)
+	}
+}
+
+func TestDoctorWithoutGmailOmitsGmailFields(t *testing.T) {
+	fakes := &gmailAuthFakes{}
+	a, stdout, _ := doctorApp(t, output.FormatJSON, fakes)
+	if err := a.runDoctor(context.Background(), fakeDoctorClient{accountCount: 1, processIDs: []int{42}}, false); err != nil {
+		t.Fatal(err)
+	}
+	_, _, raw := decodeDoctor(t, stdout)
+	for _, key := range []string{"gmail", "gmailHealthy"} {
+		if _, ok := raw[key]; ok {
+			t.Fatalf("doctor without --gmail emitted %q: %s", key, stdout)
+		}
+	}
+	if len(fakes.probed) != 0 {
+		t.Fatalf("doctor without --gmail probed %v", fakes.probed)
+	}
+}
+
+func TestDoctorGmailPlainRow(t *testing.T) {
+	fakes := &gmailAuthFakes{emails: []string{"primary@example.com"}, probes: map[string]gmail.AddressStatus{"primary@example.com": connectedProbe("primary@example.com", "primary@example.com")}}
+	a, stdout, _ := doctorApp(t, output.FormatPlain, fakes)
+	if err := a.runDoctor(context.Background(), fakeDoctorClient{accountCount: 1, processIDs: []int{42}}, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stdout.String(), "Gmail auth") || !strings.Contains(stdout.String(), "connected (primary@example.com)") || !strings.Contains(stdout.String(), "healthy") {
+		t.Fatalf("plain doctor = %s", stdout)
+	}
+}
+
+func TestDoctorGmailFlagIsInvocationOwned(t *testing.T) {
+	one, two := newApplication(), newApplication()
+	if err := one.doctorCmd.Flags().Set("gmail", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if value, _ := two.doctorCmd.Flags().GetBool("gmail"); value {
+		t.Fatal("--gmail leaked to another invocation")
 	}
 }

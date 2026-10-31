@@ -30,11 +30,52 @@ const keychainService = "mail-app-cli.gmail.oauth.v1"
 var ErrKeychainUnavailable = errors.New("Gmail credential storage requires macOS with cgo and the Security framework")
 var ErrCredentialsNotFound = errors.New("Gmail credentials were not found in macOS Keychain; connect or explicitly import credentials")
 
-func keychainStatusError(operation string, status int) error {
-	if status == -25308 || status == -128 {
-		return fmt.Errorf("Gmail Keychain %s access is unavailable without user interaction (Security status %d); unlock the login Keychain if needed, then explicitly run 'mail-app-cli labels auth import' or 'mail-app-cli labels auth connect' using the installed signed app", operation, status)
+// ErrScopeInsufficient means the credentials do not grant gmail.modify or full-mail scope.
+var ErrScopeInsufficient = errors.New("Gmail credentials require gmail.modify or full-mail OAuth scope")
+
+// ErrCredentialsInvalid marks stored or imported credentials that cannot be used.
+// Errors that match it keep their own message text.
+var ErrCredentialsInvalid = errors.New("Gmail credentials are invalid")
+
+// Tests replace these to run without the macOS Keychain.
+var (
+	loadKeychainItem  = keychainLoad
+	storeKeychainItem = keychainStore
+)
+
+// KeychainError is a macOS Security framework failure for one Keychain operation.
+type KeychainError struct {
+	Operation string
+	Status    int
+}
+
+func (e *KeychainError) Error() string {
+	if e.InteractionRequired() {
+		return fmt.Sprintf("Gmail Keychain %s access is unavailable without user interaction (Security status %d); unlock the login Keychain if needed, then explicitly run 'mail-app-cli labels auth import' or 'mail-app-cli labels auth connect' using the installed signed app", e.Operation, e.Status)
 	}
-	return fmt.Errorf("Gmail Keychain %s failed (Security status %d)", operation, status)
+	return fmt.Sprintf("Gmail Keychain %s failed (Security status %d)", e.Operation, e.Status)
+}
+
+// InteractionRequired reports a status that needs a user prompt or an unlocked Keychain.
+func (e *KeychainError) InteractionRequired() bool {
+	return e.Status == -25308 || e.Status == -128
+}
+
+func keychainStatusError(operation string, status int) error {
+	return &KeychainError{Operation: operation, Status: status}
+}
+
+// messageError keeps an exact message while matching a sentinel or cause with errors.Is and errors.As.
+type messageError struct {
+	message string
+	cause   error
+}
+
+func (e *messageError) Error() string { return e.message }
+func (e *messageError) Unwrap() error { return e.cause }
+
+func credentialsInvalid(message string) error {
+	return &messageError{message: message, cause: ErrCredentialsInvalid}
 }
 
 // Credentials is the explicit JSON import format. Expiry is RFC3339.
@@ -74,18 +115,18 @@ func validateCredentials(c Credentials) error {
 		return err
 	}
 	if !HasModifyScope(c.Scope) {
-		return errors.New("Gmail credentials require gmail.modify or full-mail OAuth scope")
+		return ErrScopeInsufficient
 	}
 	return nil
 }
 
 func validateCredentialFields(c Credentials) error {
 	if c.ClientID == "" || c.RefreshToken == "" {
-		return errors.New("Gmail credentials require client_id and refresh_token")
+		return credentialsInvalid("Gmail credentials require client_id and refresh_token")
 	}
 	for _, field := range []string{c.ClientID, c.ClientSecret, c.RefreshToken, c.AccessToken} {
 		if len(field) > 16384 || strings.ContainsAny(field, "\r\n\x00") {
-			return errors.New("Gmail credentials contain an invalid field")
+			return credentialsInvalid("Gmail credentials contain an invalid field")
 		}
 	}
 	return nil
@@ -96,13 +137,13 @@ func LoadCredentials(email string) (Credentials, error) {
 	if err != nil {
 		return Credentials{}, err
 	}
-	data, err := keychainLoad(email)
+	data, err := loadKeychainItem(email)
 	if err != nil {
 		return Credentials{}, err
 	}
 	var credentials Credentials
 	if len(data) > 65536 || json.Unmarshal(data, &credentials) != nil {
-		return Credentials{}, errors.New("Gmail Keychain credentials are invalid")
+		return Credentials{}, credentialsInvalid("Gmail Keychain credentials are invalid")
 	}
 	if err := validateCredentials(credentials); err != nil {
 		return Credentials{}, err
@@ -122,7 +163,7 @@ func StoreCredentials(email string, credentials Credentials) error {
 	if err != nil {
 		return errors.New("Gmail credentials cannot be encoded")
 	}
-	return keychainStore(email, data)
+	return storeKeychainItem(email, data)
 }
 
 type CredentialTokenSource struct {
@@ -143,9 +184,25 @@ func NewStoredClient(email string, client *http.Client) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, api := storedClient(email, credentials, client, defaultTokenURL)
+	return api, nil
+}
+
+// storedClient persists refreshed or rotated credentials back to Keychain.
+func storedClient(email string, credentials Credentials, client *http.Client, tokenURL string, options ...ClientOption) (*CredentialTokenSource, *Client) {
 	source := NewCredentialTokenSource(credentials, client)
+	source.tokenURL = tokenURL
 	source.persist = func(updated Credentials) error { return StoreCredentials(email, updated) }
-	return NewClient(client, source), nil
+	return source, NewClient(client, source, options...)
+}
+
+// InvalidateAccessToken drops any cached access token so the next Token call
+// exchanges the refresh token. Pending persistence is kept.
+func (s *CredentialTokenSource) InvalidateAccessToken() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.credentials.AccessToken = ""
+	s.credentials.Expiry = time.Time{}
 }
 
 func (s *CredentialTokenSource) Token(ctx context.Context) (string, error) {
@@ -159,7 +216,7 @@ func (s *CredentialTokenSource) Token(ctx context.Context) (string, error) {
 	}
 	if s.persistPending && s.persist != nil {
 		if err := s.persist(s.credentials); err != nil {
-			return "", errors.New("Gmail refreshed credentials could not be saved to macOS Keychain")
+			return "", persistError(err)
 		}
 		s.persistPending = false
 	}
@@ -192,11 +249,16 @@ func (s *CredentialTokenSource) Token(ctx context.Context) (string, error) {
 	if s.persist != nil {
 		s.persistPending = true
 		if err := s.persist(updated); err != nil {
-			return "", errors.New("Gmail refreshed credentials could not be saved to macOS Keychain")
+			return "", persistError(err)
 		}
 		s.persistPending = false
 	}
 	return updated.AccessToken, nil
+}
+
+// persistError keeps the fixed message and lets callers classify the Keychain cause.
+func persistError(err error) error {
+	return &messageError{message: "Gmail refreshed credentials could not be saved to macOS Keychain", cause: err}
 }
 
 type tokenResponse struct {
@@ -218,19 +280,19 @@ func exchangeToken(ctx context.Context, client *http.Client, endpoint string, fo
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	response, err := secureHTTPClient(client).Do(req)
 	if err != nil {
-		return tokenResponse{}, errors.New("Gmail OAuth token exchange failed")
+		return tokenResponse{}, &TokenError{Transport: true}
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return tokenResponse{}, fmt.Errorf("Gmail OAuth token exchange failed (HTTP %d)", response.StatusCode)
+		return tokenResponse{}, &TokenError{StatusCode: response.StatusCode, Code: tokenErrorCode(response.Body)}
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 65537))
 	if err != nil || len(data) > 65536 {
-		return tokenResponse{}, errors.New("Gmail OAuth response exceeded its limit or was incomplete")
+		return tokenResponse{}, &messageError{message: "Gmail OAuth response exceeded its limit or was incomplete", cause: errProviderResponse}
 	}
 	var token tokenResponse
 	if json.Unmarshal(data, &token) != nil || token.AccessToken == "" || token.ExpiresIn <= 0 || token.ExpiresIn > 365*24*3600 || (token.TokenType != "" && !strings.EqualFold(token.TokenType, "Bearer")) || strings.ContainsAny(token.AccessToken, "\r\n\x00") {
-		return tokenResponse{}, errors.New("Gmail OAuth response is invalid")
+		return tokenResponse{}, errProviderResponse
 	}
 	return token, nil
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	netmail "net/mail"
@@ -208,7 +209,24 @@ func selectGmailLabelEmail(emails []string, explicit string, lookup func(string)
 }
 
 func gmailCredentialsError(err error) *clierr.Error {
+	if hint, ok := gmailAuthHint(err); ok {
+		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint(hint)
+	}
 	return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint("connect this account with 'mail-app-cli labels auth connect --client-secret <path> --account <name> --email <address>' or import credentials with 'labels auth import --credentials <path> --email <address>'; resolve any macOS Keychain access error before retrying")
+}
+
+// gmailAuthHint returns the recovery step for a typed Gmail credential,
+// token or provider error. A context error comes from the caller's deadline
+// or cancellation, which may be Mail.app's, so it is not given a Gmail hint.
+func gmailAuthHint(err error) (string, bool) {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return "", false
+	}
+	status := gmail.ClassifyAuthError(err)
+	if status == gmail.AuthUnknown || status == gmail.AuthConnected {
+		return "", false
+	}
+	return status.Hint() + "; run 'mail-app-cli labels auth status -a <account>' for details", true
 }
 
 func (a *application) newLabelReconcileCmd() *cobra.Command {
@@ -266,6 +284,9 @@ func gmailLabelCommandError(err error) *clierr.Error {
 	if errors.As(err, &capability) {
 		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error())
 	}
+	if hint, ok := gmailAuthHint(err); ok {
+		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint(hint)
+	}
 	var provider *gmail.RequestError
 	if errors.As(err, &provider) {
 		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint("check Gmail access; connect the correct account with 'labels auth connect' or 'labels auth import'")
@@ -274,7 +295,8 @@ func gmailLabelCommandError(err error) *clierr.Error {
 }
 
 func (a *application) newLabelsAuthCmd() *cobra.Command {
-	auth := &cobra.Command{Use: "auth", Short: "Connect Gmail credentials to a Mail.app account"}
+	auth := &cobra.Command{Use: "auth", Short: "Connect and check Gmail credentials for a Mail.app account"}
+	auth.AddCommand(a.newLabelsAuthStatusCmd())
 	for _, connect := range []bool{false, true} {
 		var path string
 		verb, flag, short := "import", "credentials", "Import a private credential file into macOS Keychain"

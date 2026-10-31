@@ -61,10 +61,12 @@ func (f TokenSourceFunc) Token(ctx context.Context) (string, error) { return f(c
 
 // RequestError never includes response bodies, bearer tokens, or request URLs.
 // Uncertain means a mutation was dispatched and its final outcome needs a read.
+// Transport means no HTTP response was received.
 type RequestError struct {
 	Operation  string
 	StatusCode int
 	Uncertain  bool
+	Transport  bool
 }
 
 func (e *RequestError) Error() string {
@@ -148,7 +150,7 @@ func (c *Client) request(ctx context.Context, operation, method, path string, qu
 	}
 	response, err := c.http.Do(req)
 	if err != nil {
-		return &RequestError{Operation: operation, Uncertain: method != http.MethodGet}
+		return &RequestError{Operation: operation, Uncertain: method != http.MethodGet, Transport: true}
 	}
 	defer response.Body.Close()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
