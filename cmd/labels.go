@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	netmail "net/mail"
 	"os/exec"
 	"strings"
@@ -170,7 +171,8 @@ func selectGmailLabelProvider(emails []string, explicit string, load func(string
 
 // A nil lookup selects the first address for an explicit authorization flow.
 // Operational commands probe every actual address, failing closed on any
-// Keychain error other than an absent credential entry.
+// Keychain error other than an absent credential entry. labels auth status
+// applies the same rule through gmail.AuthStatus.Stored.
 func selectGmailLabelEmail(emails []string, explicit string, lookup func(string) error) (string, error) {
 	if explicit != "" {
 		value := strings.TrimSpace(explicit)
@@ -196,7 +198,7 @@ func selectGmailLabelEmail(emails []string, explicit string, lookup func(string)
 		err := lookup(email)
 		if err == nil {
 			matches = append(matches, email)
-		} else if !errors.Is(err, gmail.ErrCredentialsNotFound) {
+		} else if gmail.ClassifyAuthError(err).Stored() {
 			return "", gmailCredentialsError(err)
 		}
 	}
@@ -280,20 +282,41 @@ func gmailLabelCommandError(err error) *clierr.Error {
 		case "not_found":
 			code = clierr.CodeNotFound
 		}
-		return clierr.Wrap(code, err, err.Error()).WithHint(preflight.Hint)
+		hint := preflight.Hint
+		// The workflow wraps a failed Gmail profile read in a generic
+		// preflight error. A typed Gmail cause has a more specific hint.
+		if provider, ok := gmailProviderHint(preflight.Cause); ok {
+			hint = provider
+		}
+		return clierr.Wrap(code, err, err.Error()).WithHint(hint)
 	}
 	var capability *mail.CapabilityError
 	if errors.As(err, &capability) {
 		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error())
 	}
-	if hint, ok := gmailAuthHint(err); ok {
+	if hint, ok := gmailProviderHint(err); ok {
 		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint(hint)
 	}
-	var provider *gmail.RequestError
-	if errors.As(err, &provider) {
-		return clierr.Wrap(clierr.CodeUnavailable, err, err.Error()).WithHint("check Gmail access; connect the correct account with 'labels auth connect' or 'labels auth import'")
-	}
 	return clierr.Classify(err)
+}
+
+// gmailProviderHint returns the hint for a Gmail request or authorization
+// error. A Gmail API 4xx other than 401, 403 and 429 is about the requested
+// message or label, not authorization.
+func gmailProviderHint(err error) (string, bool) {
+	if err == nil {
+		return "", false
+	}
+	var request *gmail.RequestError
+	if errors.As(err, &request) {
+		switch code := request.StatusCode; {
+		case code == http.StatusNotFound || code == http.StatusGone:
+			return "Gmail did not find the message or label; read it again with 'labels show' before retrying", true
+		case code >= 400 && code < 500 && code != http.StatusUnauthorized && code != http.StatusForbidden && code != http.StatusTooManyRequests:
+			return "Gmail rejected the request; read the message again with 'labels show' and check the label before retrying", true
+		}
+	}
+	return gmailAuthHint(err)
 }
 
 func (a *application) newLabelsAuthCmd() *cobra.Command {

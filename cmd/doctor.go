@@ -140,6 +140,9 @@ func renderDoctor(r doctorResult) func(*output.Printer) {
 			if r.Gmail.ProviderEmail != "" {
 				detail += " (" + r.Gmail.ProviderEmail + ")"
 			}
+			if !*r.GmailHealthy && r.Gmail.Detail != "" {
+				detail += ": " + r.Gmail.Detail
+			}
 			rows = append(rows, check("Gmail auth", *r.GmailHealthy, detail))
 		}
 		p.Table([]string{"CHECK", "STATUS", "DETAIL"}, rows)
@@ -169,14 +172,10 @@ func mailProcessDetail(r doctorResult) string {
 }
 
 func doctorFailure(r doctorResult) *clierr.Error {
+	if failure := doctorGmailFailure(r); failure != nil && (r.Healthy || failure.Code == clierr.CodeUsage) {
+		return failure
+	}
 	if r.Healthy {
-		if r.GmailHealthy != nil && !*r.GmailHealthy && r.Gmail != nil {
-			hint := r.Gmail.Hint
-			if r.Gmail.Status == authAmbiguous {
-				hint = "choose one with --email on 'labels' commands; run 'mail-app-cli labels auth status' to see each address"
-			}
-			return clierr.New(clierr.CodeUnavailable, fmt.Sprintf("Gmail authorization for Mail.app account %q: %s", r.Gmail.Account, r.Gmail.Status)).WithHint(hint)
-		}
 		return nil
 	}
 	if r.MailRunning != nil && *r.MailRunning &&
@@ -187,6 +186,27 @@ func doctorFailure(r doctorResult) *clierr.Error {
 			"-600 describes the Apple Event target; it does not prove Mail.app has stopped. Process presence does not prove responsiveness. No operation was retried; preserve compose state before any recovery.")
 	}
 	return clierr.New(clierr.CodeUnavailable, "Mail.app access is not fully available").WithHint("see the failed checks in data")
+}
+
+// doctorGmailFailure is the Gmail check's error. A usage error is returned
+// even when the bridge also failed, because the invocation must change.
+func doctorGmailFailure(r doctorResult) *clierr.Error {
+	g := r.Gmail
+	if g == nil || r.GmailHealthy == nil || *r.GmailHealthy {
+		return nil
+	}
+	if g.failure != nil {
+		code := clierr.CodeUnavailable
+		if r.Healthy || g.failure.Code == clierr.CodeUsage {
+			code = g.failure.Code
+		}
+		return clierr.Wrap(code, g.failure, "Gmail authorization was not checked: "+g.failure.Message).WithHint(g.Hint)
+	}
+	if g.Status == authAmbiguous {
+		return clierr.Usage(fmt.Sprintf("several Gmail credential sets are stored for Mail.app account %q", g.Account)).
+			WithHint("choose one with --email on 'labels' commands; run 'mail-app-cli labels auth status' to see each address")
+	}
+	return clierr.New(clierr.CodeUnavailable, fmt.Sprintf("Gmail authorization for Mail.app account %q: %s", g.Account, g.Status)).WithHint(g.Hint)
 }
 
 func firstNonEmpty(values ...string) string {
@@ -216,10 +236,7 @@ func (a *application) buildDoctorCommands() {
 func (a *application) runDoctor(ctx context.Context, client doctorClient, checkGmail bool) error {
 	result := diagnose(client, version, os.Executable)
 	if checkGmail {
-		report, err := a.doctorGmail(ctx)
-		if err != nil {
-			return err
-		}
+		report := a.doctorGmail(ctx, result.Healthy)
 		healthy := report.Status == gmail.AuthConnected
 		result.Gmail, result.GmailHealthy = &report, &healthy
 	}
@@ -230,25 +247,27 @@ func (a *application) runDoctor(ctx context.Context, client doctorClient, checkG
 	return a.writer.Write(output.Result{Data: result, Summary: summary, Plain: renderDoctor(result), Err: doctorFailure(result)})
 }
 
-// doctorGmail returns only usage errors. A Mail.app failure becomes the
-// report detail so the bridge diagnostics are still written.
-func (a *application) doctorGmail(ctx context.Context) (gmailAuthReport, error) {
+// doctorGmail never fails the command by itself. An error that stops the
+// check, including a missing or ambiguous account, becomes the report detail
+// and failure so the bridge diagnostics are still written.
+func (a *application) doctorGmail(ctx context.Context, bridgeHealthy bool) gmailAuthReport {
 	account, err := a.requireAccount()
 	if err == nil {
 		var report gmailAuthReport
 		report, err = a.gmailAuthStatus(ctx, account)
 		if err == nil {
-			return report, nil
+			return report
 		}
 	}
-	var typed *clierr.Error
-	if errors.As(err, &typed) && typed.Code == clierr.CodeUsage {
-		return gmailAuthReport{}, err
-	}
+	failure := clierr.Classify(err)
 	hint := "fix the failed Mail.app checks, then rerun 'mail-app-cli doctor --gmail'"
-	var preflight *mail.GmailLabelError
-	if errors.As(err, &preflight) && preflight.Hint != "" {
-		hint = preflight.Hint
+	var typed *clierr.Error
+	switch {
+	case failure.Code == clierr.CodeUsage:
+		hint = firstNonEmpty(failure.Hint, "pass --account, then rerun 'mail-app-cli doctor --gmail'")
+	case bridgeHealthy && errors.As(err, &typed):
+		// Every Mail.app check passed, so the error is about this account.
+		hint = firstNonEmpty(typed.Hint, "fix the error in detail, then rerun 'mail-app-cli doctor --gmail'")
 	}
-	return gmailAuthReport{Account: account, Status: gmail.AuthUnknown, Detail: err.Error(), Hint: hint, Addresses: []gmail.AddressStatus{}}, nil
+	return gmailAuthReport{Account: account, Status: gmail.AuthUnknown, Detail: err.Error(), Hint: hint, Addresses: []gmail.AddressStatus{}, failure: failure}
 }

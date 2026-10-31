@@ -136,6 +136,24 @@ func classifyRequestError(e *RequestError) AuthStatus {
 	return AuthProviderError
 }
 
+// Stored reports that the address has a credential entry in Keychain, working
+// or not. Operational credential selection counts these addresses: more than
+// one makes the account ambiguous.
+func (s AuthStatus) Stored() bool {
+	return s != AuthCredentialsMissing
+}
+
+// StopsSelection reports a failure to read or accept stored credentials.
+// Operational commands fail the whole account on it, even when another
+// address has working credentials.
+func (s AuthStatus) StopsSelection() bool {
+	switch s {
+	case AuthKeychainUnavailable, AuthKeychainAccess, AuthCredentialsInvalid, AuthScopeInsufficient:
+		return true
+	}
+	return false
+}
+
 // Hint returns one recovery step for the status. Connected has none.
 func (s AuthStatus) Hint() string {
 	switch s {

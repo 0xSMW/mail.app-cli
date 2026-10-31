@@ -349,3 +349,29 @@ func TestInvalidateAccessTokenForcesRefresh(t *testing.T) {
 		t.Fatalf("invalidated token: %q %v calls=%d", token, err, calls)
 	}
 }
+
+// The probe saves the refreshed token exactly as an operational command does,
+// so a Keychain write failure after a successful exchange is keychain_access.
+func TestProbeReportsKeychainWriteFailureAfterRefresh(t *testing.T) {
+	valid := testCredentials()
+	keychain := &fakeKeychain{items: map[string][]byte{"primary@example.com": storedJSON(t, valid)}}
+	useFakeKeychain(t, keychain)
+	storeKeychainItem = func(string, []byte) error { return keychainStatusError("write", -25308) }
+	servers := newProbeServers(t)
+	got := servers.probe("primary@example.com")
+	if servers.tokenCalls != 1 || got.Status != AuthKeychainAccess || got.Detail != "Gmail refreshed credentials could not be saved to macOS Keychain" || got.Hint != AuthKeychainAccess.Hint() || got.ProviderEmail != "" {
+		t.Fatalf("probe = %+v, token calls = %d", got, servers.tokenCalls)
+	}
+}
+
+func TestAuthStatusSelectionPredicates(t *testing.T) {
+	stops := map[AuthStatus]bool{AuthKeychainUnavailable: true, AuthKeychainAccess: true, AuthCredentialsInvalid: true, AuthScopeInsufficient: true}
+	for _, status := range AuthStatuses() {
+		if status.StopsSelection() != stops[status] {
+			t.Fatalf("%s StopsSelection = %v", status, status.StopsSelection())
+		}
+		if status.Stored() != (status != AuthCredentialsMissing) {
+			t.Fatalf("%s Stored = %v", status, status.Stored())
+		}
+	}
+}
