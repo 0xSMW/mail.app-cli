@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,11 +13,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// authAmbiguous is an account-level status: more than one address has
-// working credentials, so operational commands need --email.
-const authAmbiguous gmail.AuthStatus = "ambiguous_credentials"
+// Account-level statuses. authAmbiguous: more than one address has stored
+// credentials, so operational commands need --email. authAccountUnsupported:
+// the Mail.app account is disabled or not IMAP, so no credentials can help.
+const (
+	authAmbiguous          gmail.AuthStatus = "ambiguous_credentials"
+	authAccountUnsupported gmail.AuthStatus = "account_unsupported"
+)
 
-const authAmbiguousHint = "choose one with --email"
+const (
+	authAmbiguousHint          = "choose one with --email"
+	authAccountUnsupportedHint = "Gmail labels need an enabled IMAP account in Mail; select the Gmail IMAP account"
+)
 
 // gmailAuthReport is the Gmail authorization state of one Mail.app account.
 type gmailAuthReport struct {
@@ -26,13 +34,15 @@ type gmailAuthReport struct {
 	Detail        string                `json:"detail,omitempty"`
 	Hint          string                `json:"hint,omitempty"`
 	Addresses     []gmail.AddressStatus `json:"addresses"`
+	// failure is set when the check could not run. Only doctor reads it.
+	failure *clierr.Error
 }
 
 func (a *application) newLabelsAuthStatusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use: "status", Short: "Check stored Gmail credentials for each address of a Mail.app account", Args: cobra.NoArgs,
-		Long:        "Check the Gmail credentials this CLI stores in macOS Keychain for each actual address of the selected Mail.app account. Each check exchanges the stored refresh token and reads the Gmail profile. Mail.app's own Google sign-in does not authorize this CLI.",
-		Annotations: map[string]string{annotationAgentNotes: "Read-only. status is connected only when exactly one address has working credentials whose Gmail profile matches that address. ambiguous_credentials means several do; pass --email. Each address reports its own status, detail and hint. Exits 0 only when connected."},
+		Use: "status", Short: "Check stored Gmail credentials, refreshing and saving the access token as label commands do", Args: cobra.NoArgs,
+		Long:        "Check the Gmail credentials this CLI stores in macOS Keychain for each actual address of the selected Mail.app account. Mail.app's own Google sign-in does not authorize this CLI. Each check exchanges the stored refresh token for a new access token, saves the result to Keychain the same way a label command does, and reads the Gmail profile. A Keychain write failure is reported as keychain_access. A disabled or non-IMAP account reports account_unsupported without reading Keychain.",
+		Annotations: map[string]string{annotationAgentNotes: "Not a mutation, but it saves the refreshed access token to Keychain like any label command. The account status follows operational credential selection: connected only when exactly one address has stored credentials and they work for that address; a Keychain, invalid-credential or scope failure on any address fails the account; two or more stored credential sets are ambiguous_credentials (pass --email). account_unsupported means the Mail.app account is disabled or not IMAP. Each address reports its own status, detail and hint. Exits 0 only when connected."},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			account, err := a.requireAccount()
 			if err != nil {
@@ -47,9 +57,14 @@ func (a *application) newLabelsAuthStatusCmd() *cobra.Command {
 	}
 }
 
+// lookupGmailAccountEmails applies the label workflow's account checks
+// before listing the account's actual addresses.
 func (a *application) lookupGmailAccountEmails(ctx context.Context, account string) ([]string, error) {
 	if a.gmailAccountEmails != nil {
 		return a.gmailAccountEmails(ctx, account)
+	}
+	if err := mail.GmailAccountSupport(ctx, a.mailClient, account); err != nil {
+		return nil, err
 	}
 	return mail.GmailAccountEmails(ctx, a.mailClient, account)
 }
@@ -63,8 +78,12 @@ func (a *application) probeGmailAddress(ctx context.Context, email string) gmail
 
 // gmailAuthStatus probes the selected address, or every actual address of the
 // account. A Mail.app failure is returned as a command error with no report.
+// A disabled or non-IMAP account is a report, with no address probed.
 func (a *application) gmailAuthStatus(ctx context.Context, account string) (gmailAuthReport, error) {
 	emails, err := a.lookupGmailAccountEmails(ctx, account)
+	if errors.Is(err, mail.ErrGmailAccountUnsupported) {
+		return gmailAuthReport{Account: account, Status: authAccountUnsupported, Detail: err.Error(), Hint: authAccountUnsupportedHint, Addresses: []gmail.AddressStatus{}}, nil
+	}
 	if err != nil {
 		return gmailAuthReport{}, gmailLabelCommandError(err)
 	}
@@ -103,30 +122,35 @@ func checkGmailAddress(status gmail.AddressStatus, email string) gmail.AddressSt
 	return status
 }
 
-// summarizeGmailAuth sets the account status. A real failure is reported in
-// preference to a missing credential for another address, such as an alias.
+// summarizeGmailAuth sets the account status with the rule operational
+// commands use to select credentials (selectGmailLabelEmail):
+//   - a credential read failure on any address fails the account;
+//   - two or more addresses with stored credentials are ambiguous;
+//   - one address with stored credentials gives its status;
+//   - otherwise credentials are missing.
 func summarizeGmailAuth(report *gmailAuthReport) {
-	var connected []gmail.AddressStatus
+	var stored []gmail.AddressStatus
 	for _, address := range report.Addresses {
-		if address.Status == gmail.AuthConnected {
-			connected = append(connected, address)
+		if address.Status.StopsSelection() {
+			report.Status, report.Hint = address.Status, address.Status.Hint()
+			return
+		}
+		if address.Status.Stored() {
+			stored = append(stored, address)
 		}
 	}
-	switch len(connected) {
-	case 1:
-		report.Status, report.ProviderEmail = gmail.AuthConnected, connected[0].ProviderEmail
-		return
+	switch len(stored) {
 	case 0:
+		report.Status = gmail.AuthCredentialsMissing
+	case 1:
+		report.Status = stored[0].Status
+		if report.Status == gmail.AuthConnected {
+			report.ProviderEmail = stored[0].ProviderEmail
+			return
+		}
 	default:
 		report.Status, report.Hint = authAmbiguous, authAmbiguousHint
 		return
-	}
-	report.Status = gmail.AuthCredentialsMissing
-	for _, address := range report.Addresses {
-		if address.Status != gmail.AuthCredentialsMissing {
-			report.Status = address.Status
-			break
-		}
 	}
 	report.Hint = report.Status.Hint()
 }
@@ -143,7 +167,7 @@ func gmailAuthFailure(report gmailAuthReport) *clierr.Error {
 	case gmail.AuthConnected:
 		return nil
 	case authAmbiguous:
-		return clierr.Usage(fmt.Sprintf("several Gmail credential sets work for Mail.app account %q", report.Account)).WithHint(report.Hint)
+		return clierr.Usage(fmt.Sprintf("several Gmail credential sets are stored for Mail.app account %q", report.Account)).WithHint(report.Hint)
 	}
 	return clierr.New(clierr.CodeUnavailable, fmt.Sprintf("Gmail authorization for Mail.app account %q: %s", report.Account, report.Status)).WithHint(report.Hint)
 }

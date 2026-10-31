@@ -60,7 +60,9 @@ mail-app-cli labels auth status -a "Work" --json
 mail-app-cli doctor --gmail -a "Work"
 ```
 
-`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google and reads the Gmail profile. The command never prints tokens or secrets. It exits 0 only when exactly one address is `connected`. When more than one address is connected, the account status is `ambiguous_credentials`; pass `--email` to choose. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
+`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google for a new access token, saves it to Keychain the same way a label command does, and reads the Gmail profile. A Keychain write problem therefore shows up as `keychain_access`, as it would for a label command. The command never prints tokens or secrets. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
+
+The account status follows the rule label commands use to pick credentials. It is `connected`, with exit 0, only when exactly one address has stored credentials and they work. A `keychain_unavailable`, `keychain_access`, `credentials_invalid` or `scope_insufficient` result on any address fails the whole account. Two or more addresses with stored credentials make the account `ambiguous_credentials`, even if only one of them works; pass `--email` to choose. A disabled or non-IMAP Mail.app account is `account_unsupported`, and no address is checked.
 
 | Status | Meaning | Recovery |
 | --- | --- | --- |
@@ -76,9 +78,11 @@ mail-app-cli doctor --gmail -a "Work"
 | `network` | Google could not be reached or the request timed out. | Check the network connection and retry. |
 | `provider_error` | Google returned a 5xx, a 429, or a response the CLI could not use. | Retry later. |
 | `account_mismatch` | The credentials work but belong to a different Google account, such as `other@example.com` for `primary@example.com`. | Connect credentials for an address configured on the selected Mail.app account. |
-| `unknown` | Any other failure. With `doctor --gmail`, this includes a Mail.app error that stopped the check. | Read `detail`. |
+| `unknown` | Any other failure. With `doctor --gmail`, this includes a Mail.app error or a missing account that stopped the check. | Read `detail`. |
+| `ambiguous_credentials` | Account only. Two or more addresses have stored credentials. | Pass `--email` to choose one. |
+| `account_unsupported` | Account only. The Mail.app account is disabled or is not an IMAP account. | Enable the account, or select the Gmail IMAP account in Mail.app. |
 
-When several addresses fail, the account status is the first failure other than `credentials_missing`, so a missing alias does not hide a rejected token on the primary address. Other `labels` commands use the same statuses to choose their error hints.
+A missing alias never hides a failure on another address: an address with `credentials_missing` does not count as stored. Other `labels` commands use the same statuses to choose their error hints.
 
 ## Inspect and change labels
 

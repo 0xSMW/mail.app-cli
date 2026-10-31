@@ -286,3 +286,123 @@ func TestGmailErrorHintsFollowAuthStatus(t *testing.T) {
 		t.Fatalf("deadline error = %+v", got)
 	}
 }
+
+// The account status must agree with selectGmailLabelEmail, which operational
+// commands use: a second stored credential set makes the account ambiguous
+// even when it no longer works, and a credential read failure on any address
+// fails the account.
+func TestLabelsAuthStatusMatchesOperationalSelection(t *testing.T) {
+	primary := connectedProbe("primary@example.com", "primary@example.com")
+	for _, tt := range []struct {
+		name   string
+		alias  gmail.AddressStatus
+		status gmail.AuthStatus
+		exit   int
+		hint   string
+	}{
+		{"alias with revoked refresh token", failedProbe("alias@example.com", gmail.AuthTokenRejected, "Gmail OAuth token exchange failed (HTTP 400, invalid_grant)"), authAmbiguous, 1, authAmbiguousHint},
+		{"alias with read-only scope", failedProbe("alias@example.com", gmail.AuthScopeInsufficient, gmail.ErrScopeInsufficient.Error()), gmail.AuthScopeInsufficient, 3, gmail.AuthScopeInsufficient.Hint()},
+		{"alias Keychain refused", failedProbe("alias@example.com", gmail.AuthKeychainAccess, "Gmail Keychain read failed (Security status -50)"), gmail.AuthKeychainAccess, 3, gmail.AuthKeychainAccess.Hint()},
+		{"alias connected to the same Google account", connectedProbe("alias@example.com", "primary@example.com"), authAmbiguous, 1, authAmbiguousHint},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fakes := &gmailAuthFakes{emails: []string{"primary@example.com", "alias@example.com"}, probes: map[string]gmail.AddressStatus{"primary@example.com": primary, "alias@example.com": tt.alias}}
+			code, stdout, _ := runGmailAuth(t, fakes, authStatusArgs...)
+			envelope := decodeGmailAuth(t, stdout)
+			if code != tt.exit || envelope.OK || envelope.Data.Status != tt.status || envelope.Hint != tt.hint || envelope.Data.ProviderEmail != "" {
+				t.Fatalf("exit=%d envelope=%+v", code, envelope)
+			}
+		})
+	}
+
+	// The selector applies the same rule to the same two addresses.
+	emails := []string{"primary@example.com", "alias@example.com"}
+	_, err := selectGmailLabelEmail(emails, "", func(string) error { return nil })
+	if clierr.Classify(err).Code != clierr.CodeUsage {
+		t.Fatalf("selector with two stored credential sets: %v", err)
+	}
+	_, err = selectGmailLabelEmail(emails, "", func(email string) error {
+		if email == "alias@example.com" {
+			return gmail.ErrScopeInsufficient
+		}
+		return nil
+	})
+	if !errors.Is(err, gmail.ErrScopeInsufficient) || clierr.Classify(err).Code != clierr.CodeUnavailable {
+		t.Fatalf("selector with read-only alias: %v", err)
+	}
+}
+
+func TestGmailPreflightErrorUsesTypedCauseHint(t *testing.T) {
+	// GmailLabelWorkflow.bind wraps a failed profile read this way.
+	bind := &mail.GmailLabelError{Kind: "unavailable", Hint: "Connect or import Gmail credentials for this Mail account", Cause: &gmail.TokenError{StatusCode: 400, Code: "invalid_grant"}}
+	got := gmailLabelCommandError(fmt.Errorf("label preflight: %w", bind))
+	if got.Code != clierr.CodeUnavailable || got.Hint != gmail.AuthTokenRejected.Hint()+"; run 'mail-app-cli labels auth status -a <account>' for details" {
+		t.Fatalf("error = %+v", got)
+	}
+	plain := &mail.GmailLabelError{Kind: "unavailable", Hint: "Connect Gmail credentials whose profile matches an actual address of this Mail account", Cause: errors.New("Gmail profile email does not match")}
+	if got := gmailLabelCommandError(plain); got.Hint != plain.Hint {
+		t.Fatalf("untyped preflight hint replaced: %+v", got)
+	}
+}
+
+func TestGmailRequestErrorsAboutTheTargetHaveNoAuthHint(t *testing.T) {
+	for _, tt := range []struct {
+		status int
+		want   string
+	}{
+		{404, "Gmail did not find the message or label"},
+		{410, "Gmail did not find the message or label"},
+		{400, "Gmail rejected the request"},
+		{429, gmail.AuthProviderError.Hint()},
+		{401, gmail.AuthTokenRejected.Hint()},
+	} {
+		t.Run(fmt.Sprint(tt.status), func(t *testing.T) {
+			got := gmailLabelCommandError(&gmail.RequestError{Operation: "get message", StatusCode: tt.status})
+			if got.Code != clierr.CodeUnavailable || !strings.HasPrefix(got.Hint, tt.want) {
+				t.Fatalf("error = %+v", got)
+			}
+			if tt.status == 404 || tt.status == 410 || tt.status == 400 {
+				if strings.Contains(got.Hint, "labels auth") {
+					t.Fatalf("target error got an authorization hint: %q", got.Hint)
+				}
+			}
+		})
+	}
+}
+
+func TestLabelsAuthStatusRejectsUnsupportedAccountsWithoutProbing(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		account mail.Account
+		detail  string
+	}{
+		{"disabled", mail.Account{Name: "Example Account", AccountType: "imap", Enabled: false, EmailAddress: "primary@example.com"}, "is disabled"},
+		{"not IMAP", mail.Account{Name: "Example Account", AccountType: "iCloud", Enabled: true, EmailAddress: "one@example.com", EmailAddresses: []string{"two@example.com", "three@example.com"}}, "must be an IMAP account"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newApplication()
+			a.mailClient = mail.NewClient()
+			a.mailClient.PrimeAccounts([]mail.Account{tt.account})
+			var probed []string
+			a.gmailProbe = func(_ context.Context, email string) gmail.AddressStatus {
+				probed = append(probed, email)
+				return connectedProbe(email, email)
+			}
+			report, err := a.gmailAuthStatus(context.Background(), "Example Account")
+			if err != nil || report.Status != authAccountUnsupported || report.Hint != authAccountUnsupportedHint || !strings.Contains(report.Detail, tt.detail) || len(report.Addresses) != 0 || len(probed) != 0 {
+				t.Fatalf("report=%+v err=%v probed=%v", report, err, probed)
+			}
+			failure := gmailAuthFailure(report)
+			if failure == nil || failure.Code != clierr.CodeUnavailable || failure.Hint != authAccountUnsupportedHint {
+				t.Fatalf("failure = %+v", failure)
+			}
+		})
+	}
+	a := newApplication()
+	a.mailClient = mail.NewClient()
+	a.mailClient.PrimeAccounts([]mail.Account{{Name: "Example Account", AccountType: "imap", Enabled: true, EmailAddress: "primary@example.com"}})
+	a.gmailProbe = func(_ context.Context, email string) gmail.AddressStatus { return connectedProbe(email, email) }
+	if report, err := a.gmailAuthStatus(context.Background(), "Example Account"); err != nil || report.Status != gmail.AuthConnected {
+		t.Fatalf("supported account report=%+v err=%v", report, err)
+	}
+}
