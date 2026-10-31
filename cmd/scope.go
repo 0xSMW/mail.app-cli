@@ -116,12 +116,20 @@ func (a *application) locateMessages(ids []string) ([]messageRef, []string, erro
 		// the index can still cheaply provide the stable fallback identity used
 		// by verified moves. An unavailable or lagging index never invalidates
 		// the human's explicit account/mailbox address.
-		located, _ := a.mailClient.LocateMessages(ids)
+		located, _ := a.locateIndexed(ids)
 		return explicitMessageRefs(ids, account, a.mailboxInScope(), located), nil, nil
 	}
 
-	located, err := a.mailClient.LocateMessages(ids)
+	located, err := a.locateIndexed(ids)
 	return a.resolveLocatedMessages(ids, located, err)
+}
+
+// locateIndexed looks IDs up in the Envelope Index, or in the test locator.
+func (a *application) locateIndexed(ids []string) (map[string]mail.MessageLocation, error) {
+	if a.messageLocator != nil {
+		return a.messageLocator(ids)
+	}
+	return a.mailClient.LocateMessages(ids)
 }
 
 func explicitMessageRefs(ids []string, account, mailbox string, located map[string]mail.MessageLocation) []messageRef {

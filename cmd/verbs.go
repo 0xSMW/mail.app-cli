@@ -167,6 +167,22 @@ func (a *application) newIDVerb(use, short, action string, build func() (batchOp
 	return cmd
 }
 
+// gmailLabelHelpNote points Gmail users from mailbox commands to the labels
+// adapter. Mail.app automation cannot remove a single Gmail label.
+const gmailLabelHelpNote = "On Gmail this changes mailbox membership only. To remove Important or a user label from a message that stays where it is, use 'labels remove <id> --label <name>'."
+
+// addGmailLabelHelp appends gmailLabelHelpNote to Long, built from Short when
+// absent, and to the agent notes when the command has them. Help text only.
+func addGmailLabelHelp(cmd *cobra.Command) {
+	if cmd.Long == "" {
+		cmd.Long = cmd.Short + "."
+	}
+	cmd.Long += "\n\n" + gmailLabelHelpNote
+	if notes, ok := cmd.Annotations[annotationAgentNotes]; ok {
+		cmd.Annotations[annotationAgentNotes] = notes + " " + gmailLabelHelpNote
+	}
+}
+
 const bodySourceUsage = `Where the body comes from: "disk" reads Mail.app's message file and asks Mail.app only when there is none, "mail" always asks Mail.app to render it`
 
 func (a *application) buildVerbsCommands() {
@@ -265,6 +281,8 @@ func (a *application) buildVerbsCommands() {
 	a.moveCmd.Annotations = map[string]string{
 		annotationAgentNotes: "--to takes a mailbox name in the same account. Use 'mailboxes list' to see names. Mail.app assigns the moved message a new ID in the target mailbox.",
 	}
+	addGmailLabelHelp(a.archiveCmd)
+	addGmailLabelHelp(a.moveCmd)
 	a.seenCmd.Annotations = map[string]string{annotationAgentNotes: "Idempotent. Multiple IDs are applied one Mail.app call at a time."}
 	a.unseenCmd.Annotations = a.seenCmd.Annotations
 }

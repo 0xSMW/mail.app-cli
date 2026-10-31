@@ -48,6 +48,9 @@ A Go CLI over macOS Mail.app. Reads are fast (Mail's local Envelope Index); writ
 | Archive | `mail-app-cli archive 12345 --json` |
 | Trash | `mail-app-cli delete 12345 --dry-run --json`, then without `--dry-run` |
 | Move | `mail-app-cli move 12345 --to "Receipts" --json` |
+| Gmail label state | `mail-app-cli labels show 12345 -a "Example Account" --json` |
+| Remove Important or a user label without moving | `mail-app-cli labels remove 12345 12346 -a "Example Account" --label IMPORTANT --dry-run --json`, then without `--dry-run` |
+| Gmail credential check | `mail-app-cli labels auth status -a "Example Account" --json` |
 | Bulk by selector | `mail-app-cli messages batch archive -a "Example Account" -m INBOX --sender-domain updates.example.test --dry-run --json`, then `--yes` |
 | Attachments | `mail-app-cli attachments list 12345 --json`, `attachments save 12345 "file.pdf" -o ~/Downloads/file.pdf` |
 | Send | `mail-app-cli send -t recipient@example.test -s "Subject" --body "text" --dry-run --json` |
@@ -93,6 +96,7 @@ All Mail presence alone does not prove INBOX absence.
 4. After a mutation from outside the CLI, add `--no-cache` to `messages list`; its results are cached for five minutes.
 5. Gmail: archive means "move to All Mail". A message already in All Mail is reported as `status: skipped` with `error: "already in All Mail"`, counted in `skipped`, and the command exits 0; nothing was relocated. `--mark-read` alone does not change skipped items. Add `--mark-read-on-skip` with `--mark-read` to explicitly mark and verify already-archived records.
 6. Moving a message (archive, delete, move) makes Mail.app assign it a new ID in the destination. The receipt reports the old ID; to touch the message again, find it with `search` or `recent search`. Don't chain a second mutation on the same ID after a move.
+7. Gmail archive removes Inbox membership while preserving Important and user labels. A move may remove its source user-label membership. To remove only Important or a specific user label, use `labels remove`. It needs its own Gmail credentials, separate from Mail.app's sign-in; without them it exits 3 with a hint that names the command to connect them. Several IDs must be in one account, run in order, and stop at the first failure.
 
 ## Migration from 1.x
 

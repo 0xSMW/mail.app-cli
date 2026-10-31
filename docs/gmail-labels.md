@@ -51,6 +51,39 @@ The import format uses standard OAuth field names:
 
 `client_id` and `refresh_token` are required. `client_secret` is optional for clients that do not require one. Optional fields include `access_token` and `expiry` (RFC 3339). If `scope` is omitted, a fresh OAuth refresh response must establish the required scope. The standard `authorized_user` format's extra `type` field is accepted. Keep the file private; pass its path, never token values, on the command line. Commands return account and connection status without exposing credentials.
 
+## Check authorization
+
+Mail.app being signed in to Google does not authorize this CLI. The `labels` commands use their own OAuth credentials, stored in macOS Keychain by `labels auth connect` or `labels auth import`. To see whether those credentials work, run either command:
+
+```sh
+mail-app-cli labels auth status -a "Work" --json
+mail-app-cli doctor --gmail -a "Work"
+```
+
+`labels auth status` checks each actual address of the account, or only the one named with `--email`. Each check exchanges the stored refresh token with Google for a new access token, saves it to Keychain the same way a label command does, and reads the Gmail profile. The profile must match an actual address configured on the Mail.app account; it can differ from the address used to look up the credentials, including when `--email` selects an alias. A Keychain write problem therefore shows up as `keychain_access`, as it would for a label command. The command never prints tokens or secrets. `doctor --gmail` adds the same result as `gmail` and `gmailHealthy` to the doctor output. `healthy` still describes only the Mail.app bridge, and doctor fails if either check fails.
+
+The account status follows the rule label commands use to pick credentials. It is `connected`, with exit 0, only when exactly one address has stored credentials and they work. A `keychain_unavailable`, `keychain_access`, `credentials_invalid` or `scope_insufficient` result on any address fails the whole account. Two or more addresses with stored credentials make the account `ambiguous_credentials`, even if only one of them works; pass `--email` to choose. A disabled or non-IMAP Mail.app account is `account_unsupported`, and no address is checked.
+
+| Status | Meaning | Recovery |
+| --- | --- | --- |
+| `connected` | Google accepted the refresh token and the Gmail profile matches an actual address of the selected Mail.app account. | None. |
+| `credentials_missing` | Keychain has no credentials for this address. | Run `labels auth connect` or `labels auth import` for the address. |
+| `keychain_unavailable` | This build cannot read macOS Keychain. | Use a macOS build made with cgo. |
+| `keychain_access` | Keychain refused the read, often because it is locked or the binary's signature changed. | Unlock the login Keychain and use the installed signed build. Reconnect from that build if access is still refused. |
+| `credentials_invalid` | The stored credentials cannot be parsed or lack a required field. | Reconnect or import a valid credential file. |
+| `scope_insufficient` | The credentials do not grant `gmail.modify` or full mail scope. | Reconnect and grant `gmail.modify`. |
+| `token_rejected` | Google rejected the refresh token (`invalid_grant`, another 400 or 401 from the token endpoint, or a Gmail API 401). | Reconnect or import new credentials. |
+| `client_rejected` | Google rejected the OAuth client (`invalid_client` or `unauthorized_client`). | Check that the desktop OAuth client still exists, then reconnect with its client secret file. |
+| `access_denied` | The Gmail API returned 403. | Enable the Gmail API for the OAuth client's project, or connect the correct account. |
+| `network` | Google could not be reached or the request timed out. | Check the network connection and retry. |
+| `provider_error` | Google returned a 5xx, a 429, or a response the CLI could not use. | Retry later. |
+| `account_mismatch` | The credentials work but belong to a different Google account, such as `other@example.com` for `primary@example.com`. | Connect credentials for an address configured on the selected Mail.app account. |
+| `unknown` | Any other failure. With `doctor --gmail`, this includes a Mail.app error or a missing account that stopped the check. | Read `detail`. |
+| `ambiguous_credentials` | Account only. Two or more addresses have stored credentials. | Pass `--email` to choose one. |
+| `account_unsupported` | Account only. The Mail.app account is disabled or is not an IMAP account. | Enable the account, or select the Gmail IMAP account in Mail.app. |
+
+A missing alias never hides a failure on another address: an address with `credentials_missing` does not count as stored. Other `labels` commands use the same statuses to choose their error hints.
+
 ## Inspect and change labels
 
 ```sh
@@ -59,6 +92,8 @@ mail-app-cli labels show 12345 -a "Work" --json
 mail-app-cli labels remove 12345 -a "Work" --label IMPORTANT --dry-run --json
 mail-app-cli labels remove 12345 -a "Work" --label IMPORTANT --json
 mail-app-cli labels add 12345 -a "Work" --label "Projects/Current" --json
+mail-app-cli labels remove 12345 12346 12347 -a "Work" --label IMPORTANT --dry-run --json
+mail-app-cli labels remove 12345 12346 12347 -a "Work" --label IMPORTANT --json
 ```
 
 The message argument is the numeric Mail.app ID from list or search output. If you omit `--mailbox`, the CLI locates the message. Pass `--mailbox` (`-m`) when you need to address a specific Mail.app location. A numeric local ID is never sent as a Gmail message ID: resolution requires a true RFC Message-ID and independent header checks, and fails if more than one provider message matches.
@@ -67,9 +102,37 @@ The message argument is the numeric Mail.app ID from list or search output. If y
 
 `--dry-run` resolves the account, provider message, label, and current memberships without changing labels. Provider credentials and access to Mail.app are still needed. A real change always reads fresh provider state afterward and checks the exact requested label delta, including preservation of unrelated labels. There is no flag to disable this verification.
 
+### Several messages
+
+`show`, `add`, and `remove` accept several message IDs. Each ID must be numeric and appear once. The CLI resolves every ID before it contacts Gmail. If one ID is missing, nothing runs. All messages must be in one Mail.app account; for messages in different accounts, run the command once per account.
+
+Messages run one at a time in argument order. Each change writes its own receipt and makes its own fresh provider read. The run stops at the first failure. Later IDs are reported as `not_attempted` and are never read or changed.
+
+With one ID, the result keeps the single-message shape above, so `.data.status` still works. With several IDs, `data` is an aggregate:
+
+```json
+{
+  "action": "remove",
+  "label": "IMPORTANT",
+  "dryRun": false,
+  "matched": 3,
+  "attempted": 2,
+  "succeeded": 1,
+  "failed": 1,
+  "notAttempted": 1,
+  "items": [
+    {"messageId": "12345", "status": "changed_verified", "providerConfirmed": true, "mailStatus": "verified", "receiptPath": "/private/path/receipt-1.jsonl", "error": "", "result": {}},
+    {"messageId": "12346", "status": "unknown", "providerConfirmed": false, "mailStatus": "pending", "receiptPath": "/private/path/receipt-2.jsonl", "error": "Gmail readback unavailable", "result": {}},
+    {"messageId": "12347", "status": "not_attempted"}
+  ]
+}
+```
+
+`result` holds the full single-message result for that ID; it is shortened here. `label` is omitted for `show`. `succeeded` counts `changed_verified`, `noop`, `dry_run`, and `observed`. The command exits 0 only when `failed` is 0. Otherwise it returns the failed message's error code, or `mutation_failed` (exit 6) when that message has a receipt to reconcile. The aggregate data is written in both cases.
+
 ## Receipts and reconciliation
 
-A dispatched label change writes a durable private receipt and returns its `receiptPath`. The JSON result includes the provider identity, before and after label IDs, and separate local Mail.app observations. A failed or unavailable readback preserves the receipt and returns a nonzero exit status. Do not repeat an uncertain mutation based only on its exit status.
+A dispatched label change writes a durable private receipt and returns its `receiptPath`. The JSON result includes the provider identity, before and after label IDs, and separate local Mail.app observations. A failed or unavailable readback preserves the receipt and returns a nonzero exit status. Do not repeat an uncertain mutation based only on its exit status. With several IDs, each item carries its own `receiptPath`; reconcile each receipt separately.
 
 ```sh
 mail-app-cli labels reconcile /private/path/receipt.jsonl --json

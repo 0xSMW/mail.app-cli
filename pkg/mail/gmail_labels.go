@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/mail"
 	"sort"
@@ -100,6 +101,36 @@ func GmailAccountEmail(ctx context.Context, c *Client, name string) (string, err
 	return addresses[0], nil
 }
 
+// ErrGmailAccountUnsupported matches the error for a Mail account that Gmail
+// labels cannot use: a disabled account or one that is not IMAP.
+var ErrGmailAccountUnsupported = errors.New("Mail account cannot be used for Gmail labels")
+
+type gmailAccountUnsupportedError struct{ message string }
+
+func (e *gmailAccountUnsupportedError) Error() string { return e.message }
+func (e *gmailAccountUnsupportedError) Unwrap() error { return ErrGmailAccountUnsupported }
+
+// gmailAccountSupported applies the account checks of the label workflow.
+func gmailAccountSupported(a *Account, name string) error {
+	if !a.Enabled {
+		return gmailLabelError("unavailable", "Enable the selected Mail account", &gmailAccountUnsupportedError{fmt.Sprintf("Mail account %q is disabled", name)})
+	}
+	if !strings.EqualFold(a.AccountType, "imap") {
+		return gmailLabelError("unavailable", "Select the Gmail IMAP account in Mail", &gmailAccountUnsupportedError{fmt.Sprintf("Mail account %q must be an IMAP account for Gmail labels", name)})
+	}
+	return nil
+}
+
+// GmailAccountSupport returns the error the label workflow returns for a
+// disabled or non-IMAP account, or nil when the account can use Gmail labels.
+func GmailAccountSupport(ctx context.Context, c *Client, name string) error {
+	a, err := c.WithContext(ctx).accountByName(name)
+	if err != nil {
+		return err
+	}
+	return gmailAccountSupported(a, name)
+}
+
 // GmailAccountEmails returns actual Mail account addresses in primary/alias
 // order, with normalized mailbox addresses and case-insensitive duplicates removed.
 func GmailAccountEmails(ctx context.Context, c *Client, name string) ([]string, error) {
@@ -176,11 +207,8 @@ func (w *GmailLabelWorkflow) bind(ctx context.Context, account string) (string, 
 	if err != nil {
 		return "", err
 	}
-	if !a.Enabled {
-		return "", gmailLabelError("unavailable", "Enable the selected Mail account", fmt.Errorf("Mail account %q is disabled", account))
-	}
-	if !strings.EqualFold(a.AccountType, "imap") {
-		return "", gmailLabelError("unavailable", "Select the Gmail IMAP account in Mail", fmt.Errorf("Mail account %q must be an IMAP account for Gmail labels", account))
+	if err := gmailAccountSupported(a, account); err != nil {
+		return "", err
 	}
 	p, err := w.Provider.Profile(ctx)
 	if err != nil {

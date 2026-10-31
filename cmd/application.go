@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"context"
 	"time"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/config"
+	"github.com/0xSMW/mail.app-cli/v3/internal/gmail"
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
 	"github.com/0xSMW/mail.app-cli/v3/pkg/mail"
 	"github.com/spf13/cobra"
@@ -23,6 +25,10 @@ type application struct {
 	resolved                config.Resolved
 	mailClient              *mail.Client
 	configLoadAttempted     bool
+	gmailAccountEmails      func(ctx context.Context, account string) ([]string, error)
+	gmailProbe              func(ctx context.Context, email string) gmail.AddressStatus
+	messageLocator          func(ids []string) (map[string]mail.MessageLocation, error)                  // test seam; nil reads the Envelope Index
+	gmailLabelApply         func(cmd *cobra.Command, account string, show bool) (gmailLabelApply, error) // test seam; nil builds the Gmail workflow
 	accountsCmd             *cobra.Command
 	accountsListCmd         *cobra.Command
 	attachmentsCmd          *cobra.Command
