@@ -373,6 +373,22 @@ Message IDs are numeric and global. `show`, `seen`, `unseen`, `flag`, `unflag`, 
 
 After archive, delete, or move, Mail.app gives the message a new ID in the destination mailbox. The receipt reports the ID you passed; find the message again with `search` or `recent search` before touching it a second time.
 
+## Gmail labels
+
+Mail.app's automation interface exposes a message's mailbox, read state, flags, and junk state. It does not expose Gmail labels or Important. `archive` and `move` change mailbox membership, so they cannot remove one label from a message and leave it in place. The `labels` commands call the Gmail API for that.
+
+The labels adapter uses its own OAuth credentials, stored in macOS Keychain. Signing in to Google in Mail.app does not authorize it. Connect each account once, then check the credentials before you rely on them:
+
+```bash
+mail-app-cli labels auth connect -a "Example Account" --client-secret /private/path/client-secret.json
+mail-app-cli labels auth status -a "Example Account" --json
+mail-app-cli labels show 12345 -a "Example Account" --json
+mail-app-cli labels remove 12345 12346 12347 -a "Example Account" --label IMPORTANT --dry-run --json
+mail-app-cli labels remove 12345 12346 12347 -a "Example Account" --label IMPORTANT --json
+```
+
+`show`, `add`, and `remove` accept several message IDs from one Mail.app account. Each message gets its own receipt and a fresh provider read to verify the change, and the run stops at the first failure. The CLI does not create, rename, or delete label definitions. Setup, receipts, and reconciliation are in [docs/gmail-labels.md](docs/gmail-labels.md).
+
 ## Mutations
 
 ### Disable sending

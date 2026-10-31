@@ -24,7 +24,10 @@ func TestLabelsValidateArgumentsBeforeMailOrCredentials(t *testing.T) {
 		want string
 	}{
 		{"local ID required", []string{"labels", "show", "rfc@example.com"}, "not numeric"},
-		{"extra ID", []string{"labels", "show", "1", "2"}, "accepts 1 arg"},
+		{"ID required", []string{"labels", "show"}, "requires at least 1 arg"},
+		{"later local ID required", []string{"labels", "remove", "1", "rfc@example.com", "--label", "IMPORTANT"}, "not numeric"},
+		{"duplicate ID", []string{"labels", "show", "12345", "12346", "12345"}, "12345 is given more than once"},
+		{"duplicate ID after trimming", []string{"labels", "add", "12345", " 12345", "--label", "IMPORTANT"}, "12345 is given more than once"},
 		{"label required", []string{"labels", "remove", "1"}, "--label"},
 		{"blank label", []string{"labels", "add", "1", "--label", " "}, "--label"},
 		{"list arguments", []string{"labels", "list", "unexpected"}, "unknown command"},
@@ -47,6 +50,8 @@ func TestLabelsProtectMutationReceiptsFromJQ(t *testing.T) {
 	for _, args := range [][]string{
 		{"labels", "add", "1", "--label", "IMPORTANT"},
 		{"labels", "remove", "1", "--label", "Projects/Current", "--dry-run"},
+		{"labels", "add", "1", "2", "--label", "IMPORTANT"},
+		{"labels", "remove", "1", "2", "--label", "IMPORTANT", "--dry-run"},
 		{"labels", "auth", "import", "--credentials", "/private/example.json"},
 		{"labels", "auth", "connect", "--client-secret", "/private/example.json"},
 	} {

@@ -417,6 +417,8 @@ func (a *application) buildBatchCommands() {
 			return a.runSelectedBatch("move", args[1:], args[0], mail.MoveMutator(false))
 		},
 	}
+	addGmailLabelHelp(a.messagesBatchArchiveCmd)
+	addGmailLabelHelp(a.messagesBatchMoveCmd)
 	a.messagesBatchMarkCmd = &cobra.Command{
 		Use:   "mark [message-id...]",
 		Short: "Mark selected messages read or unread",

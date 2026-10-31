@@ -116,6 +116,7 @@ func (a *application) buildThreadsCommands() {
 		},
 	}
 
+	addGmailLabelHelp(a.threadsArchiveCmd)
 	a.threadsCmd.AddCommand(a.threadsListCmd, threadsShowCmd, a.threadsArchiveCmd)
 	for _, cmd := range []*cobra.Command{a.threadsListCmd, threadsShowCmd, a.threadsArchiveCmd} {
 		cmd.Flags().IntVarP(&a.threadLimit, "limit", "l", 200, "Maximum messages to inspect")

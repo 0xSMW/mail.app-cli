@@ -88,6 +88,8 @@ mail-app-cli labels show 12345 -a "Work" --json
 mail-app-cli labels remove 12345 -a "Work" --label IMPORTANT --dry-run --json
 mail-app-cli labels remove 12345 -a "Work" --label IMPORTANT --json
 mail-app-cli labels add 12345 -a "Work" --label "Projects/Current" --json
+mail-app-cli labels remove 12345 12346 12347 -a "Work" --label IMPORTANT --dry-run --json
+mail-app-cli labels remove 12345 12346 12347 -a "Work" --label IMPORTANT --json
 ```
 
 The message argument is the numeric Mail.app ID from list or search output. If you omit `--mailbox`, the CLI locates the message. Pass `--mailbox` (`-m`) when you need to address a specific Mail.app location. A numeric local ID is never sent as a Gmail message ID: resolution requires a true RFC Message-ID and independent header checks, and fails if more than one provider message matches.
@@ -96,9 +98,37 @@ The message argument is the numeric Mail.app ID from list or search output. If y
 
 `--dry-run` resolves the account, provider message, label, and current memberships without changing labels. Provider credentials and access to Mail.app are still needed. A real change always reads fresh provider state afterward and checks the exact requested label delta, including preservation of unrelated labels. There is no flag to disable this verification.
 
+### Several messages
+
+`show`, `add`, and `remove` accept several message IDs. Each ID must be numeric and appear once. The CLI resolves every ID before it contacts Gmail. If one ID is missing, nothing runs. All messages must be in one Mail.app account; for messages in different accounts, run the command once per account.
+
+Messages run one at a time in argument order. Each change writes its own receipt and makes its own fresh provider read. The run stops at the first failure. Later IDs are reported as `not_attempted` and are never read or changed.
+
+With one ID, the result keeps the single-message shape above, so `.data.status` still works. With several IDs, `data` is an aggregate:
+
+```json
+{
+  "action": "remove",
+  "label": "IMPORTANT",
+  "dryRun": false,
+  "matched": 3,
+  "attempted": 2,
+  "succeeded": 1,
+  "failed": 1,
+  "notAttempted": 1,
+  "items": [
+    {"messageId": "12345", "status": "changed_verified", "providerConfirmed": true, "mailStatus": "verified", "receiptPath": "/private/path/receipt-1.jsonl", "error": "", "result": {}},
+    {"messageId": "12346", "status": "unknown", "providerConfirmed": false, "mailStatus": "pending", "receiptPath": "/private/path/receipt-2.jsonl", "error": "Gmail readback unavailable", "result": {}},
+    {"messageId": "12347", "status": "not_attempted"}
+  ]
+}
+```
+
+`result` holds the full single-message result for that ID; it is shortened here. `label` is omitted for `show`. `succeeded` counts `changed_verified`, `noop`, `dry_run`, and `observed`. The command exits 0 only when `failed` is 0. Otherwise it returns the failed message's error code, or `mutation_failed` (exit 6) when that message has a receipt to reconcile. The aggregate data is written in both cases.
+
 ## Receipts and reconciliation
 
-A dispatched label change writes a durable private receipt and returns its `receiptPath`. The JSON result includes the provider identity, before and after label IDs, and separate local Mail.app observations. A failed or unavailable readback preserves the receipt and returns a nonzero exit status. Do not repeat an uncertain mutation based only on its exit status.
+A dispatched label change writes a durable private receipt and returns its `receiptPath`. The JSON result includes the provider identity, before and after label IDs, and separate local Mail.app observations. A failed or unavailable readback preserves the receipt and returns a nonzero exit status. Do not repeat an uncertain mutation based only on its exit status. With several IDs, each item carries its own `receiptPath`; reconcile each receipt separately.
 
 ```sh
 mail-app-cli labels reconcile /private/path/receipt.jsonl --json
