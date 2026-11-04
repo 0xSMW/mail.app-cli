@@ -31,8 +31,10 @@ func (c *Client) Accounts() ([]Account, error) {
 	return c.GetAccountsJSON()
 }
 
-// Search runs the standard search within an account (every account when
-// empty). Partial results are returned rather than refused; check Complete.
-func (c *Client) Search(query, account string, limit int) (SearchResult, error) {
-	return c.SearchMessagesJSONSinceWithOptions(query, account, "", limit, "", SearchOptions{AllowPartial: true})
+// Search runs the standard search within the given scope: a non-empty
+// mailbox limits it to that mailbox, otherwise the account's mailboxes
+// (every account when empty). Partial results are returned rather than
+// refused; check Complete.
+func (c *Client) Search(query, account, mailbox string, limit int) (SearchResult, error) {
+	return c.SearchMessagesJSONSinceWithOptions(query, account, mailbox, limit, "", SearchOptions{AllowPartial: true})
 }

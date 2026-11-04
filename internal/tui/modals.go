@@ -149,69 +149,145 @@ func (p *mailboxPicker) helpBindings() []helpBinding {
 
 // --- search ---
 
+// searchScope is how wide a search runs: the selected mailbox, every
+// mailbox of its account, or every enabled account.
+type searchScope int
+
+const (
+	scopeMailbox searchScope = iota
+	scopeAccount
+	scopeAll
+)
+
+// searchScopes lists the scopes the selection offers, in tab order. All
+// inboxes spans accounts, so it has no narrower scope to offer.
+func searchScopes(entry sidebarEntry) []searchScope {
+	if entry.kind != entryMailbox {
+		return []searchScope{scopeAll}
+	}
+	return []searchScope{scopeMailbox, scopeAccount, scopeAll}
+}
+
 type searchModal struct {
 	inputBox
+	entry sidebarEntry
+	scope searchScope
 }
 
 type searchDoneMsg struct {
 	requestResult
-	query  string
+	source listSource
 	result mail.SearchResult
 	silent bool
 }
 
-func newSearchModal() *searchModal {
-	return &searchModal{inputBox: newInputBox("/ ", "words to find in subject, sender, or summary")}
+// newSearchModal opens the search box over the current selection. A search
+// list already showing seeds the scope the user last chose.
+func newSearchModal(entry sidebarEntry, showing listSource) *searchModal {
+	sm := &searchModal{inputBox: newInputBox("/ ", "words to find in subject, sender, or summary"), entry: entry}
+	sm.scope = searchScopes(entry)[0]
+	if showing.search != "" {
+		seed := scopeAll
+		switch {
+		case showing.mailbox != "":
+			seed = scopeMailbox
+		case showing.account != "":
+			seed = scopeAccount
+		}
+		for _, s := range searchScopes(entry) {
+			if s == seed {
+				sm.scope = seed
+			}
+		}
+	}
+	return sm
+}
+
+// cycleScope moves to the next scope the selection offers, wrapping.
+func (sm *searchModal) cycleScope() {
+	scopes := searchScopes(sm.entry)
+	for i, s := range scopes {
+		if s == sm.scope {
+			sm.scope = scopes[(i+1)%len(scopes)]
+			return
+		}
+	}
+	sm.scope = scopes[0]
+}
+
+// source is the list source the search runs over: the query plus the
+// account and mailbox the scope selects. A scope without a selection to
+// name degrades to every account, matching how it is rendered.
+func (sm *searchModal) source(query string) listSource {
+	src := listSource{search: query}
+	switch {
+	case sm.scope == scopeMailbox && sm.entry.kind == entryMailbox:
+		src.account, src.mailbox = sm.entry.account, sm.entry.mailbox
+	case sm.scope == scopeAccount && sm.entry.kind != entryUnified:
+		src.account = sm.entry.account
+	}
+	return src
+}
+
+func (sm *searchModal) scopeLabel() string {
+	switch {
+	case sm.scope == scopeMailbox && sm.entry.kind == entryMailbox:
+		return sanitizeLine(sm.entry.account + " / " + sm.entry.mailbox)
+	case sm.scope == scopeAccount && sm.entry.kind != entryUnified:
+		return sanitizeLine(sm.entry.account) + " (all mailboxes)"
+	default:
+		return "all accounts"
+	}
 }
 
 func (sm *searchModal) handleKey(m *model, msg tea.KeyPressMsg) (tea.Cmd, bool) {
 	switch msg.String() {
 	case "esc":
 		return nil, false
+	case "tab":
+		sm.cycleScope()
+		return nil, true
 	case "enter":
 		query := strings.TrimSpace(sm.input.Value())
 		if query == "" {
 			return nil, false
 		}
-		return m.runSearch(query, false), false
+		return m.runSearch(sm.source(query), false), false
 	}
 	return sm.update(msg), true
 }
 
 func (sm *searchModal) view(m *model) string {
 	sm.input.SetWidth(max(min(m.width-10, 70), 20))
-	scope := "all accounts"
-	if entry := m.sidebar.current(); entry.kind != entryUnified {
-		scope = sanitizeLine(entry.account)
-	}
-	return m.styles.frame.Render(m.styles.title.Render("Search "+scope) + "\n" + sm.input.View())
+	return m.styles.frame.Render(m.styles.title.Render("Search "+sm.scopeLabel()) + "\n" + sm.input.View())
 }
 
 func (sm *searchModal) helpBindings() []helpBinding {
-	return []helpBinding{{"enter", "search"}, {"esc", "cancel"}}
+	bindings := []helpBinding{{"enter", "search"}}
+	if len(searchScopes(sm.entry)) > 1 {
+		bindings = append(bindings, helpBinding{"tab", "scope"})
+	}
+	return append(bindings, helpBinding{"esc", "cancel"})
 }
 
-// runSearch searches the account in scope. silent re-runs keep the cursor.
-func (m *model) runSearch(query string, silent bool) tea.Cmd {
-	account := ""
-	if entry := m.sidebar.current(); entry.kind != entryUnified {
-		account = entry.account
-	}
+// runSearch searches the scope its source records: a mailbox, an account,
+// or every account when both are empty. silent re-runs keep the cursor.
+func (m *model) runSearch(src listSource, silent bool) tea.Cmd {
 	if !silent {
 		m.closeReader()
 	}
 	if m.writes.busy {
 		// Search rows would show what a queued action is changing; the
 		// refresh after the queue drains runs the search.
-		m.deferRead(listSource{search: query})
+		m.deferRead(src)
 		return nil
 	}
 	m.listLane.abandon()
 	id, ctx := m.searchLane.begin(m.ctx, silent)
 	client := m.client.WithContext(ctx)
 	return func() tea.Msg {
-		result, err := client.Search(query, account, searchLimit)
-		return searchDoneMsg{requestResult: requestResult{id, err}, query: query, result: result, silent: silent}
+		result, err := client.Search(src.search, src.account, src.mailbox, searchLimit)
+		return searchDoneMsg{requestResult: requestResult{id, err}, source: src, result: result, silent: silent}
 	}
 }
 
@@ -224,9 +300,9 @@ func (m model) onSearchDone(msg searchDoneMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, cmd
 	}
-	keepCursor := msg.silent && m.list.source.search == msg.query
+	keepCursor := msg.silent && m.list.source == msg.source
 	messages, lagging := m.reconcile(msg.result.Messages, time.Now())
-	m.list.setMessages(messages, keepCursor, listSource{search: msg.query}, 0)
+	m.list.setMessages(messages, keepCursor, msg.source, 0)
 	if !keepCursor {
 		m.list.clearSelection()
 	}
