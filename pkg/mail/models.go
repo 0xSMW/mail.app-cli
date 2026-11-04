@@ -49,6 +49,7 @@ type Message struct {
 	// BodyDiagnostics inventories local extraction; it does not certify semantic completeness.
 	BodyDiagnostics *BodyDiagnostics `json:"bodyDiagnostics,omitempty"`
 	// Snippet is Mail's indexed summary, present on index-backed listings.
+	// A missing summary is derived from the message's body file on disk.
 	Snippet       string   `json:"snippet,omitempty"`
 	Mailbox       string   `json:"mailbox"`
 	Account       string   `json:"account"`

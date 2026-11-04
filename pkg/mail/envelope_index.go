@@ -558,7 +558,9 @@ func (c *Client) getMessagesFromIndex(accountName string, mbox *indexMailbox, li
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	return indexMessagesToMessages(rows), nil
+	messages := indexMessagesToMessages(rows)
+	c.backfillSnippetsFromDisk(accountName, mbox.Name, messages)
+	return messages, nil
 }
 
 func (c *Client) getMessageEnvelopeFromIndex(accountName string, mbox *indexMailbox, messageID string) (*Message, error) {
@@ -692,6 +694,7 @@ func (c *Client) scanMessagesFromIndex(accountName string, mbox *indexMailbox, r
 		return scanPage{}, err
 	}
 	page := scanPage{Messages: indexMessagesToMessages(rows)}
+	c.backfillSnippetsFromDisk(accountName, mbox.Name, page.Messages)
 	if len(rows) == 0 {
 		return page, nil
 	}
@@ -738,7 +741,9 @@ limit %d;
 	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
 		return nil, err
 	}
-	return indexMessagesToMessages(rows), nil
+	messages := indexMessagesToMessages(rows)
+	c.backfillSnippetsFromDisk(accountName, mbox.Name, messages)
+	return messages, nil
 }
 
 type indexMailboxCandidates struct{ exact, literal, nested, broad string }

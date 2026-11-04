@@ -14,6 +14,9 @@ or unsupported mailbox shapes require it.
 ## Current Optimizations
 
 - Envelope Index reads for mailbox counts and metadata-only message lists.
+- Snippet backfill from on-disk message files for listings whose indexed
+  summary is missing, bounded per listing and strictly best-effort
+  (disable with `MAIL_APP_CLI_DISABLE_SNIPPET_BACKFILL`).
 - Label-aware index queries so folder membership is preserved for providers that
   store messages in an archive-style backing mailbox.
 - Direct `messages.byId(...)` lookup for message details, with fallback to the
