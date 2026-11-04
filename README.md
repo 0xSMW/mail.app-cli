@@ -558,6 +558,7 @@ Keys are camelCase everywhere. Lists are never `null`. Warnings that 1.x printed
 | `MAIL_APP_CLI_SEARCH_TIMEOUT` | seconds for automation search (8) |
 | `MAIL_APP_CLI_CONTENT_TIMEOUT` | seconds for `--with-content` (45) |
 | `MAIL_APP_CLI_DISABLE_ENVELOPE_INDEX` | force Mail.app automation for reads |
+| `MAIL_APP_CLI_DISABLE_SNIPPET_BACKFILL` | keep snippets to Mail's indexed summaries |
 | `NO_COLOR` | disable color |
 
 Caches live in `~/.cache/mail-app-cli/` (accounts and mailboxes 24h, message lists 5 minutes, recent-message journal).
