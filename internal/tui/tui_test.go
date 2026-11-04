@@ -187,6 +187,121 @@ func TestSearchResultsKeepRowsOnArchive(t *testing.T) {
 	}
 }
 
+func TestMailboxSearchDropsArchivedRow(t *testing.T) {
+	m := loadedModel(t)
+	m.list.setMessages(m.list.messages, false, listSource{search: "first", account: "Work", mailbox: "INBOX"}, 0)
+	_ = m.mutate(m.list.targets(), mail.BatchOptions{Action: "archive"}, mail.ArchiveMutator(false))
+	if len(m.list.messages) != 2 {
+		t.Fatalf("archiving a mailbox-scoped search hit kept the row: %d left", len(m.list.messages))
+	}
+}
+
+func TestSearchModalCyclesScope(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "2") // Work/INBOX
+	m = press(m, "/")
+	for _, want := range []string{"Search Work / INBOX", "Search Work (all mailboxes)", "Search all accounts", "Search Work / INBOX"} {
+		if view := m.View().Content; !strings.Contains(view, want) {
+			t.Fatalf("search modal title missing %q after cycling: %q", want, view)
+		}
+		m = press(m, "tab")
+	}
+}
+
+func TestSearchFromAllInboxesStaysAllAccounts(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "/")
+	sm, ok := m.modal.(*searchModal)
+	if !ok {
+		t.Fatalf("/ did not open the search modal: %T", m.modal)
+	}
+	if sm.scope != scopeAll {
+		t.Fatalf("All inboxes scope = %v, want all accounts", sm.scope)
+	}
+	m = press(m, "tab")
+	if sm.scope != scopeAll {
+		t.Fatal("tab offered a narrower scope without a selected mailbox")
+	}
+	if src := sm.source("inv"); src != (listSource{search: "inv"}) {
+		t.Fatalf("All inboxes source = %+v", src)
+	}
+}
+
+func TestSearchModalSourceScopes(t *testing.T) {
+	sm := newSearchModal(sidebarEntry{kind: entryMailbox, account: "Work", mailbox: "INBOX"}, listSource{})
+	if got := sm.source("inv"); got != (listSource{search: "inv", account: "Work", mailbox: "INBOX"}) {
+		t.Fatalf("mailbox scope = %+v", got)
+	}
+	sm.scope = scopeAccount
+	if got := sm.source("inv"); got != (listSource{search: "inv", account: "Work"}) {
+		t.Fatalf("account scope = %+v", got)
+	}
+	sm.scope = scopeAll
+	if got := sm.source("inv"); got != (listSource{search: "inv"}) {
+		t.Fatalf("all scope = %+v", got)
+	}
+	// A scope without a selection to name degrades to every account.
+	unified := newSearchModal(sidebarEntry{kind: entryUnified}, listSource{})
+	unified.scope = scopeMailbox
+	if got := unified.source("inv"); got != (listSource{search: "inv"}) {
+		t.Fatalf("degraded scope = %+v", got)
+	}
+}
+
+func TestSearchModalSeedsScopeFromShowingSearch(t *testing.T) {
+	m := loadedModel(t)
+	m = press(m, "2") // Work/INBOX
+	m.list.setMessages(m.list.messages, false, listSource{search: "inv", account: "Work"}, 0)
+	m = press(m, "/")
+	if sm := m.modal.(*searchModal); sm.scope != scopeAccount {
+		t.Fatalf("seeded scope = %v, want the showing search's account scope", sm.scope)
+	}
+	m = press(m, "esc")
+	m.list.setMessages(m.list.messages, false, listSource{search: "inv", account: "Work", mailbox: "INBOX"}, 0)
+	m = press(m, "/")
+	if sm := m.modal.(*searchModal); sm.scope != scopeMailbox {
+		t.Fatalf("seeded scope = %v, want the showing search's mailbox scope", sm.scope)
+	}
+	// A scope the selection cannot offer falls back to its default.
+	sm := newSearchModal(sidebarEntry{kind: entryUnified}, listSource{search: "inv", mailbox: "INBOX"})
+	if sm.scope != scopeAll {
+		t.Fatalf("unified fallback scope = %v, want all accounts", sm.scope)
+	}
+}
+
+func TestSearchDoneStoresScope(t *testing.T) {
+	m := loadedModel(t)
+	src := listSource{search: "inv", account: "Work", mailbox: "INBOX"}
+	_ = m.runSearch(src, false)
+	next, _ := m.Update(searchDoneMsg{requestResult: requestResult{requestID: m.searchLane.id}, source: src,
+		result: mail.SearchResult{Complete: true}})
+	m = next.(model)
+	if m.list.source != src {
+		t.Fatalf("search source = %+v, want %+v", m.list.source, src)
+	}
+}
+
+func TestSearchSourceLocationAndLabel(t *testing.T) {
+	mailboxSearch := listSource{search: "inv", account: "Work", mailbox: "INBOX"}
+	if mailboxSearch.showsLocation() {
+		t.Fatal("a mailbox-scoped search does not need the location column")
+	}
+	if got := mailboxSearch.label(); got != "search: inv · Work / INBOX" {
+		t.Fatalf("mailbox search label = %q", got)
+	}
+	for _, src := range []listSource{{search: "inv", account: "Work"}, {search: "inv"}} {
+		if !src.showsLocation() {
+			t.Fatalf("a search spanning mailboxes needs the location column: %+v", src)
+		}
+	}
+	if got := (listSource{search: "inv", account: "Work"}).label(); got != "search: inv · Work" {
+		t.Fatalf("account search label = %q", got)
+	}
+	if got := (listSource{search: "inv"}).label(); got != "search: inv" {
+		t.Fatalf("all-accounts search label = %q", got)
+	}
+}
+
 func TestAccountPickerOpensCompose(t *testing.T) {
 	m := loadedModel(t)
 	m.sidebar.accounts = append(m.sidebar.accounts, mail.Account{Name: "Personal", EmailAddress: "p@example.test", Enabled: true})
@@ -241,7 +356,7 @@ func TestMutationAbandonsInFlightRefresh(t *testing.T) {
 
 func TestMutationAbandonsPendingUserSearch(t *testing.T) {
 	m := loadedModel(t)
-	_ = m.runSearch("invoice", false)
+	_ = m.runSearch(listSource{search: "invoice"}, false)
 	if !m.searchLane.inFlight() || m.list.source.search != "" {
 		t.Fatal("search did not start while the mailbox list stayed on screen")
 	}
@@ -273,7 +388,7 @@ func TestReadsStartedDuringWriteAreDeferred(t *testing.T) {
 	if m.list.source.mailbox != "Receipts" || len(m.list.messages) != 0 || !m.refreshWanted {
 		t.Fatalf("switch did not defer to the post-drain refresh: source=%+v rows=%d refreshWanted=%v", m.list.source, len(m.list.messages), m.refreshWanted)
 	}
-	if cmd := m.runSearch("invoice", false); cmd != nil || m.searchLane.inFlight() || m.list.source.search != "invoice" {
+	if cmd := m.runSearch(listSource{search: "invoice"}, false); cmd != nil || m.searchLane.inFlight() || m.list.source.search != "invoice" {
 		t.Fatal("search during a write was not deferred")
 	}
 	m.list.hasMore = true
@@ -338,7 +453,7 @@ func TestDeleteInSearchRemovesRowAndRefreshSyncsReader(t *testing.T) {
 	if !m.reader.open || m.readerKey != bodyKey(hits[1]) {
 		t.Fatalf("reader did not follow the cursor off the deleted message: open=%v key=%q", m.reader.open, m.readerKey)
 	}
-	next, _ := m.Update(searchDoneMsg{requestResult: requestResult{requestID: m.searchLane.id}, query: "first", silent: true,
+	next, _ := m.Update(searchDoneMsg{requestResult: requestResult{requestID: m.searchLane.id}, source: listSource{search: "first"}, silent: true,
 		result: mail.SearchResult{Complete: true}})
 	m = next.(model)
 	if m.reader.open {

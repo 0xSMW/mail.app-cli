@@ -368,7 +368,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case key == "shift+tab":
 		m.cycleFocus(-1)
 	case key == "/":
-		m.modal = newSearchModal()
+		m.modal = newSearchModal(m.sidebar.current(), m.list.source)
 	case key == "c":
 		cmd = m.openCompose(composeNew)
 	case m.focus != focusReader && len(key) == 1 && key[0] >= '1' && key[0] <= '9':
@@ -592,12 +592,12 @@ type pageLoadedMsg struct {
 	pageSize int
 }
 
-// reloadList fetches the current mailbox or re-runs the current search.
-// silent refreshes keep the cursor and show no spinner; they follow a
-// mutation.
+// reloadList fetches the current mailbox or re-runs the current search
+// over the scope its source records. silent refreshes keep the cursor and
+// show no spinner; they follow a mutation.
 func (m *model) reloadList(silent bool) tea.Cmd {
 	if m.list.source.search != "" {
-		return m.runSearch(m.list.source.search, silent)
+		return m.runSearch(m.list.source, silent)
 	}
 	if m.writes.busy {
 		// The index lags pending writes, so a read now could show rows a

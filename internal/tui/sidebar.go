@@ -22,7 +22,14 @@ type listSource struct {
 func (s listSource) label() string {
 	switch {
 	case s.search != "":
-		return "search: " + sanitizeLine(s.search)
+		label := "search: " + sanitizeLine(s.search)
+		switch {
+		case s.mailbox != "":
+			label += " · " + sanitizeLine(s.account+" / "+s.mailbox)
+		case s.account != "":
+			label += " · " + sanitizeLine(s.account)
+		}
+		return label
 	case s.unified:
 		return "All inboxes"
 	default:
@@ -32,7 +39,11 @@ func (s listSource) label() string {
 
 // showsLocation reports whether rows span mailboxes and need a location column.
 func (s listSource) showsLocation() bool {
-	return s.unified || s.search != ""
+	if s.search != "" {
+		// A mailbox-scoped search keeps every row in one place.
+		return s.mailbox == ""
+	}
+	return s.unified
 }
 
 type entryKind int
