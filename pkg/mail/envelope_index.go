@@ -673,7 +673,7 @@ func indexSearchTermConditions(terms []string) []string {
 // resumes the traversal without an offset, so mail arriving between pages
 // cannot shift a row across a page boundary.
 func (c *Client) scanMessagesFromIndex(accountName string, mbox *indexMailbox, req ScanRequest, limit int, after *ScanPosition) (scanPage, error) {
-	where, err := indexMessageFilterConditions(req.Unread, false, req.Since)
+	where, err := indexMessageFilterConditions(req.Unread, req.Flagged, req.Since)
 	if err != nil {
 		return scanPage{}, err
 	}

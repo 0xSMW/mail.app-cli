@@ -35,6 +35,8 @@ type checkpointRequest struct {
 	Since          string          `json:"since"`
 	Unread         bool            `json:"unread"`
 	WithRecipients bool            `json:"withRecipients,omitempty"`
+	Recipient      string          `json:"recipient,omitempty"`
+	Flagged        bool            `json:"flagged,omitempty"`
 }
 type scanCheckpoint struct {
 	Checksum    string            `json:"checksum"`
@@ -45,7 +47,8 @@ type scanCheckpoint struct {
 }
 
 func checkpointIdentity(req ScanRequest) checkpointRequest {
-	return checkpointRequest{req.Scopes, req.Query, req.Since, req.Unread, req.WithRecipients}
+	req, _ = normalizeScanRequest(req)
+	return checkpointRequest{req.Scopes, req.Query, req.Since, req.Unread, req.WithRecipients, req.Recipient, req.Flagged}
 }
 func checkpointFingerprint(req checkpointRequest) string {
 	data, _ := json.Marshal(req)
@@ -265,7 +268,10 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 		result.Checkpoint.ObservationStartedAt = old.StartedAt
 		result.Checkpoint.Pages = old.Checkpoint.Pages + 1
 		for i := range result.Coverage {
-			result.Coverage[i].Count += old.Coverage[i].Count
+			if req.Recipient == "" {
+				result.Coverage[i].Count += old.Coverage[i].Count
+			}
+			result.Coverage[i].Inspected += old.Coverage[i].Inspected
 			result.Coverage[i].Errors = append(append([]string{}, old.Coverage[i].Errors...), result.Coverage[i].Errors...)
 		}
 		result.Messages = append([]ScanMessage{}, old.Messages...)
@@ -290,6 +296,19 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 			}
 		}
 		sort.SliceStable(result.Messages, func(i, j int) bool { return result.Messages[i].DateReceived > result.Messages[j].DateReceived })
+	}
+	if req.Recipient != "" {
+		// Retried pages can return already-confirmed matches. Count each
+		// accumulated identity once per mailbox membership.
+		for i := range result.Coverage {
+			coverage := &result.Coverage[i]
+			coverage.Count = 0
+			for _, message := range result.Messages {
+				if message.Account == coverage.Account && slices.Contains(message.Mailboxes, coverage.Mailbox) {
+					coverage.Count++
+				}
+			}
+		}
 	}
 	updateScanRecipientCoverage(&result, req.WithRecipients)
 	state.Result = result

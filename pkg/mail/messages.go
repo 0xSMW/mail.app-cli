@@ -414,9 +414,11 @@ JSON.stringify({message: message, headerText: headerText, failure: failure, phas
 		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
 	}
 	if message := envelope.Message; message != nil {
-		message.RecipientStatus.To = RecipientFieldStatus{State: "available", Source: "mail"}
-		message.RecipientStatus.Cc = RecipientFieldStatus{State: "available", Source: "mail"}
-		message.RecipientStatus.Bcc = RecipientFieldStatus{State: "available", Source: "mail"}
+		typed := [][]string{message.ToRecipients, message.CcRecipients, message.BccRecipients}
+		message.ToRecipients, message.CcRecipients, message.BccRecipients = nil, nil, nil
+		for i, values := range typed {
+			populateMailRecipientCollection(recipientFields(message)[i], values)
+		}
 		trimBodyAlternatives(bodyDiagnostics, c.shared.bodyAlternatives)
 		message.BodyDiagnostics = bodyDiagnostics
 		message.ContentSource = "mail"

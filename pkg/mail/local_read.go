@@ -159,7 +159,7 @@ func populateMIMEEnvelope(message *Message, header netmail.Header) error {
 	}
 	populateRecipientHeaders(message, header, "disk")
 	for _, field := range recipientFields(message)[:3] {
-		if field.status.State == "unavailable" {
+		if field.status.State != "available" {
 			return fmt.Errorf("%s", field.status.Error)
 		}
 	}

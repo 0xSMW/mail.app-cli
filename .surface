@@ -146,6 +146,7 @@ inbox
 inbox --help (-h)
 inbox --limit (-l)
 inbox --offset (-o)
+inbox --recipient
 inbox --unread (-u)
 inbox --with-content
 inbox --with-recipients
@@ -284,6 +285,7 @@ messages drafts
 messages drafts --help (-h)
 messages drafts --limit (-l)
 messages drafts --offset (-o)
+messages drafts --recipient
 messages drafts --with-content
 messages drafts --with-recipients
 messages flag
@@ -295,18 +297,21 @@ messages flagged
 messages flagged --help (-h)
 messages flagged --limit (-l)
 messages flagged --offset (-o)
+messages flagged --recipient
 messages flagged --with-content
 messages flagged --with-recipients
 messages inbox
 messages inbox --help (-h)
 messages inbox --limit (-l)
 messages inbox --offset (-o)
+messages inbox --recipient
 messages inbox --with-content
 messages inbox --with-recipients
 messages junk
 messages junk --help (-h)
 messages junk --limit (-l)
 messages junk --offset (-o)
+messages junk --recipient
 messages junk --with-content
 messages junk --with-recipients
 messages list
@@ -316,6 +321,7 @@ messages list --help (-h)
 messages list --limit (-l)
 messages list --no-cache
 messages list --offset (-o)
+messages list --recipient
 messages list --since (-s)
 messages list --unread (-u)
 messages list --with-content
@@ -345,6 +351,7 @@ messages scan --cursor
 messages scan --help (-h)
 messages scan --limit
 messages scan --query
+messages scan --recipient
 messages scan --restart-checkpoint
 messages scan --since
 messages scan --unread
@@ -353,6 +360,7 @@ messages sent
 messages sent --help (-h)
 messages sent --limit (-l)
 messages sent --offset (-o)
+messages sent --recipient
 messages sent --with-content
 messages sent --with-recipients
 messages show
@@ -361,12 +369,14 @@ messages trash
 messages trash --help (-h)
 messages trash --limit (-l)
 messages trash --offset (-o)
+messages trash --recipient
 messages trash --with-content
 messages trash --with-recipients
 messages unread
 messages unread --help (-h)
 messages unread --limit (-l)
 messages unread --offset (-o)
+messages unread --recipient
 messages unread --with-content
 messages unread --with-recipients
 messages vip
@@ -422,6 +432,7 @@ search --allow-partial
 search --help (-h)
 search --limit (-l)
 search --no-cache
+search --recipient
 search --sender
 search --sender-domain
 search --since (-s)
@@ -504,6 +515,7 @@ unread
 unread --help (-h)
 unread --limit (-l)
 unread --offset (-o)
+unread --recipient
 unread --with-content
 unread --with-recipients
 unseen

@@ -11,15 +11,20 @@ import (
 )
 
 func (a *application) newMessagesScanCmd() *cobra.Command {
-	var query, since, cursor, checkpoint string
+	var query, since, cursor, checkpoint, recipient string
 	var limit int
 	var unread, restartCheckpoint, withRecipients bool
 	cmd := &cobra.Command{
 		Use:         "scan <mailbox> [mailbox...]",
 		Short:       "Read explicit mailboxes live, retaining membership and coverage",
 		Args:        cobra.MinimumNArgs(1),
-		Annotations: map[string]string{annotationAgentNotes: "Always live and serial. Returns messages once per account/local ID with matching mailboxes, and coverage for every requested mailbox. Exit 5 and complete:false on a failed or truncated scope. --limit is per mailbox and page; 0 is unlimited. Coverage gives exhausted and remaining per mailbox. While nextCursor is present, repeat the same arguments with --cursor to read older messages; the traversal is finished when nextCursor is absent. Each mailbox page runs newest first from its own saved receipt-time/local-ID position; sequential mailbox reads have no shared snapshot or global arrival cutoff. --since filters receipt time, so it cannot find an older message whose read state or labels changed. An empty query lists messages. With --checkpoint, repeat the same scopes and filters to resume cumulative messages, memberships and coverage; --limit may change. The private checkpoint is saved before output. Its provenance distinguishes current-page timestamps from traversal observation bounds; accumulated messages describe earlier observations as well as the current page. Completed checkpoints require --restart-checkpoint for a fresh traversal. Observations are not an atomic snapshot; rerun after mutations."},
+		Annotations: map[string]string{annotationAgentNotes: "Always live and serial. Returns messages once per account/local ID with matching mailboxes, and coverage for every requested mailbox. Exit 5 and complete:false on a failed or truncated scope. --limit counts candidates per mailbox and page; 0 is unlimited. Coverage gives exhausted and remaining per mailbox. While nextCursor is present, repeat the same arguments with --cursor to read older messages; the traversal is finished when nextCursor is absent. Each mailbox page runs newest first from its own saved receipt-time/local-ID position; sequential mailbox reads have no shared snapshot or global arrival cutoff. --since filters receipt time, so it cannot find an older message whose read state or labels changed. An empty query lists messages. With --checkpoint, repeat the same scopes and filters to resume cumulative messages, memberships and coverage; --limit may change. The private checkpoint is saved before output. Its provenance distinguishes current-page timestamps from traversal observation bounds; accumulated messages describe earlier observations as well as the current page. Completed checkpoints require --restart-checkpoint for a fresh traversal. Observations are not an atomic snapshot; rerun after mutations."},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			normalizedRecipient, err := normalizeRecipientFilter(recipient, cmd)
+			if err != nil {
+				return err
+			}
+			includeRecipients := withRecipients || normalizedRecipient != ""
 			if a.mailboxExplicit() {
 				return clierr.Usage("scan takes positional mailboxes; do not also pass --mailbox")
 			}
@@ -30,7 +35,7 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 			for i, box := range args {
 				scopes[i] = mail.SearchMailbox{Account: "validation", Mailbox: box}
 			}
-			request := mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint, WithRecipients: withRecipients}
+			request := mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint, WithRecipients: includeRecipients, Recipient: normalizedRecipient}
 			if err := mail.ValidateScanRequest(request); err != nil {
 				return clierr.Usage(err.Error())
 			}
@@ -58,16 +63,19 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 			return a.writer.Write(output.Result{Data: result, Summary: fmt.Sprintf("%d messages across %d mailboxes (complete: %v)", len(result.Messages), len(result.Coverage), result.Complete), Err: failure, Plain: func(p *output.Printer) {
 				for _, coverage := range result.Coverage {
 					p.Line("%s/%s: %d messages (exhausted: %v, remaining: %d)", coverage.Account, coverage.Mailbox, coverage.Count, coverage.Exhausted, coverage.Remaining)
+					if normalizedRecipient != "" {
+						p.Line("  Recipient candidates: %d inspected, %d unknown", coverage.Inspected, coverage.RecipientUnknown)
+					}
 					if coverage.Error != "" {
 						p.Line("  %s", p.Red(coverage.Error))
 					}
 				}
-				if withRecipients && result.RecipientCoverage != nil {
+				if includeRecipients && result.RecipientCoverage != nil {
 					p.Line("Recipient headers: %d inspected, %d unavailable (complete: %v)", result.RecipientCoverage.Inspected, result.RecipientCoverage.Unavailable, result.RecipientCoverage.Complete)
 				}
 				for _, message := range result.Messages {
 					p.Line("%s  %s  %v", message.ID, message.Subject, message.Mailboxes)
-					if withRecipients {
+					if includeRecipients {
 						renderRecipientLines(p, message.Message)
 					}
 				}
@@ -81,9 +89,10 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&withRecipients, "with-recipients", false, recipientFlagUsage)
+	cmd.Flags().StringVar(&recipient, "recipient", "", recipientFilterUsage)
 	cmd.Flags().StringVar(&query, "query", "", "Match terms in subject, sender, and indexed summary")
 	cmd.Flags().StringVar(&since, "since", "", "Only messages received since a date or timestamp")
-	cmd.Flags().IntVar(&limit, "limit", 200, "Maximum messages per mailbox and page; 0 is unlimited")
+	cmd.Flags().IntVar(&limit, "limit", 200, "Maximum candidates per mailbox and page; 0 is unlimited")
 	cmd.Flags().StringVar(&cursor, "cursor", "", "Continue from the nextCursor of an earlier scan with the same arguments")
 	cmd.Flags().StringVar(&checkpoint, "checkpoint", "", "Persist private cumulative traversal state and resume it on the next invocation")
 	cmd.Flags().BoolVar(&restartCheckpoint, "restart-checkpoint", false, "Explicitly replace a checkpoint with a fresh traversal")

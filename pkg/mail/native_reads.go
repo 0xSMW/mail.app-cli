@@ -474,25 +474,18 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 			return err
 		}
 		if err := n.phase("recipients", func() error {
-			var err error
-			message.ToRecipients, err = n.recipients(ref, "trcp")
-			if err != nil {
-				return err
+			for i, class := range []string{"trcp", "crcp", "brcp"} {
+				values, err := n.recipients(ref, class)
+				if err != nil {
+					return err
+				}
+				populateMailRecipientCollection(recipientFields(message)[i], values)
 			}
-			message.CcRecipients, err = n.recipients(ref, "crcp")
-			if err != nil {
-				return err
-			}
-			message.BccRecipients, err = n.recipients(ref, "brcp")
-			if err == nil {
-				message.RecipientStatus.To = RecipientFieldStatus{State: "available", Source: "mail"}
-				message.RecipientStatus.Cc = RecipientFieldStatus{State: "available", Source: "mail"}
-				message.RecipientStatus.Bcc = RecipientFieldStatus{State: "available", Source: "mail"}
-			}
-			return err
+			return nil
 		}); err != nil {
 			return err
 		}
+
 		message.BodyDiagnostics = diskDiagnostics
 		trimBodyAlternatives(diskDiagnostics, c.shared.bodyAlternatives)
 		return n.phase("content", func() error {

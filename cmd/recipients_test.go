@@ -22,6 +22,10 @@ func TestRecipientFlagsOnReadCommands(t *testing.T) {
 		if flag == nil || flag.DefValue != "false" {
 			t.Fatalf("%s missing opt-in recipient flag", path)
 		}
+		filter := command.Flags().Lookup("recipient")
+		if filter == nil || filter.DefValue != "" || filter.Value.Type() != "string" {
+			t.Fatalf("%s missing exact recipient filter", path)
+		}
 	}
 }
 
@@ -133,5 +137,29 @@ func TestMetadataOnlyRenderIncludesHeaderStatusWithoutBody(t *testing.T) {
 	}
 	if strings.Contains(got, message.Content) {
 		t.Fatalf("metadata rendered body: %s", got)
+	}
+}
+
+func TestPartialRecipientFieldPreservesKnownAddressesInHumanOutput(t *testing.T) {
+	message := mail.Message{ID: "42", Subject: "confirmed match", ToRecipients: []string{"person+tag@example.test", "second@example.test"}}
+	message.RecipientStatus.To = mail.RecipientFieldStatus{State: "partial", Source: "disk", Error: "private source diagnostic"}
+	var buffer bytes.Buffer
+	renderRecipientQuery(mail.SearchResult{Messages: []mail.Message{message}, Complete: true}, false)(&output.Printer{Out: &buffer})
+	got := buffer.String()
+	if !strings.Contains(got, "To: person+tag@example.test, second@example.test (partial; additional recipients unavailable)") {
+		t.Fatalf("known addresses or partial marker missing: %q", got)
+	}
+	if strings.Contains(got, "private source diagnostic") || strings.Contains(got, "disk") {
+		t.Fatalf("human recipient output exposed source diagnostic: %q", got)
+	}
+}
+
+func TestPartialRecipientDisplayEscapesKnownAddresses(t *testing.T) {
+	got := recipientDisplay([]string{"person\x1b\n\u202e@example.test"}, mail.RecipientFieldStatus{State: "partial"})
+	if got != `person\u001b\u000a\u202e@example.test (partial; additional recipients unavailable)` {
+		t.Fatalf("unsafe partial recipient output: %q", got)
+	}
+	if got := recipientDisplay(nil, mail.RecipientFieldStatus{State: "partial"}); got != "(partial; additional recipients unavailable)" {
+		t.Fatalf("empty partial field = %q", got)
 	}
 }

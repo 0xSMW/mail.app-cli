@@ -64,6 +64,9 @@ func recipientFields(m *Message) []recipientField {
 func unavailableRecipients(m *Message, err error) {
 	for _, field := range recipientFields(m) {
 		if field.status.State != "available" {
+			if field.status.State == "partial" && len(*field.values) > 0 {
+				continue
+			}
 			*field.values = nil
 			if field.status.State != "unavailable" || field.status.Error == "" {
 				*field.status = RecipientFieldStatus{State: "unavailable", Error: err.Error()}
@@ -86,18 +89,19 @@ func populateRecipientHeaders(m *Message, header netmail.Header, source string) 
 			if strings.TrimSpace(raw) == "" {
 				continue
 			}
-			addresses, err := parser.ParseList(raw)
+			addresses, err := parseRecipientAddressList(parser, raw)
 			if err != nil {
 				parseErr = fmt.Errorf("parse %s recipients: %w", field.name, err)
-				break
+				continue
 			}
 			for _, address := range addresses {
 				values = append(values, address.Address)
 			}
 		}
 		if parseErr != nil {
-			*field.values = nil
-			*field.status = RecipientFieldStatus{State: "unavailable", Source: source, Error: parseErr.Error()}
+			// Preserve validated addresses from other repetitions of this field.
+			appendRecipientFieldEvidence(field, values, source)
+			recipientFieldFailure(field, source, parseErr)
 		} else {
 			*field.values = values
 			*field.status = RecipientFieldStatus{State: "available", Source: source}
@@ -141,6 +145,12 @@ func readEMLXRecipientHeaders(path string) (netmail.Header, error) {
 		if raw.Len()+len(line) > maxRecipientHeaderBytes {
 			return nil, fmt.Errorf("message headers exceed %d bytes", maxRecipientHeaderBytes)
 		}
+		if err != nil {
+			return nil, fmt.Errorf("message headers have no complete terminator")
+		}
+		if line != "\n" && line != "\r\n" && !recipientHeaderLine(line, raw.Len() > 0) {
+			return parseRecipientHeaderPrefix(raw.Bytes())
+		}
 		raw.WriteString(line)
 		if line == "\n" || line == "\r\n" {
 			message, err := netmail.ReadMessage(bytes.NewReader(raw.Bytes()))
@@ -148,9 +158,6 @@ func readEMLXRecipientHeaders(path string) (netmail.Header, error) {
 				return nil, fmt.Errorf("parse message headers: %w", err)
 			}
 			return message.Header, nil
-		}
-		if err != nil {
-			return nil, fmt.Errorf("message headers have no complete terminator")
 		}
 	}
 }
@@ -189,6 +196,8 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 						header, err := readEMLXRecipientHeaders(path)
 						if err == nil {
 							populateRecipientHeaders(&messages[i], header, "disk")
+						} else if header != nil {
+							populateRecipientHeaderPrefix(&messages[i], header, "disk", err)
 						} else {
 							unavailableRecipients(&messages[i], err)
 						}
@@ -208,6 +217,23 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 			pending = append(pending, i)
 		}
 	}
+	// Resolve addressed recipients before spending the bounded Mail budget on
+	// optional delivery-chain fields that cannot establish an exact match.
+	addressed, delivery := []int{}, []int{}
+	for _, i := range pending {
+		needsAddress := false
+		for _, field := range recipientFields(&messages[i])[:3] {
+			if field.status.State != "available" {
+				needsAddress = true
+			}
+		}
+		if needsAddress {
+			addressed = append(addressed, i)
+		} else {
+			delivery = append(delivery, i)
+		}
+	}
+	pending = append(addressed, delivery...)
 	if len(pending) > 0 {
 		var err error
 		if ctx.Err() != nil {
@@ -341,13 +367,12 @@ func (n *nativeMail) readMessageRecipients(account, mailbox string, m *Message) 
 		}
 		values, e := n.recipients(ref, class)
 		if e != nil {
-			*field.status = RecipientFieldStatus{State: "unavailable", Source: "mail", Error: e.Error()}
+			recipientFieldFailure(field, "mail", e)
 			if recipientSystemicError(e) {
 				return e
 			}
 		} else {
-			*field.values = values
-			*field.status = RecipientFieldStatus{State: "available", Source: "mail"}
+			populateMailRecipientCollection(field, values)
 		}
 	}
 	return nil
@@ -427,8 +452,7 @@ JSON.stringify(result);`, escapeJSString(mailbox), jxaMailboxLookupHelper(), esc
 			continue
 		}
 		if values != nil {
-			*field.values = *values
-			*field.status = RecipientFieldStatus{State: "available", Source: "mail"}
+			populateMailRecipientCollection(field, *values)
 		} else {
 			detail := result.Errors[[]string{"to", "cc", "bcc"}[i]]
 			if detail == "" {
@@ -440,8 +464,7 @@ JSON.stringify(result);`, escapeJSString(mailbox), jxaMailboxLookupHelper(), esc
 			if detail == "" {
 				detail = "Mail did not expose this recipient field"
 			}
-			*field.values = nil
-			*field.status = RecipientFieldStatus{State: "unavailable", Source: "mail", Error: detail}
+			recipientFieldFailure(field, "mail", fmt.Errorf("%s", detail))
 		}
 	}
 	for _, field := range recipientFields(m)[3:] {
@@ -453,7 +476,7 @@ JSON.stringify(result);`, escapeJSString(mailbox), jxaMailboxLookupHelper(), esc
 			if detail == "" {
 				detail = "Mail did not expose delivery headers"
 			}
-			*field.status = RecipientFieldStatus{State: "unavailable", Source: "mail", Error: detail}
+			recipientFieldFailure(field, "mail", fmt.Errorf("%s", detail))
 		}
 	}
 	return failureErr
@@ -463,11 +486,25 @@ JSON.stringify(result);`, escapeJSString(mailbox), jxaMailboxLookupHelper(), esc
 // label or earlier checkpoint page when the later attempt was unavailable.
 func mergeRecipientEvidence(target *Message, observed Message) {
 	fields := recipientFields(target)
-	for i, field := range recipientFields(&observed) {
-		if field.status.State == "available" || fields[i].status.State != "available" {
-			*fields[i].values = *field.values
-			*fields[i].status = *field.status
+	rank := func(state string) int {
+		if state == "available" {
+			return 2
 		}
+		if state == "partial" {
+			return 1
+		}
+		return 0
+	}
+	for i, field := range recipientFields(&observed) {
+		if rank(field.status.State) < rank(fields[i].status.State) {
+			continue
+		}
+		if field.status.State == "partial" && fields[i].status.State == "partial" {
+			appendRecipientFieldEvidence(fields[i], *field.values, field.status.Source)
+			continue
+		}
+		*fields[i].values = *field.values
+		*fields[i].status = *field.status
 	}
 }
 

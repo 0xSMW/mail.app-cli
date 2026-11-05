@@ -261,6 +261,12 @@ func recipientDisplay(values []string, status mail.RecipientFieldStatus) string 
 			return "(none in stored headers)"
 		}
 		return linkDisplay(strings.Join(values, ", "))
+	case "partial":
+		marker := "(partial; additional recipients unavailable)"
+		if len(values) == 0 {
+			return marker
+		}
+		return linkDisplay(strings.Join(values, ", ")) + " " + marker
 	case "unavailable":
 		return "(unavailable)"
 	default:

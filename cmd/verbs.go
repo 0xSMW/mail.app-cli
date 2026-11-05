@@ -18,9 +18,16 @@ import (
 
 // listUnified lists an inbox-style view: one account when in scope,
 // otherwise all enabled accounts merged.
-func (a *application) listUnified(kind string, limit, offset int, withContent bool, withRecipients ...bool) error {
+func (a *application) listUnified(kind string, limit, offset int, withContent, withRecipients bool, recipientFilter ...string) error {
+	var filter string
+	if len(recipientFilter) > 0 {
+		filter = recipientFilter[0]
+	}
+	recipient, err := normalizeRecipientFilter(filter)
+	if err != nil {
+		return err
+	}
 	var messages []mail.Message
-	var err error
 	meta := map[string]any{"view": kind}
 	scoped := unifiedListingScoped(a.resolved)
 	if scoped {
@@ -33,17 +40,33 @@ func (a *application) listUnified(kind string, limit, offset int, withContent bo
 			return mailboxErr
 		}
 		unreadOnly, flaggedOnly := scopedUnifiedFilters(kind)
+		if recipient != "" {
+			result, err := a.mailClient.RecipientMessages(mail.RecipientQueryRequest{Scopes: []mail.SearchMailbox{{Account: account, Mailbox: mailbox}}, Recipient: recipient, Limit: limit, Offset: offset, Unread: unreadOnly, Flagged: flaggedOnly, WithContent: withContent})
+			if err != nil {
+				return fmt.Errorf("list %s: %w", kind, err)
+			}
+			meta["account"], meta["mailbox"] = account, mailbox
+			return a.writeRecipientListing(result, fmt.Sprintf("%s in %s", plural(len(result.Messages), "message"), kind), meta, false)
+		}
 		messages, err = a.mailClient.GetMessagesJSON(account, mailbox, limit, offset, unreadOnly, flaggedOnly, withContent, "")
 		meta["account"] = account
 		meta["mailbox"] = mailbox
 	} else {
+		if recipient != "" {
+			result, err := a.mailClient.UnifiedRecipientMessages(kind, mail.RecipientQueryRequest{Recipient: recipient, Limit: limit, Offset: offset, WithContent: withContent})
+			if err != nil {
+				return fmt.Errorf("list %s: %w", kind, err)
+			}
+			meta["account"] = "all"
+			return a.writeRecipientListing(result, fmt.Sprintf("%s in %s", plural(len(result.Messages), "message"), kind), meta, true)
+		}
 		messages, err = a.mailClient.GetUnifiedMessagesJSON(kind, limit, offset, withContent)
 		meta["account"] = "all"
 	}
 	if err != nil {
 		return fmt.Errorf("list %s: %w", kind, err)
 	}
-	includeRecipients := len(withRecipients) > 0 && withRecipients[0]
+	includeRecipients := withRecipients
 	if includeRecipients {
 		account, _ := meta["account"].(string)
 		mailbox, _ := meta["mailbox"].(string)
@@ -210,6 +233,7 @@ func (a *application) buildVerbsCommands() {
 		verbOffset           int
 		verbWithContent      bool
 		verbWithRecipients   bool
+		verbRecipient        string
 		verbBodySource       string
 		verbBodyAlternatives bool
 		verbMetadataOnly     bool
@@ -224,18 +248,26 @@ func (a *application) buildVerbsCommands() {
 			annotationAgentNotes: "Newest first. Without --account this merges every enabled account's INBOX. IDs feed show, seen, flag, archive, delete, and move.",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			recipient, err := normalizeRecipientFilter(verbRecipient, cmd)
+			if err != nil {
+				return err
+			}
 			kind := "inbox"
 			if verbUnread {
 				kind = "unread"
 			}
-			return a.listUnified(kind, verbLimit, verbOffset, verbWithContent, verbWithRecipients)
+			return a.listUnified(kind, verbLimit, verbOffset, verbWithContent, verbWithRecipients, recipient)
 		},
 	}
 	a.unreadCmd = &cobra.Command{
 		Use:   "unread",
 		Short: "List unread inbox messages",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.listUnified("unread", verbLimit, verbOffset, verbWithContent, verbWithRecipients)
+			recipient, err := normalizeRecipientFilter(verbRecipient, cmd)
+			if err != nil {
+				return err
+			}
+			return a.listUnified("unread", verbLimit, verbOffset, verbWithContent, verbWithRecipients, recipient)
 		},
 	}
 	a.showCmd = &cobra.Command{
@@ -282,6 +314,7 @@ func (a *application) buildVerbsCommands() {
 	for _, cmd := range []*cobra.Command{a.inboxCmd, a.unreadCmd} {
 		registerPagingFlags(cmd, &verbLimit, &verbOffset)
 		cmd.Flags().BoolVar(&verbWithRecipients, "with-recipients", false, recipientFlagUsage)
+		cmd.Flags().StringVar(&verbRecipient, "recipient", "", recipientFilterUsage)
 		cmd.Flags().BoolVar(&verbWithContent, "with-content", false, "Include bodies (slow: one Mail.app call per ten messages)")
 	}
 	a.inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")

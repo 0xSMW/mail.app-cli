@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/0xSMW/mail.app-cli/v3/internal/clierr"
 	"github.com/0xSMW/mail.app-cli/v3/internal/output"
@@ -28,21 +29,42 @@ func (a *application) buildSearchCommands() {
 		searchWithRecipients bool
 		searchSender         string
 		searchSenderDomain   string
+		searchRecipient      string
 	)
 
 	a.searchCmd = &cobra.Command{
-		Use:   "search <query>",
+		Use:   "search [query]",
 		Short: "Search messages by subject, sender, and indexed summary",
 		Long: `Search messages. Every term must match somewhere in the subject, sender,
 or Mail's indexed summary. Without --mailbox the search covers every
 mailbox with messages or an unknown count, plus Inbox, of each enabled
 account (or of the one named with
---account); with --mailbox it is limited to that mailbox.`,
-		Args: cobra.ExactArgs(1),
+--account); with --mailbox it is limited to that mailbox.
+
+With --recipient, query is optional. Match one exact parsed To, Cc, or Bcc
+address; recipient headers are included and the read always uses the live index.
+The query, sender, and since filters further narrow recipient matches.`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
+				return err
+			}
+			recipient, err := normalizeRecipientFilter(searchRecipient, cmd)
+			if err != nil {
+				return err
+			}
+			if (len(args) == 0 || strings.TrimSpace(args[0]) == "") && recipient == "" {
+				return clierr.Usage("search requires a non-empty query or --recipient")
+			}
+			return nil
+		},
 		Annotations: map[string]string{
 			annotationAgentNotes: "Fails closed with exit 5 when any mailbox could not be completely searched; add --allow-partial to accept incomplete results, which then arrive as {messages, complete, searchedMailboxes, failedMailboxes}. Needs Envelope Index access (Full Disk Access) for cross-mailbox queries.",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			recipient, err := normalizeRecipientFilter(searchRecipient, cmd)
+			if err != nil {
+				return err
+			}
 			account := a.resolved.Account.Value
 			mailbox := ""
 			if a.mailboxExplicit() {
@@ -51,7 +73,25 @@ account (or of the one named with
 				}
 				mailbox = a.mailboxInScope()
 			}
-			query := args[0]
+			query := ""
+			if len(args) > 0 {
+				query = args[0]
+			}
+			if recipient != "" {
+				result, err := a.mailClient.SearchRecipientMessages(account, mailbox, mail.RecipientQueryRequest{Query: query, Recipient: recipient, Since: searchSince, Sender: searchSender, SenderDomain: searchSenderDomain, Limit: searchLimit})
+				if err != nil {
+					return fmt.Errorf("search messages: %w", err)
+				}
+				meta := map[string]any{"source": "live", "query": query, "complete": result.Complete, "searchedMailboxCount": len(result.SearchedMailboxes), "failedMailboxes": result.FailedMailboxes}
+				if searchAllowPartial {
+					var notices []string
+					if !result.Complete {
+						notices = append(notices, fmt.Sprintf("%d mailbox(es) could not be completely searched", len(result.FailedMailboxes)))
+					}
+					return a.writer.Write(output.Result{Data: partialSearchOutputData(result, a.writer.Format), Summary: fmt.Sprintf("%s for %q (complete: %v)", plural(len(result.Messages), "match"), query, result.Complete), Meta: meta, Notices: notices, Plain: renderRecipientQuery(result, true)})
+				}
+				return a.writeRecipientListing(result, fmt.Sprintf("%s for %q", plural(len(result.Messages), "match"), query), meta, true)
+			}
 			result, err := a.mailClient.SearchMessagesJSONSinceWithOptions(query, account, mailbox, searchLimit, searchSince, mail.SearchOptions{
 				AllowPartial: searchAllowPartial,
 			})
@@ -112,6 +152,7 @@ account (or of the one named with
 	}
 
 	a.searchCmd.Flags().BoolVar(&searchWithRecipients, "with-recipients", false, recipientFlagUsage)
+	a.searchCmd.Flags().StringVar(&searchRecipient, "recipient", "", recipientFilterUsage)
 	a.searchCmd.Flags().IntVarP(&searchLimit, "limit", "l", 50, "Maximum results")
 	a.searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
 	a.searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only messages from this exact sender/email")
