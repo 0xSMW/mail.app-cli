@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	netmail "net/mail"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,7 +48,7 @@ func MatchRecipient(message Message, recipient string) (matched, known bool) {
 			continue
 		}
 		for _, address := range *field.values {
-			if strings.EqualFold(strings.TrimSpace(address), recipient) {
+			if strings.EqualFold(address, recipient) {
 				return true, true
 			}
 		}
@@ -112,6 +113,9 @@ func (c *Client) RecipientMessages(req RecipientQueryRequest) (SearchResult, err
 		if !ok {
 			return scanPage{}, fmt.Errorf("exact recipient filtering requires Mail Envelope Index access for %s/%s", scope.Account, scope.Mailbox)
 		}
+		// Discovered scopes retain their full physical path. Carry it into the
+		// candidate envelope as well as the subsequent scoped header reads.
+		mbox.Name = scope.Mailbox
 		page, err := client.scanMessagesFromIndex(scope.Account, mbox, ScanRequest{Query: req.Query, Since: req.Since, Unread: req.Unread, Flagged: req.Flagged}, recipientCandidatePageSize, after)
 		if err != nil {
 			return scanPage{}, err
@@ -239,7 +243,7 @@ func (c *Client) discoverRecipientScopes(accountName, kind string) ([]SearchMail
 		if accountName == "" && kind == "" && !account.Enabled {
 			continue
 		}
-		mailboxes, ok, err := c.getMailboxesFromIndex(account)
+		mailboxes, ok, err := c.recipientDiscoveryMailboxes(account)
 		if strings.TrimSpace(account.ID) == "" {
 			ok = false
 		}
@@ -251,20 +255,64 @@ func (c *Client) discoverRecipientScopes(accountName, kind string) ([]SearchMail
 			failures = append(failures, SearchMailboxFailure{Account: account.Name, Mailbox: "(mailbox discovery)", Error: detail})
 			continue
 		}
-		if kind == "" {
-			for _, target := range defaultSearchTargetsFromMailboxes(mailboxes, account.Name, nil) {
-				scopes = append(scopes, SearchMailbox{Account: target.AccountName, Mailbox: target.MailboxName})
+		rootInbox, nestedInbox := false, false
+		for _, mailbox := range mailboxes {
+			leaf := mailboxLeafFromURL(mailbox.URL)
+			if kind == "" && mailbox.TotalCount == 0 && !strings.EqualFold(leaf, "INBOX") || kind != "" && !isSpecialMailboxName(kind, leaf) {
+				continue
 			}
-		} else {
-			for _, mailbox := range mailboxes {
-				if mailbox.Name != "" && isSpecialMailboxName(kind, mailbox.Name) {
-					scopes = append(scopes, SearchMailbox{Account: account.Name, Mailbox: mailbox.Name})
+			// The general inventory intentionally exposes leaf names. Exact
+			// coverage must keep Clients/Projects and Internal/Projects separate.
+			_, authority, hasScheme := strings.Cut(mailbox.URL, "://")
+			path, hasAccount := strings.CutPrefix(authority, account.ID+"/")
+			name, err := url.PathUnescape(path)
+			if !hasScheme || !hasAccount || err != nil || name == "" {
+				failures = append(failures, SearchMailboxFailure{Account: account.Name, Mailbox: "(mailbox discovery)", Error: "unreadable physical mailbox path in Mail Envelope Index"})
+				continue
+			}
+			if strings.EqualFold(name, "INBOX") {
+				rootInbox = true
+			} else if strings.EqualFold(leaf, "INBOX") {
+				nestedInbox = true
+			}
+			// Existing explicit aliases can resolve a literal Archive to Gmail
+			// All Mail. Do not let that alias silently replace a discovered row.
+			resolved, found, err := c.resolveIndexMailbox(account.Name, name)
+			if err != nil || !found || resolved.ID != mailbox.ID || resolved.URL != mailbox.URL {
+				detail := "physical mailbox path cannot be resolved without aliasing or ambiguity"
+				if err != nil {
+					detail = err.Error()
 				}
+				failures = append(failures, SearchMailboxFailure{Account: account.Name, Mailbox: name, Error: detail})
+				continue
+			}
+			scopes = append(scopes, SearchMailbox{Account: account.Name, Mailbox: name})
+		}
+		if kind == "" && !rootInbox {
+			// Search always covers the account's root Inbox, even when it is
+			// missing from the inventory. Keep the scope so its read fails
+			// explicitly. A nested Inbox must not satisfy the root requirement
+			// through the legacy resolver's leaf-name fallback.
+			scopes = append(scopes, SearchMailbox{Account: account.Name, Mailbox: "INBOX"})
+			if nestedInbox {
+				failures = append(failures, SearchMailboxFailure{Account: account.Name, Mailbox: "INBOX", Error: "required root INBOX is missing from the Mail Envelope Index inventory"})
 			}
 		}
 	}
 	return uniqueScanScopes(scopes), failures, nil
 }
+
+// Keep physical URLs for this inventory; the general mailbox API exposes leaf
+// names and therefore cannot establish that every distinct mailbox was covered.
+func (c *Client) recipientDiscoveryMailboxes(account Account) ([]indexMailbox, bool, error) {
+	var rows []indexMailbox
+	query := "select ROWID as ID, url as URL, total_count as TotalCount, unread_count as UnreadCount from mailboxes where " + indexAccountMailboxCondition(account.ID) + " order by url;"
+	if err := c.runEnvelopeIndexQuery(query, &rows); err != nil {
+		return nil, false, err
+	}
+	return rows, len(rows) > 0, nil
+}
+
 func recipientDiscoveryFailures(result SearchResult, failures []SearchMailboxFailure) SearchResult {
 	if len(failures) > 0 {
 		result.Complete = false

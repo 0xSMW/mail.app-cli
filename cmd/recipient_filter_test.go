@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -52,6 +53,39 @@ func TestQuerylessSearchRequiresRecipient(t *testing.T) {
 	}
 	if err := cmd.Args(cmd, []string{"one", "two"}); err == nil {
 		t.Fatal("multiple positional queries accepted")
+	}
+}
+
+func TestRecipientFilterRejectsInvalidPagingBeforeMail(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "called")
+	t.Setenv("PATH", bin)
+	if err := os.WriteFile(filepath.Join(bin, "osascript"), []byte("#!/bin/sh\nprintf called > '"+marker+"'\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	a := newApplication()
+	for _, path := range []string{"inbox", "unread", "search", "messages list", "messages inbox", "messages unread", "messages sent", "messages drafts", "messages flagged", "messages trash", "messages junk", "messages scan INBOX"} {
+		command, _, err := a.rootCmd.Find(strings.Fields(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		paging := [][]string{{"--limit", "-1"}}
+		if command.Flags().Lookup("offset") != nil {
+			paging = append(paging, []string{"--offset", "-1"}, []string{"--limit", strconv.Itoa(int(^uint(0) >> 1)), "--offset", "1"})
+		}
+		for _, flags := range paging {
+			args := append(strings.Fields(path), "--recipient", "target@example.test", "--account", "Example", "--backend", "legacy", "--json")
+			args = append(args, flags...)
+			code, stdout, stderr := run(t, args...)
+			var failure output.ErrorEnvelope
+			if err := json.Unmarshal([]byte(stderr), &failure); err != nil || code != 1 || failure.Code != "usage" {
+				t.Fatalf("%s paging=%v exit=%d stdout=%s stderr=%s", path, flags, code, stdout, stderr)
+			}
+		}
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("invalid paging invoked Mail: %v", err)
 	}
 }
 

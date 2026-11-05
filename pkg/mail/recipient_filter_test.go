@@ -102,6 +102,24 @@ func TestRecipientQueryMatchesParsedHeaderAddressesLiterally(t *testing.T) {
 	}
 }
 
+func TestRecipientQueryPreservesQuotedLocalPartWhitespace(t *testing.T) {
+	message := Message{}
+	populateRecipientHeaders(&message, netmail.Header{"To": {`" user"@example.test`}}, "disk")
+	for input, want := range map[string]bool{
+		`" user"@example.test`: true,
+		`user@example.test`:    false,
+	} {
+		recipient, err := NormalizeRecipientFilter(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		matched, known := MatchRecipient(message, recipient)
+		if matched != want || !known {
+			t.Errorf("match %q = %t known=%t; want %t (parsed To=%q)", input, matched, known, want, message.ToRecipients)
+		}
+	}
+}
+
 func TestRecipientQueryPagesConfirmedMatchesBeforeOffset(t *testing.T) {
 	req := RecipientQueryRequest{Recipient: "target@example.com", Scopes: []SearchMailbox{{"Work", "INBOX"}}, Offset: 1, Limit: 1}
 	reads := 0
@@ -348,5 +366,99 @@ func TestRecipientQueryNullAndEpochDatesUseIndexIDTieBreak(t *testing.T) {
 	})
 	if !result.Complete || len(result.Messages) != 1 || result.Messages[0].ID != "9" {
 		t.Fatalf("index date ordering=%+v", result)
+	}
+}
+
+func TestRecipientQueryDiscoveryRetainsDistinctNestedMailboxPaths(t *testing.T) {
+	for _, withRoot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("root=%t", withRoot), func(t *testing.T) {
+			c, root, events := localReadFixture(t)
+			c.shared.accounts = []Account{{ID: "ABC", Name: "Work", Enabled: true}}
+			paths := []string{"Clients/Projects", "Internal/Projects"}
+			if withRoot {
+				paths = append(paths, "Projects")
+			}
+			var sql strings.Builder
+			sql.WriteString("delete from labels; delete from messages; delete from mailboxes;\n")
+			sql.WriteString("insert into mailboxes(ROWID,url,total_count,unread_count) values (200,'imap://ABC/INBOX',0,0);\n")
+			wantIDs := map[string]bool{}
+			for i, path := range paths {
+				id := 201 + i
+				fmt.Fprintf(&sql, "insert into mailboxes(ROWID,url,total_count,unread_count) values (%d,'imap://ABC/%s',1,0);\n", id, escapeMailboxURLPath(path))
+				fmt.Fprintf(&sql, "insert into messages(ROWID,subject,sender,summary,mailbox,date_received,date_sent,read,flagged,deleted,size) values (%d,1,1,1,%d,1690000000,1690000000,1,0,0,100);\n", id, id)
+				recipient := "other@example.com"
+				if withRoot || i == 1 {
+					recipient = "target@example.com"
+					wantIDs[fmt.Sprint(id)] = true
+				}
+				owner := filepath.Join(root, "ABC")
+				for _, component := range strings.Split(path, "/") {
+					owner = filepath.Join(owner, component+".mbox")
+				}
+				writeEMLX(t, filepath.Join(owner, "UUID", "Data", "Messages", fmt.Sprintf("%d.emlx", id)), "To: "+recipient+"\n\nbody")
+			}
+			if out, err := exec.Command("sqlite3", os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"), sql.String()).CombinedOutput(); err != nil {
+				t.Fatalf("nested fixture: %v %s", err, out)
+			}
+			result, err := c.SearchRecipientMessages("Work", "", RecipientQueryRequest{Recipient: "target@example.com"})
+			if err != nil || !result.Complete || len(result.Messages) != len(wantIDs) || len(result.SearchedMailboxes) != len(paths)+1 {
+				t.Fatalf("discovered paths=%v result=%+v err=%v", paths, result, err)
+			}
+			for _, message := range result.Messages {
+				if !wantIDs[message.ID] {
+					t.Fatalf("unexpected recipient match: %+v", message)
+				}
+				delete(wantIDs, message.ID)
+			}
+			if len(wantIDs) != 0 || events.Load() != 0 {
+				t.Fatalf("missing IDs=%v Mail events=%d", wantIDs, events.Load())
+			}
+		})
+	}
+}
+
+func TestRecipientQueryDiscoveryRejectsPhysicalMailboxAliasReplacement(t *testing.T) {
+	c, _, events := localReadFixture(t)
+	c.shared.accounts = []Account{{ID: "ABC", Name: "Work", Enabled: true}}
+	sql := `delete from labels; delete from messages; delete from mailboxes;
+insert into mailboxes(ROWID,url,total_count,unread_count) values
+(1,'imap://ABC/%5BGmail%5D/All%20Mail',1,0),(2,'imap://ABC/Archive',1,0),(3,'imap://ABC/INBOX',0,0);`
+	if out, err := exec.Command("sqlite3", os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"), sql).CombinedOutput(); err != nil {
+		t.Fatalf("alias fixture: %v %s", err, out)
+	}
+	result, err := c.SearchRecipientMessages("Work", "", RecipientQueryRequest{Recipient: "target@example.com"})
+	if err != nil || result.Complete || len(result.Messages) != 0 || len(result.FailedMailboxes) != 1 || result.FailedMailboxes[0].Mailbox != "Archive" || !strings.Contains(result.FailedMailboxes[0].Error, "aliasing") {
+		t.Fatalf("literal Archive silently replaced: result=%+v err=%v", result, err)
+	}
+	if !reflect.DeepEqual(result.SearchedMailboxes, []SearchMailbox{{Account: "Work", Mailbox: "[Gmail]/All Mail"}, {Account: "Work", Mailbox: "INBOX"}}) || events.Load() != 0 {
+		t.Fatalf("physical scopes=%v Mail events=%d", result.SearchedMailboxes, events.Load())
+	}
+}
+
+func TestRecipientQueryDiscoveryRequiresRootInbox(t *testing.T) {
+	for _, path := range []string{"Projects", "Nested/INBOX"} {
+		t.Run(path, func(t *testing.T) {
+			c, _, events := localReadFixture(t)
+			c.shared.accounts = []Account{{ID: "ABC", Name: "Work", Enabled: true}}
+			sql := "delete from labels; delete from messages; delete from mailboxes;" +
+				"insert into mailboxes(ROWID,url,total_count,unread_count) values (1," + sqlQuote("imap://ABC/"+escapeMailboxURLPath(path)) + ",1,0);"
+			if out, err := exec.Command("sqlite3", os.Getenv("MAIL_APP_CLI_ENVELOPE_INDEX_PATH"), sql).CombinedOutput(); err != nil {
+				t.Fatalf("missing inbox fixture: %v %s", err, out)
+			}
+			result, err := c.SearchRecipientMessages("Work", "", RecipientQueryRequest{Recipient: "target@example.com"})
+			if err != nil || result.Complete || len(result.Messages) != 0 || len(result.FailedMailboxes) == 0 {
+				t.Fatalf("missing root INBOX accepted: result=%+v err=%v", result, err)
+			}
+			foundScope, foundFailure := false, false
+			for _, scope := range result.SearchedMailboxes {
+				foundScope = foundScope || scope.Account == "Work" && scope.Mailbox == "INBOX"
+			}
+			for _, failure := range result.FailedMailboxes {
+				foundFailure = foundFailure || failure.Account == "Work" && failure.Mailbox == "INBOX" && failure.Error != ""
+			}
+			if !foundScope || !foundFailure || events.Load() != 0 {
+				t.Fatalf("missing root coverage: result=%+v Mail events=%d", result, events.Load())
+			}
+		})
 	}
 }

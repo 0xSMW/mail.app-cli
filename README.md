@@ -424,7 +424,8 @@ mail-app-cli messages scan INBOX Archive -a "Example Account" --recipient person
 
 The filter compares parsed addresses in `To`, `Cc`, and `Bcc`, ignoring case.
 It preserves plus tags and dots: `person+tag@example.com` and
-`person@example.com` are distinct addresses. No provider-specific alias,
+`person@example.com` are distinct addresses. Significant whitespace inside
+quoted local parts is also preserved. No provider-specific alias,
 plus-tag, or dot rewriting is applied. Delivery headers (`Delivered-To` and
 `X-Original-To`), subject, and body never establish a recipient match. A
 missing stored Bcc header does not prove whether a blind copy was delivered.
@@ -438,6 +439,10 @@ could affect the result, output includes
 `complete: false` and failure details, and exits 5. Retry after restoring
 access. `search --allow-partial` accepts the incomplete results with the
 existing search completeness envelope.
+
+Cross-mailbox recipient searches retain full mailbox paths, including distinct
+nested folders with the same name. A physical mailbox that cannot be resolved
+unambiguously is reported as incomplete coverage.
 
 For lists and search, `--limit` (and list `--offset`) apply after recipient
 matching, so candidates beyond the first page can still match. For `messages

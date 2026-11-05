@@ -17,6 +17,19 @@ func normalizeRecipientFilter(value string, commands ...*cobra.Command) (string,
 	if recipient == "" && len(commands) > 0 && commands[0].Flags().Changed("recipient") {
 		return "", clierr.Usage("--recipient requires one email address")
 	}
+	if recipient != "" && len(commands) > 0 {
+		flags := commands[0].Flags()
+		limit, offset := 0, 0
+		if flags.Lookup("limit") != nil {
+			limit, _ = flags.GetInt("limit")
+		}
+		if flags.Lookup("offset") != nil {
+			offset, _ = flags.GetInt("offset")
+		}
+		if limit < 0 || offset < 0 || limit > int(^uint(0)>>1)-offset {
+			return "", clierr.Usage("recipient filtering requires non-negative limit and offset without overflow")
+		}
+	}
 	return recipient, nil
 }
 

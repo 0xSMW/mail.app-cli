@@ -186,7 +186,7 @@ func (c *Client) enrichMessagesWithRecipients(accountName, mailboxName string, m
 		messages[i].DeliveredTo, messages[i].OriginalTo = nil, nil
 		messages[i].RecipientStatus = RecipientStatus{}
 	}
-	paths, pathErr := client.messageFilePathsForMessages(accountName, mailboxName, messages)
+	paths, pathErr := client.recipientFilePathsForMessages(accountName, mailboxName, messages)
 	if pathErr == nil {
 		jobs := make(chan int)
 		var workers sync.WaitGroup
@@ -198,7 +198,7 @@ func (c *Client) enrichMessagesWithRecipients(accountName, mailboxName string, m
 					if ctx.Err() != nil {
 						continue
 					}
-					if path := paths[messages[i].ID]; path != "" {
+					if path := paths[i]; path != "" {
 						header, err := readEMLXRecipientHeaders(path)
 						if err == nil {
 							populateRecipientHeaders(&messages[i], header, "disk")
@@ -338,6 +338,44 @@ func recipientScope(m Message, account, mailbox string) (string, string) {
 		mailbox = m.Mailbox
 	}
 	return account, mailbox
+}
+
+// Keep file evidence tied to each row's effective scope. Local IDs identify
+// files, but a valid scope's lookup cannot authorize another row's read.
+func (c *Client) recipientFilePathsForMessages(account, mailbox string, messages []Message) ([]string, error) {
+	type scope struct{ account, mailbox string }
+	type group struct {
+		scope scope
+		rows  []int
+	}
+	groups := []*group{}
+	byScope := make(map[scope]*group)
+	for i, message := range messages {
+		a, m := recipientScope(message, account, mailbox)
+		key := scope{a, m}
+		g := byScope[key]
+		if g == nil {
+			g = &group{scope: key}
+			groups = append(groups, g)
+			byScope[key] = g
+		}
+		g.rows = append(g.rows, i)
+	}
+	paths := make([]string, len(messages))
+	for _, g := range groups {
+		selected := make([]Message, len(g.rows))
+		for j, i := range g.rows {
+			selected[j] = messages[i]
+		}
+		resolved, err := c.messageFilePathsForMessages(g.scope.account, g.scope.mailbox, selected)
+		if err != nil {
+			return nil, err
+		}
+		for _, i := range g.rows {
+			paths[i] = resolved[messages[i].ID]
+		}
+	}
+	return paths, nil
 }
 
 // Resolve collection membership explicitly: Mail can resolve a by-ID specifier
