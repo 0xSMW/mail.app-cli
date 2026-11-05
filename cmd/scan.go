@@ -13,7 +13,7 @@ import (
 func (a *application) newMessagesScanCmd() *cobra.Command {
 	var query, since, cursor, checkpoint string
 	var limit int
-	var unread, restartCheckpoint bool
+	var unread, restartCheckpoint, withRecipients bool
 	cmd := &cobra.Command{
 		Use:         "scan <mailbox> [mailbox...]",
 		Short:       "Read explicit mailboxes live, retaining membership and coverage",
@@ -30,7 +30,7 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 			for i, box := range args {
 				scopes[i] = mail.SearchMailbox{Account: "validation", Mailbox: box}
 			}
-			request := mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint}
+			request := mail.ScanRequest{Scopes: scopes, Query: query, Since: since, Limit: limit, Unread: unread, Cursor: cursor, Checkpoint: checkpoint, RestartCheckpoint: restartCheckpoint, WithRecipients: withRecipients}
 			if err := mail.ValidateScanRequest(request); err != nil {
 				return clierr.Usage(err.Error())
 			}
@@ -62,8 +62,14 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 						p.Line("  %s", p.Red(coverage.Error))
 					}
 				}
+				if withRecipients && result.RecipientCoverage != nil {
+					p.Line("Recipient headers: %d inspected, %d unavailable (complete: %v)", result.RecipientCoverage.Inspected, result.RecipientCoverage.Unavailable, result.RecipientCoverage.Complete)
+				}
 				for _, message := range result.Messages {
 					p.Line("%s  %s  %v", message.ID, message.Subject, message.Mailboxes)
+					if withRecipients {
+						renderRecipientLines(p, message.Message)
+					}
 				}
 				if result.Checkpoint != nil {
 					p.Line("checkpoint: %s (resumed: %v, pages: %d; observed: %s to %s)", result.Checkpoint.Path, result.Checkpoint.Resumed, result.Checkpoint.Pages, result.StartedAt, result.EndedAt)
@@ -74,6 +80,7 @@ func (a *application) newMessagesScanCmd() *cobra.Command {
 			}})
 		},
 	}
+	cmd.Flags().BoolVar(&withRecipients, "with-recipients", false, recipientFlagUsage)
 	cmd.Flags().StringVar(&query, "query", "", "Match terms in subject, sender, and indexed summary")
 	cmd.Flags().StringVar(&since, "since", "", "Only messages received since a date or timestamp")
 	cmd.Flags().IntVar(&limit, "limit", 200, "Maximum messages per mailbox and page; 0 is unlimited")

@@ -15,17 +15,20 @@ func (n *nativeMail) messageHeaders(ref appleevents.Value, message *Message) err
 	headers, err := n.stringProperty("alhe", ref)
 	if err != nil {
 		if nativeOptionalProperty(err) {
+			unavailableRecipients(message, err)
 			return nil
 		}
 		return err
 	}
 	if strings.TrimSpace(headers) == "" {
+		unavailableRecipients(message, fmt.Errorf("Mail did not expose message headers"))
 		return nil
 	}
 	parsed, err := netmail.ReadMessage(strings.NewReader(headers + "\r\n\r\n"))
 	if err != nil {
 		return fmt.Errorf("parse Mail message headers: %w", err)
 	}
+	populateRecipientHeaders(message, parsed.Header, "mail")
 	populateUnsubscribe(message, parsed.Header)
 	message.InReplyTo = strings.TrimSpace(parsed.Header.Get("In-Reply-To"))
 	message.References = strings.TrimSpace(parsed.Header.Get("References"))

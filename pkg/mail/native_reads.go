@@ -484,6 +484,11 @@ func (c *Client) nativeMessageDetails(account, mailbox, id string, timeout time.
 				return err
 			}
 			message.BccRecipients, err = n.recipients(ref, "brcp")
+			if err == nil {
+				message.RecipientStatus.To = RecipientFieldStatus{State: "available", Source: "mail"}
+				message.RecipientStatus.Cc = RecipientFieldStatus{State: "available", Source: "mail"}
+				message.RecipientStatus.Bcc = RecipientFieldStatus{State: "available", Source: "mail"}
+			}
 			return err
 		}); err != nil {
 			return err

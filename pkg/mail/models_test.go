@@ -59,3 +59,24 @@ func TestMessageMarshalJSONLinkInventory(t *testing.T) {
 		})
 	}
 }
+
+func TestMessageMarshalMarksUninspectedRecipientFields(t *testing.T) {
+	// Older cache/journal entries have arrays but no recipient evidence status.
+	var cached Message
+	if err := json.Unmarshal([]byte(`{"id":"42","toRecipients":[],"ccRecipients":[],"bccRecipients":[]}`), &cached); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observed Message
+	if err := json.Unmarshal(encoded, &observed); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range recipientFields(&observed) {
+		if field.status.State != "not-requested" || field.status.Source != "" || len(*field.values) != 0 {
+			t.Fatalf("old empty arrays became recipient evidence: %s: %+v", field.name, *field.status)
+		}
+	}
+}

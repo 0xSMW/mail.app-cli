@@ -30,10 +30,11 @@ type ScanCheckpointProvenance struct {
 }
 
 type checkpointRequest struct {
-	Scopes []SearchMailbox `json:"scopes"`
-	Query  string          `json:"query"`
-	Since  string          `json:"since"`
-	Unread bool            `json:"unread"`
+	Scopes         []SearchMailbox `json:"scopes"`
+	Query          string          `json:"query"`
+	Since          string          `json:"since"`
+	Unread         bool            `json:"unread"`
+	WithRecipients bool            `json:"withRecipients,omitempty"`
 }
 type scanCheckpoint struct {
 	Checksum    string            `json:"checksum"`
@@ -44,7 +45,7 @@ type scanCheckpoint struct {
 }
 
 func checkpointIdentity(req ScanRequest) checkpointRequest {
-	return checkpointRequest{req.Scopes, req.Query, req.Since, req.Unread}
+	return checkpointRequest{req.Scopes, req.Query, req.Since, req.Unread, req.WithRecipients}
 }
 func checkpointFingerprint(req checkpointRequest) string {
 	data, _ := json.Marshal(req)
@@ -108,7 +109,7 @@ func loadScanCheckpoint(path string, req ScanRequest) (scanCheckpoint, bool, err
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return state, false, checkpointError("trailing data")
 	}
-	if state.Version != 1 || state.Fingerprint != checkpointFingerprint(state.Request) || state.Fingerprint != checkpointFingerprint(checkpointIdentity(req)) {
+	if state.Version != 2 || state.Fingerprint != checkpointFingerprint(state.Request) || state.Fingerprint != checkpointFingerprint(checkpointIdentity(req)) {
 		return state, false, checkpointError("different scopes or filters, or unsupported/corrupt state; use original flags or --restart-checkpoint")
 	}
 	if state.Checksum != checkpointChecksum(state) {
@@ -229,7 +230,7 @@ func saveScanCheckpoint(path string, state scanCheckpoint) error {
 }
 func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
 	path, _ := filepath.Abs(req.Checkpoint)
-	state := scanCheckpoint{Version: 1, Request: checkpointIdentity(req), Fingerprint: checkpointFingerprint(checkpointIdentity(req))}
+	state := scanCheckpoint{Version: 2, Request: checkpointIdentity(req), Fingerprint: checkpointFingerprint(checkpointIdentity(req))}
 	resumed := false
 	if !req.RestartCheckpoint {
 		var err error
@@ -238,7 +239,7 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 			return ScanResult{}, err
 		}
 		if !resumed {
-			state = scanCheckpoint{Version: 1, Request: checkpointIdentity(req), Fingerprint: checkpointFingerprint(checkpointIdentity(req))}
+			state = scanCheckpoint{Version: 2, Request: checkpointIdentity(req), Fingerprint: checkpointFingerprint(checkpointIdentity(req))}
 		}
 	}
 	pageReq := req
@@ -275,6 +276,9 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 		for _, m := range page.Messages {
 			key := m.Account + "\x00" + m.ID
 			if i, ok := indices[key]; ok {
+				if req.WithRecipients {
+					mergeRecipientEvidence(&result.Messages[i].Message, m.Message)
+				}
 				for _, box := range m.Mailboxes {
 					if !slices.Contains(result.Messages[i].Mailboxes, box) {
 						result.Messages[i].Mailboxes = append(result.Messages[i].Mailboxes, box)
@@ -287,6 +291,7 @@ func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *Scan
 		}
 		sort.SliceStable(result.Messages, func(i, j int) bool { return result.Messages[i].DateReceived > result.Messages[j].DateReceived })
 	}
+	updateScanRecipientCoverage(&result, req.WithRecipients)
 	state.Result = result
 	if err := validateCheckpointState(state, req); err != nil {
 		return ScanResult{}, err

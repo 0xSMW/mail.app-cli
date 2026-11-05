@@ -15,11 +15,12 @@ import (
 // ScanRequest names every mailbox explicitly. A scan always reads live state;
 // its observations are sequential, not an atomic snapshot of Mail.app.
 type ScanRequest struct {
-	Scopes []SearchMailbox
-	Query  string
-	Since  string
-	Limit  int // per mailbox and page; zero means unlimited
-	Unread bool
+	Scopes         []SearchMailbox
+	Query          string
+	Since          string
+	Limit          int // per mailbox and page; zero means unlimited
+	Unread         bool
+	WithRecipients bool
 	// Cursor is a NextCursor from an earlier page of the same request.
 	Cursor            string
 	Checkpoint        string // durable private traversal state; incompatible with Cursor
@@ -62,10 +63,33 @@ type ScanCoverage struct {
 	Errors    []string `json:"errors,omitempty"` // checkpoint-only cumulative failed-page observations
 }
 
+// RecipientCoverage describes fields inspected on returned messages, separately
+// from mailbox traversal completeness and pagination.
+type RecipientCoverage struct {
+	Inspected   int  `json:"inspected"`
+	Unavailable int  `json:"unavailable"`
+	Complete    bool `json:"complete"`
+}
+
+func updateScanRecipientCoverage(result *ScanResult, requested bool) {
+	if !requested {
+		return
+	}
+	coverage := &RecipientCoverage{Inspected: len(result.Messages), Complete: true}
+	for _, message := range result.Messages {
+		if !message.RecipientStatus.complete() {
+			coverage.Unavailable++
+			coverage.Complete = false
+		}
+	}
+	result.RecipientCoverage = coverage
+}
+
 type ScanResult struct {
-	Messages []ScanMessage  `json:"messages"`
-	Coverage []ScanCoverage `json:"coverage"`
-	Complete bool           `json:"complete"`
+	RecipientCoverage *RecipientCoverage `json:"recipientCoverage,omitempty"`
+	Messages          []ScanMessage      `json:"messages"`
+	Coverage          []ScanCoverage     `json:"coverage"`
+	Complete          bool               `json:"complete"`
 	// NextCursor continues every mailbox that is not yet exhausted. It is
 	// empty once the traversal has covered every requested mailbox.
 	NextCursor string                    `json:"nextCursor,omitempty"`
@@ -121,11 +145,12 @@ func uniqueScanScopes(scopes []SearchMailbox) []SearchMailbox {
 // The page size is left out so a caller may change --limit between pages.
 func scanRequestFingerprint(req ScanRequest, scopes []SearchMailbox) string {
 	data, _ := json.Marshal(struct {
-		Scopes []SearchMailbox
-		Query  []string
-		Since  string
-		Unread bool
-	}{scopes, searchTerms(req.Query), strings.TrimSpace(req.Since), req.Unread})
+		Scopes         []SearchMailbox
+		Query          []string
+		Since          string
+		Unread         bool
+		WithRecipients bool `json:",omitempty"`
+	}{scopes, searchTerms(req.Query), strings.TrimSpace(req.Since), req.Unread, req.WithRecipients})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
 }
@@ -198,7 +223,11 @@ func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
 		if !ok {
 			return scanPage{}, fmt.Errorf("mailbox unavailable in Envelope Index: %s/%s; check mailbox name and Full Disk Access", scope.Account, scope.Mailbox)
 		}
-		return c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
+		page, err := c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
+		if err == nil && req.WithRecipients {
+			page.Messages = c.EnrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages)
+		}
+		return page, err
 	})
 }
 
@@ -252,6 +281,9 @@ func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPositi
 				key := scope.Account + "\x00" + message.ID
 				if index, found := seenMessages[key]; found {
 					result.Messages[index].Mailboxes = append(result.Messages[index].Mailboxes, scope.Mailbox)
+					if req.WithRecipients {
+						mergeRecipientEvidence(&result.Messages[index].Message, message)
+					}
 				} else {
 					message.Account, message.Mailbox = scope.Account, scope.Mailbox
 					seenMessages[key] = len(result.Messages)
@@ -266,5 +298,6 @@ func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPositi
 	}
 	sort.SliceStable(result.Messages, func(i, j int) bool { return result.Messages[i].DateReceived > result.Messages[j].DateReceived })
 	result.EndedAt = time.Now().Format(time.RFC3339Nano)
+	updateScanRecipientCoverage(&result, req.WithRecipients)
 	return result, nil
 }

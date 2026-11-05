@@ -40,7 +40,7 @@ func (a *application) newUnifiedCmd(use, short, mailboxType string) *cobra.Comma
 		Use:   use,
 		Short: short,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.listUnified(mailboxType, a.msgLimit, a.msgOffset, a.msgWithContent)
+			return a.listUnified(mailboxType, a.msgLimit, a.msgOffset, a.msgWithContent, a.msgWithRecipients)
 		},
 	}
 }
@@ -96,11 +96,14 @@ delete, and move commands do the same work and accept several IDs.`,
 			if err != nil {
 				return fmt.Errorf("get messages: %w", err)
 			}
+			if a.msgWithRecipients {
+				messages = a.mailClient.EnrichMessagesWithRecipients(account, mailbox, messages)
+			}
 			return a.writer.Write(output.Result{
 				Data:    messages,
 				Summary: fmt.Sprintf("%s in %s/%s", plural(len(messages), "message"), account, mailbox),
 				Meta:    map[string]any{"account": account, "mailbox": mailbox, "source": source},
-				Plain:   renderMessages(messages, false),
+				Plain:   renderMessages(messages, false, a.msgWithRecipients),
 			})
 		},
 	}
@@ -173,6 +176,7 @@ delete, and move commands do the same work and accept several IDs.`,
 	registerPagingFlags(a.messagesListCmd, &a.msgLimit, &a.msgOffset)
 	a.messagesListCmd.Flags().BoolVarP(&msgUnread, "unread", "u", false, "Only unread messages")
 	a.messagesListCmd.Flags().BoolVarP(&msgFlaggedFilter, "flagged", "f", false, "Only flagged messages")
+	a.messagesListCmd.Flags().BoolVar(&a.msgWithRecipients, "with-recipients", false, recipientFlagUsage)
 	a.messagesListCmd.Flags().BoolVar(&a.msgWithContent, "with-content", false, "Include bodies (slow)")
 	a.messagesListCmd.Flags().StringVarP(&msgSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
 	a.messagesListCmd.Flags().BoolVar(&msgNoCache, "no-cache", false, "Bypass the cache and read live")
@@ -196,6 +200,7 @@ delete, and move commands do the same work and accept several IDs.`,
 		a.messagesDraftsCmd, a.messagesFlaggedCmd, a.messagesTrashCmd, a.messagesJunkCmd,
 	} {
 		registerPagingFlags(cmd, &a.msgLimit, &a.msgOffset)
+		cmd.Flags().BoolVar(&a.msgWithRecipients, "with-recipients", false, recipientFlagUsage)
 		cmd.Flags().BoolVar(&a.msgWithContent, "with-content", false, "Include bodies (slow)")
 	}
 }

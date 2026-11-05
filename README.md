@@ -350,6 +350,52 @@ Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
 | 6 | `mutation_failed` | at least one requested change failed or did not verify |
 | 7 | `internal` | anything else |
 
+## Recipient headers without bodies
+
+Use `--with-recipients` on `inbox`, `unread`, `messages list`, the unified
+`messages inbox/unread/sent/drafts/flagged/trash/junk` views, `search`, and
+`messages scan` to inspect recipient headers without fetching message bodies:
+
+```bash
+mail-app-cli inbox --with-recipients
+mail-app-cli messages list -a "Example Account" -m INBOX --with-recipients --json
+mail-app-cli search "sample invoice" --with-recipients
+mail-app-cli messages scan INBOX Archive -a "Example Account" --with-recipients
+mail-app-cli show 100001 --metadata-only
+```
+
+`show --metadata-only` also includes recipient headers while skipping body
+extraction. `--with-content` remains a separate request for bodies.
+
+The `account` and `mailbox` fields identify where Mail stores a message. They do
+not identify the address in its `To` header. Recipient output includes
+`toRecipients`, `ccRecipients`, `bccRecipients`, `deliveredTo`, and `originalTo`,
+with a `recipientStatus` entry for each field (`to`, `cc`, `bcc`, `deliveredTo`,
+and `originalTo`). Each status reports `state`, `source`, and an error when
+unavailable. `available` means the stored header or Mail recipient collection
+was inspected; an empty array means it exposed no addresses for that field.
+`unavailable` means the value is unknown,
+and `not-requested` means no recipient inspection was requested. Empty arrays
+alone do not establish that a message had no recipients. Human output prints
+all inspected values beneath each message, including explicit absent and
+unavailable markers.
+
+`Delivered-To` and `X-Original-To` are delivery evidence when present. They can
+help distinguish aliases and forwarding routes, but their absence cannot
+establish the final delivery address. Received Bcc recipients are commonly
+omitted from stored headers; an absent Bcc header does not establish that no
+blind copy was sent.
+
+Recipient headers are read again when requested, including for cached lists or
+the recent-message search fallback. List `source` still describes where the
+message listing came from; per-field recipient status describes the separate
+header read. Scan `recipientCoverage` describes header availability separately
+from mailbox traversal coverage. A complete mailbox scan can still have
+unavailable recipient headers. These flags add output fields; they do not
+filter by recipient. Existing scan cursors remain compatible when recipient
+inspection is disabled. Private scan checkpoints created before this version
+require `--restart-checkpoint` to begin a fresh traversal.
+
 ## Scope: account and mailbox
 
 `--account`/`-a` and `--mailbox`/`-m` work on every command. Precedence is flag, then `MAIL_APP_CLI_ACCOUNT`/`MAIL_APP_CLI_MAILBOX`, then the config file, then defaults: the only enabled account, and `INBOX`. With several accounts and no default, account-scoped commands exit 1 and list the names.

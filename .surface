@@ -148,6 +148,7 @@ inbox --limit (-l)
 inbox --offset (-o)
 inbox --unread (-u)
 inbox --with-content
+inbox --with-recipients
 labels
 labels --email
 labels --help (-h)
@@ -284,6 +285,7 @@ messages drafts --help (-h)
 messages drafts --limit (-l)
 messages drafts --offset (-o)
 messages drafts --with-content
+messages drafts --with-recipients
 messages flag
 messages flag --dry-run
 messages flag --flagged (-f)
@@ -294,16 +296,19 @@ messages flagged --help (-h)
 messages flagged --limit (-l)
 messages flagged --offset (-o)
 messages flagged --with-content
+messages flagged --with-recipients
 messages inbox
 messages inbox --help (-h)
 messages inbox --limit (-l)
 messages inbox --offset (-o)
 messages inbox --with-content
+messages inbox --with-recipients
 messages junk
 messages junk --help (-h)
 messages junk --limit (-l)
 messages junk --offset (-o)
 messages junk --with-content
+messages junk --with-recipients
 messages list
 messages list --flagged (-f)
 messages list --force-refresh
@@ -314,6 +319,7 @@ messages list --offset (-o)
 messages list --since (-s)
 messages list --unread (-u)
 messages list --with-content
+messages list --with-recipients
 messages mark
 messages mark --dry-run
 messages mark --help (-h)
@@ -342,11 +348,13 @@ messages scan --query
 messages scan --restart-checkpoint
 messages scan --since
 messages scan --unread
+messages scan --with-recipients
 messages sent
 messages sent --help (-h)
 messages sent --limit (-l)
 messages sent --offset (-o)
 messages sent --with-content
+messages sent --with-recipients
 messages show
 messages show --help (-h)
 messages trash
@@ -354,11 +362,13 @@ messages trash --help (-h)
 messages trash --limit (-l)
 messages trash --offset (-o)
 messages trash --with-content
+messages trash --with-recipients
 messages unread
 messages unread --help (-h)
 messages unread --limit (-l)
 messages unread --offset (-o)
 messages unread --with-content
+messages unread --with-recipients
 messages vip
 messages vip --help (-h)
 messages vip --limit (-l)
@@ -415,6 +425,7 @@ search --no-cache
 search --sender
 search --sender-domain
 search --since (-s)
+search --with-recipients
 seen
 seen --dry-run
 seen --help (-h)
@@ -494,6 +505,7 @@ unread --help (-h)
 unread --limit (-l)
 unread --offset (-o)
 unread --with-content
+unread --with-recipients
 unseen
 unseen --dry-run
 unseen --help (-h)

@@ -21,12 +21,13 @@ func partialSearchOutputData(result mail.SearchResult, format output.Format) any
 
 func (a *application) buildSearchCommands() {
 	var (
-		searchLimit        int
-		searchSince        string
-		searchAllowPartial bool
-		searchNoCache      bool
-		searchSender       string
-		searchSenderDomain string
+		searchLimit          int
+		searchSince          string
+		searchAllowPartial   bool
+		searchNoCache        bool
+		searchWithRecipients bool
+		searchSender         string
+		searchSenderDomain   string
 	)
 
 	a.searchCmd = &cobra.Command{
@@ -63,13 +64,16 @@ account (or of the one named with
 					recentMessages, recentErr := mail.SearchRecentMessages(query, account, mailbox, searchLimit, searchSince)
 					if recentErr == nil {
 						recentMessages = mail.FilterBySender(recentMessages, searchSender, searchSenderDomain)
+						if searchWithRecipients {
+							recentMessages = a.mailClient.EnrichMessagesWithRecipients(account, mailbox, recentMessages)
+						}
 						if len(recentMessages) > 0 {
 							return a.writer.Write(output.Result{
 								Data:    recentMessages,
 								Summary: fmt.Sprintf("%s from the recent-message journal", plural(len(recentMessages), "match")),
 								Notices: []string{fmt.Sprintf("live search failed (%v); showing recently handled messages that match", err)},
 								Meta:    map[string]any{"source": "recent", "query": query},
-								Plain:   renderMessages(recentMessages, true),
+								Plain:   renderMessages(recentMessages, true, searchWithRecipients),
 							})
 						}
 					}
@@ -79,6 +83,9 @@ account (or of the one named with
 			messages := mail.FilterBySender(result.Messages, searchSender, searchSenderDomain)
 			if result.Complete {
 				_ = mail.RecordRecentSearchResults(messages, query)
+			}
+			if searchWithRecipients {
+				messages = a.mailClient.EnrichMessagesWithRecipients(account, mailbox, messages)
 			}
 			meta := map[string]any{"source": "index", "query": query, "complete": result.Complete, "searchedMailboxCount": len(result.SearchedMailboxes)}
 			if searchAllowPartial {
@@ -92,18 +99,19 @@ account (or of the one named with
 					Summary: fmt.Sprintf("%s for %q (complete: %v)", plural(len(messages), "match"), query, result.Complete),
 					Notices: notices,
 					Meta:    meta,
-					Plain:   renderMessages(messages, true),
+					Plain:   renderMessages(messages, true, searchWithRecipients),
 				})
 			}
 			return a.writer.Write(output.Result{
 				Data:    messages,
 				Summary: fmt.Sprintf("%s for %q", plural(len(messages), "match"), query),
 				Meta:    meta,
-				Plain:   renderMessages(messages, true),
+				Plain:   renderMessages(messages, true, searchWithRecipients),
 			})
 		},
 	}
 
+	a.searchCmd.Flags().BoolVar(&searchWithRecipients, "with-recipients", false, recipientFlagUsage)
 	a.searchCmd.Flags().IntVarP(&searchLimit, "limit", "l", 50, "Maximum results")
 	a.searchCmd.Flags().StringVarP(&searchSince, "since", "s", "", "Only messages since YYYY-MM-DD or 'YYYY-MM-DD HH:MM:SS'")
 	a.searchCmd.Flags().StringVar(&searchSender, "sender", "", "Only messages from this exact sender/email")
