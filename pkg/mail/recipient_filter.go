@@ -119,7 +119,7 @@ func (c *Client) RecipientMessages(req RecipientQueryRequest) (SearchResult, err
 		// Preserve the original Last/Remaining boundary even if metadata filters
 		// remove every candidate on this page.
 		page.Messages = FilterBySender(page.Messages, req.Sender, req.SenderDomain)
-		page.Messages = client.EnrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages)
+		page.Messages = client.enrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages, req.Recipient)
 		return page, nil
 	})
 	if req.WithContent && len(result.Messages) > 0 {

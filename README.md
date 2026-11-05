@@ -372,8 +372,9 @@ not identify the address in its `To` header. Recipient output includes
 `toRecipients`, `ccRecipients`, `bccRecipients`, `deliveredTo`, and `originalTo`,
 with a `recipientStatus` entry for each field (`to`, `cc`, `bcc`, `deliveredTo`,
 and `originalTo`). Each status reports `state`, `source`, and an error when
-unavailable. A `mixed` source means retained addresses came from both cached
-headers and Mail metadata. `available` means the stored header or Mail recipient collection
+unavailable. A `mixed` source means retained addresses came from more than one
+source, such as cached headers, the local recipient index, and Mail metadata.
+`available` means the stored header or Mail recipient collection
 was inspected; an empty array means it exposed no addresses for that field.
 `partial` means validated addresses are retained, but additional recipients
 could not be read; the listed addresses are useful evidence and are not an
@@ -384,6 +385,17 @@ all inspected values beneath each message, including explicit absent, partial,
 and unavailable markers. Older malformed display names are repaired
 conservatively when the address can still be validated. Message bodies and MIME
 content are never used as recipient evidence.
+
+When complete headers are unavailable, validated To and Cc addresses from
+Mail's local recipient index can appear as `partial` evidence with source
+`index`. Indexed addresses can establish a positive exact match; missing index
+entries cannot establish that an address was absent. Exact filtering avoids
+additional Mail reads once the requested address is positively identified,
+so other recipient fields can remain incomplete on a confirmed match.
+
+Mail fallback uses a shared time budget for the selected messages. If it stops,
+field errors distinguish the active operation from lookups that were not
+attempted. Smaller message-list or scan pages reduce the work within that budget.
 
 `Delivered-To` and `X-Original-To` are delivery evidence when present. They can
 help distinguish aliases and forwarding routes, but their absence cannot

@@ -166,6 +166,12 @@ func readEMLXRecipientHeaders(path string) (netmail.Header, error) {
 // row. It preserves envelope/body data and records failures on the affected
 // fields; callers need not fetch content to inspect recipient availability.
 func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, messages []Message) []Message {
+	return c.enrichMessagesWithRecipients(accountName, mailboxName, messages, "")
+}
+
+// A known positive exact match needs no further Mail reads. Index evidence
+// remains partial and cannot establish absence or a complete recipient list.
+func (c *Client) enrichMessagesWithRecipients(accountName, mailboxName string, messages []Message, recipient string) []Message {
 	if len(messages) == 0 {
 		return messages
 	}
@@ -211,8 +217,16 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 		close(jobs)
 		workers.Wait()
 	}
+	// The optional recipient index can preserve positive addressed evidence when
+	// cached headers are missing. Unsupported schemas still use scoped Mail reads.
+	_ = client.enrichRecipientIndexEvidence(accountName, mailboxName, messages)
 	pending := []int{}
 	for i := range messages {
+		if recipient != "" {
+			if matched, _ := MatchRecipient(messages[i], recipient); matched {
+				continue
+			}
+		}
 		if !messages[i].RecipientStatus.complete() {
 			pending = append(pending, i)
 		}
@@ -236,24 +250,30 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 	pending = append(addressed, delivery...)
 	if len(pending) > 0 {
 		var err error
+		attempted := make(map[int]bool)
+		completed := make(map[int]bool)
 		if ctx.Err() != nil {
 			err = ctx.Err()
 		} else if client.nativeEnabled() {
 			err = client.withNativeAutomation(recipientReadBudget, func(n *nativeMail) error {
+				refs := newRecipientReferenceCache()
+
 				for _, i := range pending {
 					if n.ctx.Err() != nil {
 						return n.ctx.Err()
 					}
 					m := &messages[i]
 					account, mailbox := recipientScope(*m, accountName, mailboxName)
-					e := n.readMessageRecipients(account, mailbox, m)
+					attempted[i] = true
+					e := n.readMessageRecipientsWithCache(account, mailbox, m, refs)
 					if e != nil {
-						unavailableRecipients(m, e)
 						// Permission/transport failures must not be replayed for every row.
 						if recipientSystemicError(e) {
 							return e
 						}
+						unavailableRecipients(m, e)
 					}
+					completed[i] = true
 				}
 				return nil
 			})
@@ -265,19 +285,35 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 				}
 				m := &messages[i]
 				account, mailbox := recipientScope(*m, accountName, mailboxName)
+				attempted[i] = true
 				e := client.readLegacyMessageRecipients(account, mailbox, m)
 				if e != nil {
-					unavailableRecipients(m, e)
 					if recipientSystemicError(e) {
 						err = e
 						break
 					}
+					unavailableRecipients(m, e)
 				}
+				completed[i] = true
 			}
 		}
 		if err != nil {
 			for _, i := range pending {
-				unavailableRecipients(&messages[i], err)
+				if completed[i] {
+					continue
+				}
+				rowErr := err
+				if !attempted[i] {
+					rowErr = fmt.Errorf("recipient lookup not attempted because shared batch stopped: %w", err)
+				}
+				// Retain the disk failure while explaining whether Mail tried
+				// this row. Partial and observed fields keep their evidence.
+				for _, field := range recipientFields(&messages[i]) {
+					if field.status.State == "unavailable" && field.status.Error != "" && !strings.Contains(field.status.Error, rowErr.Error()) {
+						field.status.Error += "; " + rowErr.Error()
+					}
+				}
+				unavailableRecipients(&messages[i], rowErr)
 			}
 		}
 	}
@@ -290,7 +326,7 @@ func (c *Client) EnrichMessagesWithRecipients(accountName, mailboxName string, m
 		}
 	}
 	if unavailable > 0 {
-		c.warn(fmt.Sprintf("recipient fields unavailable for %d of %d messages; inspect recipientStatus", unavailable, len(messages)))
+		c.warn(fmt.Sprintf("recipient fields incomplete for %d of %d messages; inspect recipientStatus", unavailable, len(messages)))
 	}
 	return messages
 }
@@ -307,42 +343,101 @@ func recipientScope(m Message, account, mailbox string) (string, string) {
 // Resolve collection membership explicitly: Mail can resolve a by-ID specifier
 // globally even when it carries a different mailbox container.
 func (n *nativeMail) recipientMessageReference(account, mailbox, messageID string) (ae.Value, error) {
-	if strings.TrimSpace(account) == "" || strings.TrimSpace(mailbox) == "" {
-		return ae.Value{}, fmt.Errorf("recipient read needs account and mailbox")
-	}
-	id, err := strconv.ParseInt(messageID, 10, 64)
-	if err != nil || id <= 0 {
-		return ae.Value{}, fmt.Errorf("invalid message ID")
-	}
-	acc, err := n.account(account)
-	if err != nil {
+	return n.recipientMessageReferenceWithCache(account, mailbox, messageID, nil)
+}
+
+type recipientMailboxScope struct{ account, mailbox string }
+
+// References are reused only inside one serialized recipient invocation.
+// Membership remains a fresh, scoped observation for every selected message.
+type recipientReferenceCache struct {
+	accounts  map[string]ae.Value
+	mailboxes map[recipientMailboxScope]ae.Value
+}
+
+func newRecipientReferenceCache() *recipientReferenceCache {
+	return &recipientReferenceCache{accounts: make(map[string]ae.Value), mailboxes: make(map[recipientMailboxScope]ae.Value)}
+}
+
+func (n *nativeMail) recipientMessageReferenceWithCache(account, mailbox, messageID string, refs *recipientReferenceCache) (ae.Value, error) {
+	var id int64
+	if err := n.phase("recipient_scope", func() error {
+		if strings.TrimSpace(account) == "" || strings.TrimSpace(mailbox) == "" {
+			return fmt.Errorf("recipient read needs account and mailbox")
+		}
+		var err error
+		id, err = strconv.ParseInt(messageID, 10, 64)
+		if err != nil || id <= 0 {
+			return fmt.Errorf("invalid message ID")
+		}
+		return nil
+	}); err != nil {
 		return ae.Value{}, err
 	}
-	box, err := n.mailbox(acc, mailbox)
-	if err != nil {
-		return ae.Value{}, err
+	var acc, box ae.Value
+	if refs != nil {
+		acc = refs.accounts[account]
+		box = refs.mailboxes[recipientMailboxScope{account, mailbox}]
 	}
-	selector := ae.ByTest("mssg", ae.Comparison("=   ", ae.Property("ID  ", ae.Examined()), ae.Int(id)), box)
-	value, err := n.get(ae.Property("ID  ", selector))
-	if err != nil {
-		return ae.Value{}, err
+	if acc.Kind == "" {
+		if err := n.phase("recipient_account", func() error {
+			var err error
+			acc, err = n.account(account)
+			return err
+		}); err != nil {
+			return ae.Value{}, err
+		}
+		if refs != nil {
+			refs.accounts[account] = acc
+		}
 	}
-	ids, err := nativeList(value, "scoped message IDs")
-	if err != nil {
-		return ae.Value{}, err
+	if box.Kind == "" {
+		if err := n.phase("recipient_mailbox", func() error {
+			var err error
+			box, err = n.mailbox(acc, mailbox)
+			return err
+		}); err != nil {
+			return ae.Value{}, err
+		}
+		if refs != nil {
+			refs.mailboxes[recipientMailboxScope{account, mailbox}] = box
+		}
 	}
-	if len(ids) != 1 || ids[0].Kind != "int" || ids[0].Number != id {
-		return ae.Value{}, notFound("message", messageID)
-	}
-	return n.message(box, messageID)
+	var ref ae.Value
+	err := n.phase("recipient_membership", func() error {
+		selector := ae.ByTest("mssg", ae.Comparison("=   ", ae.Property("ID  ", ae.Examined()), ae.Int(id)), box)
+		value, err := n.get(ae.Property("ID  ", selector))
+		if err != nil {
+			return err
+		}
+		ids, err := nativeList(value, "scoped message IDs")
+		if err != nil {
+			return err
+		}
+		if len(ids) != 1 || ids[0].Kind != "int" || ids[0].Number != id {
+			return notFound("message", messageID)
+		}
+		ref, err = n.message(box, messageID)
+		return err
+	})
+	return ref, err
 }
 
 func (n *nativeMail) readMessageRecipients(account, mailbox string, m *Message) error {
-	ref, err := n.recipientMessageReference(account, mailbox, m.ID)
+	return n.readMessageRecipientsWithCache(account, mailbox, m, nil)
+}
+
+func (n *nativeMail) readMessageRecipientsWithCache(account, mailbox string, m *Message, refs *recipientReferenceCache) error {
+	ref, err := n.recipientMessageReferenceWithCache(account, mailbox, m.ID, refs)
 	if err != nil {
 		return err
 	}
-	headers, err := n.stringProperty("alhe", ref)
+	var headers string
+	err = n.phase("recipient_headers", func() error {
+		var err error
+		headers, err = n.stringProperty("alhe", ref)
+		return err
+	})
 	if err == nil && strings.TrimSpace(headers) != "" {
 		if len(headers) > maxRecipientHeaderBytes {
 			err = fmt.Errorf("Mail message headers exceed %d bytes", maxRecipientHeaderBytes)
@@ -358,22 +453,29 @@ func (n *nativeMail) readMessageRecipients(account, mailbox string, m *Message) 
 		if recipientSystemicError(err) {
 			return err
 		}
-		unavailableRecipients(m, err)
 	}
 	for i, class := range []string{"trcp", "crcp", "brcp"} {
 		field := recipientFields(m)[i]
 		if field.status.State == "available" {
 			continue
 		}
-		values, e := n.recipients(ref, class)
+		var values []string
+		e := n.phase("recipient_"+strings.ToLower(field.name), func() error {
+			var err error
+			values, err = n.recipients(ref, class)
+			return err
+		})
 		if e != nil {
-			recipientFieldFailure(field, "mail", e)
 			if recipientSystemicError(e) {
 				return e
 			}
+			recipientFieldFailure(field, "mail", e)
 		} else {
 			populateMailRecipientCollection(field, values)
 		}
+	}
+	if err != nil {
+		unavailableRecipients(m, err)
 	}
 	return nil
 }

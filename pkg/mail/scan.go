@@ -253,7 +253,7 @@ func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
 		}
 		page, err := c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
 		if err == nil && req.WithRecipients {
-			page.Messages = c.EnrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages)
+			page.Messages = c.enrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages, req.Recipient)
 		}
 		return page, err
 	})
