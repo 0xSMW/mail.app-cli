@@ -157,23 +157,10 @@ func populateMIMEEnvelope(message *Message, header netmail.Header) error {
 		}
 		message.Subject = decoded
 	}
-	parser := &netmail.AddressParser{WordDecoder: decoder}
-	for _, field := range []struct {
-		name   string
-		target *[]string
-	}{
-		{"To", &message.ToRecipients}, {"Cc", &message.CcRecipients}, {"Bcc", &message.BccRecipients},
-	} {
-		*field.target = []string{}
-		// Preserve repeated recipient headers instead of taking only Header.Get.
-		for _, raw := range header[field.name] {
-			addresses, err := parser.ParseList(raw)
-			if err != nil {
-				return fmt.Errorf("parse %s recipients: %w", field.name, err)
-			}
-			for _, address := range addresses {
-				*field.target = append(*field.target, address.Address)
-			}
+	populateRecipientHeaders(message, header, "disk")
+	for _, field := range recipientFields(message)[:3] {
+		if field.status.State != "available" {
+			return fmt.Errorf("%s", field.status.Error)
 		}
 	}
 	if raw := strings.TrimSpace(header.Get("Message-ID")); len(raw) > 2 && raw[0] == '<' && raw[len(raw)-1] == '>' && !strings.ContainsAny(raw[1:len(raw)-1], "<> \t\r\n") {

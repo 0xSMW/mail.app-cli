@@ -414,16 +414,26 @@ JSON.stringify({message: message, headerText: headerText, failure: failure, phas
 		return nil, trace, &BridgePhaseError{Engine: "jxa", Phase: failure.Phase, Message: failure.Message, Trace: trace}
 	}
 	if message := envelope.Message; message != nil {
+		typed := [][]string{message.ToRecipients, message.CcRecipients, message.BccRecipients}
+		message.ToRecipients, message.CcRecipients, message.BccRecipients = nil, nil, nil
+		for i, values := range typed {
+			populateMailRecipientCollection(recipientFields(message)[i], values)
+		}
 		trimBodyAlternatives(bodyDiagnostics, c.shared.bodyAlternatives)
 		message.BodyDiagnostics = bodyDiagnostics
 		message.ContentSource = "mail"
 		if diskLinks != nil {
 			message.Links, message.LinkStatus, message.Unsubscribe = diskLinks.Links, diskLinks.LinkStatus, diskLinks.Unsubscribe
 		}
-		if envelope.HeaderText != nil {
+		if envelope.HeaderText != nil && strings.TrimSpace(*envelope.HeaderText) != "" {
 			if h, e := headerTextMessage(*envelope.HeaderText); e == nil {
+				populateRecipientHeaders(message, h, "mail")
 				populateUnsubscribe(message, h)
+			} else {
+				unavailableRecipients(message, e)
 			}
+		} else {
+			unavailableRecipients(message, fmt.Errorf("Mail did not expose message headers"))
 		}
 		populateMailLinks(message)
 		if haveDiskBody {

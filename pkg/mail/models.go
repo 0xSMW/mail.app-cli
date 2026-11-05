@@ -49,12 +49,15 @@ type Message struct {
 	// BodyDiagnostics inventories local extraction; it does not certify semantic completeness.
 	BodyDiagnostics *BodyDiagnostics `json:"bodyDiagnostics,omitempty"`
 	// Snippet is Mail's indexed summary, present on index-backed listings.
-	Snippet       string   `json:"snippet,omitempty"`
-	Mailbox       string   `json:"mailbox"`
-	Account       string   `json:"account"`
-	ToRecipients  []string `json:"toRecipients"`
-	CcRecipients  []string `json:"ccRecipients"`
-	BccRecipients []string `json:"bccRecipients"`
+	Snippet         string          `json:"snippet,omitempty"`
+	Mailbox         string          `json:"mailbox"`
+	Account         string          `json:"account"`
+	ToRecipients    []string        `json:"toRecipients"`
+	CcRecipients    []string        `json:"ccRecipients"`
+	BccRecipients   []string        `json:"bccRecipients"`
+	DeliveredTo     []string        `json:"deliveredTo,omitempty"`
+	OriginalTo      []string        `json:"originalTo,omitempty"`
+	RecipientStatus RecipientStatus `json:"recipientStatus"`
 }
 
 // MarshalJSON keeps recipient lists and inspected link inventories as arrays
@@ -62,6 +65,7 @@ type Message struct {
 func (m Message) MarshalJSON() ([]byte, error) {
 	type plain Message
 	p := plain(m)
+	p.RecipientStatus = m.RecipientStatus.withDefaults()
 	if p.ToRecipients == nil {
 		p.ToRecipients = []string{}
 	}

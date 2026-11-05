@@ -139,6 +139,8 @@ type options struct {
 	msgLimit            int
 	msgOffset           int
 	msgWithContent      bool
+	msgWithRecipients   bool
+	msgRecipient        string
 	ruleDryRun          bool
 	threadLimit         int
 	verbDryRun          bool

@@ -15,11 +15,14 @@ import (
 // ScanRequest names every mailbox explicitly. A scan always reads live state;
 // its observations are sequential, not an atomic snapshot of Mail.app.
 type ScanRequest struct {
-	Scopes []SearchMailbox
-	Query  string
-	Since  string
-	Limit  int // per mailbox and page; zero means unlimited
-	Unread bool
+	Scopes         []SearchMailbox
+	Query          string
+	Since          string
+	Limit          int // candidates per mailbox and page; zero means unlimited
+	Unread         bool
+	Flagged        bool
+	Recipient      string
+	WithRecipients bool
 	// Cursor is a NextCursor from an earlier page of the same request.
 	Cursor            string
 	Checkpoint        string // durable private traversal state; incompatible with Cursor
@@ -49,23 +52,49 @@ func (m ScanMessage) MarshalJSON() ([]byte, error) {
 	return json.Marshal(fields)
 }
 
-// ScanCoverage reports one requested mailbox. Remaining counts the matching
-// messages older than this page; Exhausted means the traversal reached the
+// ScanCoverage reports one requested mailbox. Remaining counts candidate
+// messages still pending traversal; Exhausted means the traversal reached the
 // end of the mailbox.
 type ScanCoverage struct {
 	SearchMailbox
-	Count     int      `json:"count"`
-	Truncated bool     `json:"truncated"`
-	Exhausted bool     `json:"exhausted"`
-	Remaining int      `json:"remaining"`
-	Error     string   `json:"error,omitempty"`
-	Errors    []string `json:"errors,omitempty"` // checkpoint-only cumulative failed-page observations
+	Count               int      `json:"count"`
+	Inspected           int      `json:"inspected,omitempty"`
+	RecipientUnknown    int      `json:"recipientUnknown,omitempty"`
+	UnknownRecipientIDs []string `json:"unknownRecipientIDs,omitempty"`
+	Truncated           bool     `json:"truncated"`
+	Exhausted           bool     `json:"exhausted"`
+	Remaining           int      `json:"remaining"`
+	Error               string   `json:"error,omitempty"`
+	Errors              []string `json:"errors,omitempty"` // checkpoint-only cumulative failed-page observations
+}
+
+// RecipientCoverage describes fields inspected on returned messages, separately
+// from mailbox traversal completeness and pagination.
+type RecipientCoverage struct {
+	Inspected   int  `json:"inspected"`
+	Unavailable int  `json:"unavailable"`
+	Complete    bool `json:"complete"`
+}
+
+func updateScanRecipientCoverage(result *ScanResult, requested bool) {
+	if !requested {
+		return
+	}
+	coverage := &RecipientCoverage{Inspected: len(result.Messages), Complete: true}
+	for _, message := range result.Messages {
+		if !message.RecipientStatus.complete() {
+			coverage.Unavailable++
+			coverage.Complete = false
+		}
+	}
+	result.RecipientCoverage = coverage
 }
 
 type ScanResult struct {
-	Messages []ScanMessage  `json:"messages"`
-	Coverage []ScanCoverage `json:"coverage"`
-	Complete bool           `json:"complete"`
+	RecipientCoverage *RecipientCoverage `json:"recipientCoverage,omitempty"`
+	Messages          []ScanMessage      `json:"messages"`
+	Coverage          []ScanCoverage     `json:"coverage"`
+	Complete          bool               `json:"complete"`
 	// NextCursor continues every mailbox that is not yet exhausted. It is
 	// empty once the traversal has covered every requested mailbox.
 	NextCursor string                    `json:"nextCursor,omitempty"`
@@ -120,12 +149,16 @@ func uniqueScanScopes(scopes []SearchMailbox) []SearchMailbox {
 // scanRequestFingerprint binds a cursor to the filters it was issued for.
 // The page size is left out so a caller may change --limit between pages.
 func scanRequestFingerprint(req ScanRequest, scopes []SearchMailbox) string {
+	req, _ = normalizeScanRequest(req)
 	data, _ := json.Marshal(struct {
-		Scopes []SearchMailbox
-		Query  []string
-		Since  string
-		Unread bool
-	}{scopes, searchTerms(req.Query), strings.TrimSpace(req.Since), req.Unread})
+		Scopes         []SearchMailbox
+		Query          []string
+		Since          string
+		Unread         bool
+		WithRecipients bool   `json:",omitempty"`
+		Recipient      string `json:",omitempty"`
+		Flagged        bool   `json:",omitempty"`
+	}{scopes, searchTerms(req.Query), strings.TrimSpace(req.Since), req.Unread, req.WithRecipients, req.Recipient, req.Flagged})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:8])
 }
@@ -163,7 +196,22 @@ func decodeScanCursor(value string, req ScanRequest, scopes []SearchMailbox) (sc
 	return cursor, nil
 }
 
+func normalizeScanRequest(req ScanRequest) (ScanRequest, error) {
+	recipient, err := NormalizeRecipientFilter(req.Recipient)
+	if err != nil {
+		return req, err
+	}
+	req.Recipient = recipient
+	if recipient != "" {
+		req.WithRecipients = true
+	}
+	return req, nil
+}
+
 func ValidateScanRequest(req ScanRequest) error {
+	if _, err := normalizeScanRequest(req); err != nil {
+		return err
+	}
 	if len(req.Scopes) == 0 || req.Limit < 0 || req.Limit == int(^uint(0)>>1) {
 		return fmt.Errorf("scan needs explicit mailboxes and a non-negative limit")
 	}
@@ -182,6 +230,11 @@ func ValidateScanRequest(req ScanRequest) error {
 }
 
 func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
+	var err error
+	req, err = normalizeScanRequest(req)
+	if err != nil {
+		return ScanResult{}, err
+	}
 	if err := ValidateScanRequest(req); err != nil {
 		return ScanResult{}, err
 	}
@@ -198,11 +251,20 @@ func (c *Client) ScanMessages(req ScanRequest) (ScanResult, error) {
 		if !ok {
 			return scanPage{}, fmt.Errorf("mailbox unavailable in Envelope Index: %s/%s; check mailbox name and Full Disk Access", scope.Account, scope.Mailbox)
 		}
-		return c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
+		page, err := c.scanMessagesFromIndex(scope.Account, mbox, req, limit, after)
+		if err == nil && req.WithRecipients {
+			page.Messages = c.enrichMessagesWithRecipients(scope.Account, scope.Mailbox, page.Messages, req.Recipient)
+		}
+		return page, err
 	})
 }
 
 func scanMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
+	var err error
+	req, err = normalizeScanRequest(req)
+	if err != nil {
+		return ScanResult{}, err
+	}
 	if err := ValidateScanRequest(req); err != nil {
 		return ScanResult{}, err
 	}
@@ -237,11 +299,34 @@ func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPositi
 			result.Complete = false
 			unfinished = true
 		} else {
+			candidateCount := len(page.Messages)
+			if req.Recipient != "" {
+				coverage.Inspected = candidateCount
+				matches := make([]Message, 0, candidateCount)
+				for _, message := range page.Messages {
+					matched, known := MatchRecipient(message, req.Recipient)
+					if matched {
+						matches = append(matches, message)
+					}
+					if !known {
+						coverage.RecipientUnknown++
+						coverage.UnknownRecipientIDs = append(coverage.UnknownRecipientIDs, message.ID)
+					}
+				}
+				page.Messages = matches
+			}
 			coverage.Count = len(page.Messages)
 			coverage.Remaining = page.Remaining
 			coverage.Exhausted = page.Remaining == 0
 			coverage.Truncated = !coverage.Exhausted
-			if coverage.Exhausted {
+			if coverage.RecipientUnknown > 0 {
+				// Keep the original boundary: every candidate on this page is
+				// pending until recipient evidence can establish membership.
+				coverage.Error = fmt.Sprintf("recipient match unavailable for %d candidate messages; retry this page", coverage.RecipientUnknown)
+				coverage.Remaining += candidateCount
+				coverage.Exhausted, coverage.Truncated = false, false
+				result.Complete, unfinished = false, true
+			} else if coverage.Exhausted {
 				state.Done, state.After = true, nil
 			} else {
 				state.After = page.Last
@@ -252,6 +337,9 @@ func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPositi
 				key := scope.Account + "\x00" + message.ID
 				if index, found := seenMessages[key]; found {
 					result.Messages[index].Mailboxes = append(result.Messages[index].Mailboxes, scope.Mailbox)
+					if req.WithRecipients {
+						mergeRecipientEvidence(&result.Messages[index].Message, message)
+					}
 				} else {
 					message.Account, message.Mailbox = scope.Account, scope.Mailbox
 					seenMessages[key] = len(result.Messages)
@@ -266,5 +354,6 @@ func scanPageMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPositi
 	}
 	sort.SliceStable(result.Messages, func(i, j int) bool { return result.Messages[i].DateReceived > result.Messages[j].DateReceived })
 	result.EndedAt = time.Now().Format(time.RFC3339Nano)
+	updateScanRecipientCoverage(&result, req.WithRecipients)
 	return result, nil
 }

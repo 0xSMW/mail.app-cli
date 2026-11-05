@@ -350,6 +350,108 @@ Or pipe to a real `jq`: `mail-app-cli inbox | jq '.data[].subject'`.
 | 6 | `mutation_failed` | at least one requested change failed or did not verify |
 | 7 | `internal` | anything else |
 
+## Recipient headers without bodies
+
+Use `--with-recipients` on `inbox`, `unread`, `messages list`, the unified
+`messages inbox/unread/sent/drafts/flagged/trash/junk` views, `search`, and
+`messages scan` to inspect recipient headers without fetching message bodies:
+
+```bash
+mail-app-cli inbox --with-recipients
+mail-app-cli messages list -a "Example Account" -m INBOX --with-recipients --json
+mail-app-cli search "sample invoice" --with-recipients
+mail-app-cli messages scan INBOX Archive -a "Example Account" --with-recipients
+mail-app-cli show 100001 --metadata-only
+```
+
+`show --metadata-only` also includes recipient headers while skipping body
+extraction. `--with-content` remains a separate request for bodies.
+
+The `account` and `mailbox` fields identify where Mail stores a message. They do
+not identify the address in its `To` header. Recipient output includes
+`toRecipients`, `ccRecipients`, `bccRecipients`, `deliveredTo`, and `originalTo`,
+with a `recipientStatus` entry for each field (`to`, `cc`, `bcc`, `deliveredTo`,
+and `originalTo`). Each status reports `state`, `source`, and an error when
+unavailable. A `mixed` source means retained addresses came from more than one
+source, such as cached headers, the local recipient index, and Mail metadata.
+`available` means the stored header or Mail recipient collection
+was inspected; an empty array means it exposed no addresses for that field.
+`partial` means validated addresses are retained, but additional recipients
+could not be read; the listed addresses are useful evidence and are not an
+exhaustive recipient list. `unavailable` means the value is unknown,
+and `not-requested` means no recipient inspection was requested. Empty arrays
+alone do not establish that a message had no recipients. Human output prints
+all inspected values beneath each message, including explicit absent, partial,
+and unavailable markers. Older malformed display names are repaired
+conservatively when the address can still be validated. Message bodies and MIME
+content are never used as recipient evidence.
+
+When complete headers are unavailable, validated To and Cc addresses from
+Mail's local recipient index can appear as `partial` evidence with source
+`index`. Indexed addresses can establish a positive exact match; missing index
+entries cannot establish that an address was absent. Exact filtering avoids
+additional Mail reads once the requested address is positively identified,
+so other recipient fields can remain incomplete on a confirmed match.
+
+Mail fallback uses a shared time budget for the selected messages. If it stops,
+field errors distinguish the active operation from lookups that were not
+attempted. Smaller message-list or scan pages reduce the work within that budget.
+
+`Delivered-To` and `X-Original-To` are delivery evidence when present. They can
+help distinguish aliases and forwarding routes, but their absence cannot
+establish the final delivery address. Received Bcc recipients are commonly
+omitted from stored headers; an absent Bcc header does not establish that no
+blind copy was sent.
+
+Recipient headers are read again when requested, including for cached lists or
+the recent-message search fallback. List `source` still describes where the
+message listing came from; per-field recipient status describes the separate
+header read. Scan `recipientCoverage` describes header availability separately
+from mailbox traversal coverage. A complete mailbox scan can still have
+unavailable recipient headers when no recipient filter is active. Existing scan
+cursors remain compatible when recipient inspection is disabled. Private scan checkpoints created before this version
+require `--restart-checkpoint` to begin a fresh traversal.
+
+Use `--recipient` on the same commands to filter by one exact email address.
+It also includes recipient headers in the output:
+
+```bash
+mail-app-cli search --recipient person@example.com
+mail-app-cli search "invoice" --recipient person@example.com --sender billing@example.com
+mail-app-cli inbox -a "Example Account" --recipient person@example.com
+mail-app-cli messages scan INBOX Archive -a "Example Account" --recipient person@example.com --limit 200
+```
+
+The filter compares parsed addresses in `To`, `Cc`, and `Bcc`, ignoring case.
+It preserves plus tags and dots: `person+tag@example.com` and
+`person@example.com` are distinct addresses. Significant whitespace inside
+quoted local parts is also preserved. No provider-specific alias,
+plus-tag, or dot rewriting is applied. Delivery headers (`Delivered-To` and
+`X-Original-To`), subject, and body never establish a recipient match. A
+missing stored Bcc header does not prove whether a blind copy was delivered.
+
+Recipient-filtered reads require live Envelope Index access and current
+recipient inspection. Cached lists and the recent-message journal cannot
+establish a match and are not used as fallback. Results contain only confirmed
+matches. A validated address in a partial field can establish a match; absence
+from a partial field cannot establish a non-match. When an unreadable message
+could affect the result, output includes
+`complete: false` and failure details, and exits 5. Retry after restoring
+access. `search --allow-partial` accepts the incomplete results with the
+existing search completeness envelope.
+
+Cross-mailbox recipient searches retain full mailbox paths, including distinct
+nested folders with the same name. A physical mailbox that cannot be resolved
+unambiguously is reported as incomplete coverage.
+
+For lists and search, `--limit` (and list `--offset`) apply after recipient
+matching, so candidates beyond the first page can still match. For `messages
+scan`, `--limit` counts candidates per mailbox and page. A page can contain no
+matches and still have a `nextCursor`; continue with that cursor. Unknown
+recipient fields make that scope incomplete and retain its page for retry.
+With `--checkpoint`, repeat the same checkpoint arguments to resume. Scan
+coverage reports inspected candidates and candidates with unknown recipients.
+
 ## Scope: account and mailbox
 
 `--account`/`-a` and `--mailbox`/`-m` work on every command. Precedence is flag, then `MAIL_APP_CLI_ACCOUNT`/`MAIL_APP_CLI_MAILBOX`, then the config file, then defaults: the only enabled account, and `INBOX`. With several accounts and no default, account-scoped commands exit 1 and list the names.

@@ -18,9 +18,16 @@ import (
 
 // listUnified lists an inbox-style view: one account when in scope,
 // otherwise all enabled accounts merged.
-func (a *application) listUnified(kind string, limit, offset int, withContent bool) error {
+func (a *application) listUnified(kind string, limit, offset int, withContent, withRecipients bool, recipientFilter ...string) error {
+	var filter string
+	if len(recipientFilter) > 0 {
+		filter = recipientFilter[0]
+	}
+	recipient, err := normalizeRecipientFilter(filter)
+	if err != nil {
+		return err
+	}
 	var messages []mail.Message
-	var err error
 	meta := map[string]any{"view": kind}
 	scoped := unifiedListingScoped(a.resolved)
 	if scoped {
@@ -33,21 +40,46 @@ func (a *application) listUnified(kind string, limit, offset int, withContent bo
 			return mailboxErr
 		}
 		unreadOnly, flaggedOnly := scopedUnifiedFilters(kind)
+		if recipient != "" {
+			result, err := a.mailClient.RecipientMessages(mail.RecipientQueryRequest{Scopes: []mail.SearchMailbox{{Account: account, Mailbox: mailbox}}, Recipient: recipient, Limit: limit, Offset: offset, Unread: unreadOnly, Flagged: flaggedOnly, WithContent: withContent})
+			if err != nil {
+				return fmt.Errorf("list %s: %w", kind, err)
+			}
+			meta["account"], meta["mailbox"] = account, mailbox
+			return a.writeRecipientListing(result, fmt.Sprintf("%s in %s", plural(len(result.Messages), "message"), kind), meta, false)
+		}
 		messages, err = a.mailClient.GetMessagesJSON(account, mailbox, limit, offset, unreadOnly, flaggedOnly, withContent, "")
 		meta["account"] = account
 		meta["mailbox"] = mailbox
 	} else {
+		if recipient != "" {
+			result, err := a.mailClient.UnifiedRecipientMessages(kind, mail.RecipientQueryRequest{Recipient: recipient, Limit: limit, Offset: offset, WithContent: withContent})
+			if err != nil {
+				return fmt.Errorf("list %s: %w", kind, err)
+			}
+			meta["account"] = "all"
+			return a.writeRecipientListing(result, fmt.Sprintf("%s in %s", plural(len(result.Messages), "message"), kind), meta, true)
+		}
 		messages, err = a.mailClient.GetUnifiedMessagesJSON(kind, limit, offset, withContent)
 		meta["account"] = "all"
 	}
 	if err != nil {
 		return fmt.Errorf("list %s: %w", kind, err)
 	}
+	includeRecipients := withRecipients
+	if includeRecipients {
+		account, _ := meta["account"].(string)
+		mailbox, _ := meta["mailbox"].(string)
+		if !scoped {
+			account = ""
+		}
+		messages = a.mailClient.EnrichMessagesWithRecipients(account, mailbox, messages)
+	}
 	return a.writer.Write(output.Result{
 		Data:    messages,
 		Summary: fmt.Sprintf("%s in %s", plural(len(messages), "message"), kind),
 		Meta:    meta,
-		Plain:   renderMessages(messages, !scoped),
+		Plain:   renderMessages(messages, !scoped, includeRecipients),
 	})
 }
 
@@ -116,8 +148,21 @@ func (a *application) showMessage(id string, metadataOnly, allLinks bool) error 
 	}
 	ref := refs[0]
 	var message *mail.Message
-	if metadataOnly && ref.Envelope != nil {
+	if metadataOnly {
 		message = ref.Envelope
+		if message == nil {
+			message, err = a.mailClient.GetMessageMetadataJSON(ref.Account, ref.Mailbox, ref.ID)
+			if err != nil {
+				return fmt.Errorf("get message metadata: %w", err)
+			}
+			if message == nil {
+				return clierr.New(clierr.CodeNotFound, "message not found: "+ref.ID)
+			}
+		}
+		enriched := a.mailClient.EnrichMessagesWithRecipients(ref.Account, ref.Mailbox, []mail.Message{*message})
+		message = &enriched[0]
+		message.Content = ""
+		message.Links, message.LinkStatus, message.Unsubscribe = nil, nil, nil
 	} else {
 		message, err = a.mailClient.GetMessageDetailsJSON(ref.Account, ref.Mailbox, ref.ID)
 		if err != nil {
@@ -126,10 +171,6 @@ func (a *application) showMessage(id string, metadataOnly, allLinks bool) error 
 		if message == nil {
 			return clierr.New(clierr.CodeNotFound, fmt.Sprintf("message not found: %s in %s/%s", ref.ID, ref.Account, ref.Mailbox)).
 				WithHint("the Envelope Index may be ahead of Mail.app; try again or pass --mailbox")
-		}
-		if metadataOnly {
-			message.Content = ""
-			message.Links, message.LinkStatus, message.Unsubscribe = nil, nil, nil
 		}
 	}
 	_ = mail.RecordRecentMessage(*message, "show")
@@ -191,6 +232,8 @@ func (a *application) buildVerbsCommands() {
 		verbLimit            int
 		verbOffset           int
 		verbWithContent      bool
+		verbWithRecipients   bool
+		verbRecipient        string
 		verbBodySource       string
 		verbBodyAlternatives bool
 		verbMetadataOnly     bool
@@ -205,18 +248,26 @@ func (a *application) buildVerbsCommands() {
 			annotationAgentNotes: "Newest first. Without --account this merges every enabled account's INBOX. IDs feed show, seen, flag, archive, delete, and move.",
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			recipient, err := normalizeRecipientFilter(verbRecipient, cmd)
+			if err != nil {
+				return err
+			}
 			kind := "inbox"
 			if verbUnread {
 				kind = "unread"
 			}
-			return a.listUnified(kind, verbLimit, verbOffset, verbWithContent)
+			return a.listUnified(kind, verbLimit, verbOffset, verbWithContent, verbWithRecipients, recipient)
 		},
 	}
 	a.unreadCmd = &cobra.Command{
 		Use:   "unread",
 		Short: "List unread inbox messages",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return a.listUnified("unread", verbLimit, verbOffset, verbWithContent)
+			recipient, err := normalizeRecipientFilter(verbRecipient, cmd)
+			if err != nil {
+				return err
+			}
+			return a.listUnified("unread", verbLimit, verbOffset, verbWithContent, verbWithRecipients, recipient)
 		},
 	}
 	a.showCmd = &cobra.Command{
@@ -262,12 +313,14 @@ func (a *application) buildVerbsCommands() {
 
 	for _, cmd := range []*cobra.Command{a.inboxCmd, a.unreadCmd} {
 		registerPagingFlags(cmd, &verbLimit, &verbOffset)
+		cmd.Flags().BoolVar(&verbWithRecipients, "with-recipients", false, recipientFlagUsage)
+		cmd.Flags().StringVar(&verbRecipient, "recipient", "", recipientFilterUsage)
 		cmd.Flags().BoolVar(&verbWithContent, "with-content", false, "Include bodies (slow: one Mail.app call per ten messages)")
 	}
 	a.inboxCmd.Flags().BoolVarP(&verbUnread, "unread", "u", false, "Only unread messages")
 	a.showCmd.Flags().StringVar(&verbBodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
 	a.showCmd.Flags().BoolVar(&verbBodyAlternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
-	a.showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Skip the Mail.app body fetch; content and recipients are empty")
+	a.showCmd.Flags().BoolVar(&verbMetadataOnly, "metadata-only", false, "Read envelope and recipient headers without fetching the body")
 	a.showCmd.Flags().BoolVar(&verbLinks, "links", false, "Print all extracted link labels and full destinations in the human view")
 
 	a.moveCmd.Flags().StringVar(&verbMoveTo, "to", "", "Target mailbox (required)")

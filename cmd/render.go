@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ func messageFlags(p *output.Printer, m mail.Message) string {
 
 // renderMessages prints the message table. showLocation adds the
 // account/mailbox column for cross-mailbox listings.
-func renderMessages(messages []mail.Message, showLocation bool) func(*output.Printer) {
+func renderMessages(messages []mail.Message, showLocation bool, withRecipients ...bool) func(*output.Printer) {
 	return func(p *output.Printer) {
 		if len(messages) == 0 {
 			p.Line("%s", p.Dim("no messages"))
@@ -54,6 +55,14 @@ func renderMessages(messages []mail.Message, showLocation bool) func(*output.Pri
 		}
 		rows := make([][]string, 0, len(messages))
 		for _, m := range messages {
+			if len(withRecipients) > 0 && withRecipients[0] {
+				m.ID = linkDisplay(m.ID)
+				m.Subject = linkDisplay(m.Subject)
+				m.Sender = linkDisplay(m.Sender)
+				m.Account = linkDisplay(m.Account)
+				m.Mailbox = linkDisplay(m.Mailbox)
+				m.DateReceived = linkDisplay(m.DateReceived)
+			}
 			subject := output.Truncate(m.Subject, 70)
 			if !m.Read {
 				subject = p.Bold(subject)
@@ -70,7 +79,19 @@ func renderMessages(messages []mail.Message, showLocation bool) func(*output.Pri
 			}
 			rows = append(rows, row)
 		}
-		p.Table(headers, rows)
+		if len(withRecipients) == 0 || !withRecipients[0] {
+			p.Table(headers, rows)
+			return
+		}
+		var table bytes.Buffer
+		tablePrinter := &output.Printer{Out: &table, Color: p.Color}
+		tablePrinter.Table(headers, rows)
+		lines := strings.Split(strings.TrimSuffix(table.String(), "\n"), "\n")
+		p.Line("%s", lines[0])
+		for i, message := range messages {
+			p.Line("%s", lines[i+1])
+			renderRecipientLines(p, message)
+		}
 	}
 }
 
@@ -90,11 +111,12 @@ func renderMessageWithLinks(m *mail.Message, metadataOnly, allLinks bool) func(*
 		pairs := [][2]string{
 			{"From", m.Sender},
 		}
-		if len(m.ToRecipients) > 0 {
-			pairs = append(pairs, [2]string{"To", strings.Join(m.ToRecipients, ", ")})
-		}
-		if len(m.CcRecipients) > 0 {
-			pairs = append(pairs, [2]string{"Cc", strings.Join(m.CcRecipients, ", ")})
+		for _, field := range recipientFields(*m) {
+			if field.status.State != "" && field.status.State != "not-requested" {
+				pairs = append(pairs, [2]string{field.name, recipientDisplay(field.values, field.status)})
+			} else if len(field.values) > 0 {
+				pairs = append(pairs, [2]string{field.name, linkDisplay(strings.Join(field.values, ", "))})
+			}
 		}
 		pairs = append(pairs,
 			[2]string{"Date", formatDate(m.DateReceived)},
@@ -213,3 +235,47 @@ func renderLine(format string, args ...any) func(*output.Printer) {
 }
 
 func plural(n int, singular string) string { return output.Plural(n, singular) }
+
+const recipientFlagUsage = "Include recipient and delivery headers without fetching bodies"
+
+type recipientField struct {
+	name   string
+	values []string
+	status mail.RecipientFieldStatus
+}
+
+func recipientFields(m mail.Message) []recipientField {
+	return []recipientField{
+		{"To", m.ToRecipients, m.RecipientStatus.To},
+		{"Cc", m.CcRecipients, m.RecipientStatus.Cc},
+		{"Bcc", m.BccRecipients, m.RecipientStatus.Bcc},
+		{"Delivered-To", m.DeliveredTo, m.RecipientStatus.DeliveredTo},
+		{"X-Original-To", m.OriginalTo, m.RecipientStatus.OriginalTo},
+	}
+}
+
+func recipientDisplay(values []string, status mail.RecipientFieldStatus) string {
+	switch status.State {
+	case "available":
+		if len(values) == 0 {
+			return "(none in stored headers)"
+		}
+		return linkDisplay(strings.Join(values, ", "))
+	case "partial":
+		marker := "(partial; additional recipients unavailable)"
+		if len(values) == 0 {
+			return marker
+		}
+		return linkDisplay(strings.Join(values, ", ")) + " " + marker
+	case "unavailable":
+		return "(unavailable)"
+	default:
+		return "(not requested)"
+	}
+}
+
+func renderRecipientLines(p *output.Printer, message mail.Message) {
+	for _, field := range recipientFields(message) {
+		p.Line("  %s: %s", field.name, recipientDisplay(field.values, field.status))
+	}
+}
