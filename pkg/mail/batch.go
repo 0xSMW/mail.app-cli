@@ -30,9 +30,13 @@ type BatchItem struct {
 	Identity                StableIdentity `json:"identity,omitempty"`
 	Status                  string         `json:"status"`
 	Error                   string         `json:"error,omitempty"`
-	MarkedRead              bool           `json:"markedRead,omitempty"`
-	VerifyStatus            string         `json:"verifyStatus,omitempty"`
-	VerifyError             string         `json:"verifyError,omitempty"`
+	// UnknownPhase identifies a preliminary phase whose uncertain outcome
+	// stopped the requested mutation before dispatch. Empty preserves receipts
+	// written before phase-specific uncertainty was recorded.
+	UnknownPhase string `json:"unknownPhase,omitempty"`
+	MarkedRead   bool   `json:"markedRead,omitempty"`
+	VerifyStatus string `json:"verifyStatus,omitempty"`
+	VerifyError  string `json:"verifyError,omitempty"`
 	// Observed is what an archive or move verification found by stable
 	// identity once the mailboxes settled.
 	Observed *RelocationState `json:"observed,omitempty"`
@@ -409,7 +413,7 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		}
 		return summary
 	}
-	if r.Failed == 0 && r.Unverified == 0 && r.Skipped == 0 {
+	if r.Failed == 0 && r.Unverified == 0 && r.Skipped == 0 && r.Succeeded == r.Matched {
 		return fmt.Sprintf("%s %s%s", verb, count, target)
 	}
 	var summary string

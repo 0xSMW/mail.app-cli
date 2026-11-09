@@ -303,6 +303,7 @@ func (r *batchRunner) markRead(client *Client, item *BatchItem, skippedArchive b
 		var stopErr error
 		if isUnknownMutationError(r.client, err) {
 			item.Status, stopErr = "unknown", err
+			item.UnknownPhase = "mark_read"
 		}
 		return false, r.recordFailure(*item, "mark_read_failed", stopErr)
 	}
@@ -313,6 +314,7 @@ func (r *batchRunner) markRead(client *Client, item *BatchItem, skippedArchive b
 			prefix = "receipt durability after mark-read on skipped archive: "
 		}
 		item.Status, item.Error = "unknown", prefix+err.Error()
+		item.UnknownPhase = "mark_read"
 		return false, r.recordFailure(*item, "", err)
 	}
 	return true, nil

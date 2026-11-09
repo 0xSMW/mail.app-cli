@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"syscall"
 	"time"
 )
 
@@ -227,8 +228,38 @@ func saveScanCheckpoint(path string, state scanCheckpoint) error {
 	defer dir.Close()
 	return dir.Sync()
 }
+
+// The lock covers loading, observation, and replacement: atomic rename alone
+// cannot prevent an older resume from overwriting a newer completed traversal.
+// Keep the lock file in place so concurrent processes always lock the same inode.
+func lockScanCheckpoint(path string) (func(), error) {
+	lockPath := path + ".lock"
+	if err := validateCheckpointOptions(ScanRequest{Checkpoint: lockPath}); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		return nil, checkpointError("open lock: %v", err)
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		f.Close()
+		return nil, checkpointError("lock must be a regular private file (0600)")
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, checkpointError("checkpoint is already in use: %v", err)
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+}
+
 func scanCheckpointMessages(req ScanRequest, read func(SearchMailbox, int, *ScanPosition) (scanPage, error)) (ScanResult, error) {
 	path, _ := filepath.Abs(req.Checkpoint)
+	release, err := lockScanCheckpoint(path)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	defer release()
 	state := scanCheckpoint{Version: 1, Request: checkpointIdentity(req), Fingerprint: checkpointFingerprint(checkpointIdentity(req))}
 	resumed := false
 	if !req.RestartCheckpoint {

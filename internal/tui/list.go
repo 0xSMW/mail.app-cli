@@ -235,7 +235,6 @@ func (l *list) handleKey(m *model, msg tea.KeyPressMsg) tea.Cmd {
 	case "space":
 		l.toggleSelected()
 		l.move(1)
-		return nil
 	case "esc":
 		switch {
 		case l.source.search != "":

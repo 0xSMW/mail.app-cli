@@ -66,6 +66,9 @@ type composeModal struct {
 // openCompose opens the editor. Replies and forwards quote the message under
 // the cursor and wait for its body when it is not cached yet.
 func (m *model) openCompose(mode composeMode) tea.Cmd {
+	// Every compose intent supersedes its predecessor, including paths that
+	// open immediately and never need an asynchronous quote request.
+	m.composeLane.abandon()
 	if mode == composeNew {
 		return m.composeFor(mode, nil)
 	}
