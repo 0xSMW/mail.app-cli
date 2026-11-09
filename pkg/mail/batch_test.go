@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -226,5 +227,45 @@ esac
 	events := readJournalEvents(t, journal.Path())
 	if countJournalEvents(events, "mutation_started") != 1 || countJournalEvents(events, "mutation_unknown") != 1 || countJournalEvents(events, "interrupted") != 1 {
 		t.Fatalf("events=%#v", events)
+	}
+}
+
+func TestInterruptedBatchSummaryReportsCompletedCount(t *testing.T) {
+	for _, completed := range []int{0, 1, 2, 3} {
+		t.Run(fmt.Sprint(completed), func(t *testing.T) {
+			journal, err := CreateBatchJournal(filepath.Join(t.TempDir(), "receipt.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer journal.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if completed == 0 {
+				cancel()
+			}
+			calls := 0
+			opts := BatchOptions{Action: "mark", Read: true, Receipt: journal}
+			items := []BatchItem{{ID: "1"}, {ID: "2"}, {ID: "3"}}
+			result, err := RunBatch(NewClient().WithContext(ctx), opts, items, func(*Client, *BatchItem) error {
+				calls++
+				if calls == completed && completed < len(items) {
+					cancel()
+				}
+				return nil
+			})
+			if completed < len(items) && !errors.Is(err, context.Canceled) || completed == len(items) && err != nil {
+				t.Fatalf("unexpected batch error: %v", err)
+			}
+			if calls != completed || result.Succeeded != completed || result.Attempted != completed {
+				t.Fatalf("cancelled batch applied unexpected work: calls=%d result=%+v", calls, result)
+			}
+			want := fmt.Sprintf("Marked read %d of 3 messages", completed)
+			if completed == len(items) {
+				want = "Marked read 3 messages"
+			}
+			if got := result.Summary(opts); got != want {
+				t.Fatalf("summary=%q want=%q", got, want)
+			}
+		})
 	}
 }

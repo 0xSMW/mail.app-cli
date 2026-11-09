@@ -664,6 +664,9 @@ func (m *model) loadMore() tea.Cmd {
 }
 
 func (m model) onPageLoaded(msg pageLoadedMsg) (tea.Model, tea.Cmd) {
+	if !m.pageLane.accepts(msg.requestResult) {
+		return m, nil
+	}
 	cmd, ok := m.pageLane.settle(msg.requestResult)
 	if !ok || msg.source != m.list.source {
 		m.advanceAfterPage = false

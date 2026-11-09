@@ -352,6 +352,9 @@ func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) 
 	}
 	eligible := 0
 	for _, item := range receipt.Items {
+		if item.Status == "unknown" && item.UnknownPhase == "mark_read" {
+			return receipt, fmt.Errorf("receipt contains an uncertain mark-read phase; inspect source read state before reconciliation (no relocation is inferred)")
+		}
 		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
 			if strings.TrimSpace(item.Account) == "" || strings.TrimSpace(item.SourceMailbox) == "" || strings.TrimSpace(item.ID) == "" {
 				return receipt, fmt.Errorf("skipped read item lacks account, mailbox or ID")

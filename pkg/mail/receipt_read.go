@@ -73,8 +73,14 @@ func ReadRelocationReceipt(path string) (BatchResult, error) {
 				switch event.Event {
 				case "mark_read_started":
 					pendingReads[key] = true
-				case "mark_read_succeeded", "mark_read_failed":
+				case "mark_read_succeeded":
 					delete(pendingReads, key)
+				case "mark_read_failed":
+					if event.Item.Status == "unknown" {
+						pendingReads[key] = true
+					} else {
+						delete(pendingReads, key)
+					}
 				}
 				if _, ok := items[key]; !ok {
 					order = append(order, key)
@@ -117,6 +123,9 @@ func ReadRelocationReceipt(path string) (BatchResult, error) {
 	}
 	eligible := 0
 	for _, item := range result.Items {
+		if item.Status == "unknown" && item.UnknownPhase == "mark_read" {
+			return result, fmt.Errorf("receipt contains an uncertain mark-read phase; inspect source read state before reconciliation (no relocation is inferred)")
+		}
 		if item.Status == "skipped" && item.MarkReadOnSkip && item.MarkedRead {
 			if item.Account == "" || item.SourceMailbox == "" || item.ID == "" {
 				return result, fmt.Errorf("skipped read item lacks account, mailbox or ID")

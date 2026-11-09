@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"time"
 
 	"errors"
@@ -596,5 +597,143 @@ func TestRemoveKeepsCursorOnFollowingRow(t *testing.T) {
 	m.list.remove(map[string]bool{bodyKey(m.list.messages[1]): true})
 	if m.list.current() == nil || m.list.current().ID != "2" {
 		t.Fatalf("cursor after removing its own row = %v", m.list.current())
+	}
+}
+
+func TestComposeSupersedesPendingQuote(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		for _, lateError := range []bool{false, true} {
+			name := "new"
+			if cached {
+				name = "cached reply"
+			}
+			if lateError {
+				name += "/late error"
+			}
+			t.Run(name, func(t *testing.T) {
+				m := loadedModel(t)
+				t.Cleanup(m.cancel)
+				original := *m.list.current()
+				if cmd := m.openCompose(composeReply); cmd == nil || !m.composeLane.inFlight() {
+					t.Fatal("uncached reply did not start a quote request")
+				}
+				oldID := m.composeLane.id
+				mode := composeNew
+				if cached {
+					m.list.move(1)
+					current := *m.list.current()
+					current.Content = "newer cached quotation"
+					m.reader.remember(bodyKey(current), &current)
+					mode = composeReply
+				}
+				_ = m.openCompose(mode)
+				if m.modal == nil {
+					t.Fatal("newer compose intent did not open an editor")
+				}
+				m = press(m, "esc")
+				if m.modal != nil {
+					t.Fatal("discard did not close the newer editor")
+				}
+				var err error
+				if lateError {
+					err = errors.New("old quote failed")
+				}
+				next, cmd := m.Update(composeBodyLoadedMsg{requestResult: requestResult{oldID, err}, mode: composeReply, message: &original})
+				got := next.(model)
+				if got.modal != nil || cmd != nil || got.composeLane.inFlight() {
+					t.Fatalf("obsolete quote affected newer intent: modal=%T command=%t inFlight=%t", got.modal, cmd != nil, got.composeLane.inFlight())
+				}
+			})
+		}
+	}
+	t.Run("current reply still opens", func(t *testing.T) {
+		m := loadedModel(t)
+		t.Cleanup(m.cancel)
+		original := *m.list.current()
+		_ = m.openCompose(composeReply)
+		next, _ := m.Update(composeBodyLoadedMsg{requestResult: requestResult{requestID: m.composeLane.id}, mode: composeReply, message: &original})
+		editor, ok := next.(model).modal.(*composeModal)
+		if !ok || editor.originalID != original.ID {
+			t.Fatal("current quote no longer opens the correct reply")
+		}
+	})
+}
+
+func TestStalePagePreservesPendingReaderAdvance(t *testing.T) {
+	for _, staleError := range []bool{false, true} {
+		m := loadedModel(t)
+		t.Cleanup(m.cancel)
+		m.reader.open = true
+		m.list.cursor = len(m.list.messages) - 1
+		m.list.hasMore = true
+		_ = m.loadMore()
+		oldID := m.pageLane.id
+		m.pageLane.abandon()
+		_ = m.loadMore()
+		currentID := m.pageLane.id
+		m.advanceAfterPage = true
+		var err error
+		if staleError {
+			err = context.Canceled
+		}
+		next, cmd := m.Update(pageLoadedMsg{requestResult: requestResult{oldID, err}, source: m.list.source})
+		m = next.(model)
+		if !m.advanceAfterPage || !m.pageLane.inFlight() || cmd != nil {
+			t.Fatalf("stale page consumed current navigation (error=%v): advance=%t inFlight=%t command=%t", err, m.advanceAfterPage, m.pageLane.inFlight(), cmd != nil)
+		}
+		older := mail.Message{ID: "4", Account: "Work", Mailbox: "INBOX", Read: true}
+		next, _ = m.Update(pageLoadedMsg{requestResult: requestResult{requestID: currentID}, source: m.list.source, messages: []mail.Message{older}, pageSize: 60})
+		m = next.(model)
+		if m.list.current().ID != "4" || m.advanceAfterPage || m.pageLane.inFlight() {
+			t.Fatal("current page did not complete its one pending reader step")
+		}
+	}
+	t.Run("current error cancels step", func(t *testing.T) {
+		m := loadedModel(t)
+		t.Cleanup(m.cancel)
+		id, _ := m.pageLane.begin(m.ctx, false)
+		m.advanceAfterPage = true
+		next, cmd := m.Update(pageLoadedMsg{requestResult: requestResult{id, errors.New("page failed")}, source: m.list.source})
+		m = next.(model)
+		if m.advanceAfterPage || m.pageLane.inFlight() || cmd == nil {
+			t.Fatal("current page failure must settle and report the error")
+		}
+	})
+}
+
+func TestSelectionSynchronizesOpenReader(t *testing.T) {
+	m := loadedModel(t)
+	t.Cleanup(m.cancel)
+	first, second := m.list.messages[0], m.list.messages[1]
+	m.reader.open = true
+	m.readerKey = bodyKey(first)
+	m.reader.show(&first)
+	second.Content = "second body"
+	m.reader.remember(bodyKey(second), &second)
+	_ = m.list.handleKey(&m, tea.KeyPressMsg{Code: tea.KeySpace, Text: " "})
+	if !m.list.selected[bodyKey(first)] || m.list.current().ID != second.ID {
+		t.Fatal("space must select the original row and advance the cursor")
+	}
+	if m.readerKey != bodyKey(second) || m.reader.message.ID != second.ID {
+		t.Fatal("selection advanced the action target without updating the visible reader")
+	}
+}
+
+func TestSearchRefreshFollowsMovedMessage(t *testing.T) {
+	m := loadedModel(t)
+	t.Cleanup(m.cancel)
+	m.list.cursor = 1
+	m.list.source = listSource{search: "invoice"}
+	rows := append([]mail.Message(nil), m.list.messages...)
+	rows[1].Mailbox = "Archive"
+	next, _ := m.Update(searchDoneMsg{
+		requestResult: requestResult{requestID: m.searchLane.id},
+		query:         "invoice", silent: true,
+		result: mail.SearchResult{Complete: true, Messages: rows},
+	})
+	m = next.(model)
+	got := m.list.current()
+	if got.ID != rows[1].ID || got.Account != rows[1].Account || got.Mailbox != "Archive" {
+		t.Fatalf("refresh lost the same message after a move: %+v", got)
 	}
 }

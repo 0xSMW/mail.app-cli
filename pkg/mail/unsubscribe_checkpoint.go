@@ -229,25 +229,10 @@ func saveUnsubscribeCheckpoint(path string, s *unsubscribeCheckpoint) error {
 	if err = checkUnsubscribeStateFile(path, true); err != nil {
 		return err
 	}
-	// A known destination exists before the atomic replacement. Existing files
-	// have already been validated as this command's private checkpoint.
-	if _, err = os.Lstat(path); os.IsNotExist(err) {
-		f, e := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY|syscall.O_NOFOLLOW, 0600)
-		if e != nil {
-			return e
-		}
-		_, e = f.Write(data)
-		if e == nil {
-			e = f.Sync()
-		}
-		closeErr := f.Close()
-		if e == nil {
-			e = closeErr
-		}
-		if e != nil {
-			return e
-		}
-		return nil
+	_, err = os.Lstat(path)
+	missing := os.IsNotExist(err)
+	if err != nil && !missing {
+		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".unsubscribe-state-*")
 	if err != nil {
@@ -277,11 +262,19 @@ func saveUnsubscribeCheckpoint(path string, s *unsubscribeCheckpoint) error {
 	if err = checkUnsubscribeStateFile(temp, false); err != nil {
 		return err
 	}
-	if err = checkUnsubscribeStateFile(path, false); err != nil {
-		return err
-	}
-	if err = os.Rename(temp, path); err != nil {
-		return err
+	if missing {
+		// Publish complete first state atomically without replacing a destination
+		// created since the initial check, preserving exclusive-create semantics.
+		if err = os.Link(temp, path); err != nil {
+			return err
+		}
+	} else {
+		if err = checkUnsubscribeStateFile(path, false); err != nil {
+			return err
+		}
+		if err = os.Rename(temp, path); err != nil {
+			return err
+		}
 	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {

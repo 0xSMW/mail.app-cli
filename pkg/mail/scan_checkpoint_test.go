@@ -135,3 +135,119 @@ func TestScanCheckpointFailedWritePreservesOriginal(t *testing.T) {
 		t.Fatalf("temporary files leaked: %v", entries)
 	}
 }
+
+func TestScanCheckpointExclusiveWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "scan.json")
+	req := ScanRequest{Scopes: []SearchMailbox{{"Work", "INBOX"}}, Limit: 1, Checkpoint: path}
+	_, err := scanMessages(req, func(SearchMailbox, int, *ScanPosition) (scanPage, error) {
+		return scanPage{Messages: []Message{{ID: "3"}}, Remaining: 2, Last: &ScanPosition{ReceivedUnix: 100, ID: 3}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pause A after loading its checkpoint and inside its read callback. B must
+	// fail before reading, both for a resume and for an explicit restart.
+	entered, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, err := scanMessages(req, func(SearchMailbox, int, *ScanPosition) (scanPage, error) {
+			close(entered)
+			<-release
+			return scanPage{Messages: []Message{{ID: "2"}}, Remaining: 1, Last: &ScanPosition{ReceivedUnix: 90, ID: 2}}, nil
+		})
+		done <- err
+	}()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+			<-done
+		}
+	}()
+	<-entered
+	for _, restart := range []bool{false, true} {
+		second := req
+		second.Limit, second.RestartCheckpoint = 2, restart
+		called := false
+		_, err := scanMessages(second, func(SearchMailbox, int, *ScanPosition) (scanPage, error) {
+			called = true
+			return scanPage{Messages: []Message{{ID: "2"}, {ID: "1"}}}, nil
+		})
+		if !errors.Is(err, ErrInvalidScanCheckpoint) || !strings.Contains(err.Error(), "already in use") || called {
+			t.Errorf("concurrent writer (restart=%t): read=%t error=%v", restart, called, err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || string(before) != string(after) {
+			t.Errorf("concurrent writer replaced durable progress: %v", err)
+		}
+	}
+	independent := req
+	independent.Checkpoint = filepath.Join(filepath.Dir(path), "independent.json")
+	if _, err := scanMessages(independent, func(SearchMailbox, int, *ScanPosition) (scanPage, error) { return scanPage{}, nil }); err != nil {
+		t.Errorf("different checkpoint was blocked: %v", err)
+	}
+	close(release)
+	released = true
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	final, err := scanMessages(req, func(_ SearchMailbox, _ int, after *ScanPosition) (scanPage, error) {
+		if after == nil || after.ID != 2 {
+			t.Errorf("resume lost first writer's cursor: %+v", after)
+		}
+		return scanPage{Messages: []Message{{ID: "1"}}}, nil
+	})
+	if err != nil || !final.Complete || len(final.Messages) != 3 {
+		t.Fatalf("writer lock was not released or progress was lost: result=%+v err=%v", final, err)
+	}
+}
+
+func TestScanCheckpointReleasesAfterReadFailure(t *testing.T) {
+	req := ScanRequest{Scopes: []SearchMailbox{{"Work", "INBOX"}}, Limit: 1, Checkpoint: filepath.Join(t.TempDir(), "scan.json")}
+	_, err := scanMessages(req, func(SearchMailbox, int, *ScanPosition) (scanPage, error) {
+		return scanPage{}, errors.New("read failed")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := scanMessages(req, func(SearchMailbox, int, *ScanPosition) (scanPage, error) { return scanPage{}, nil })
+	if err != nil || !got.Complete || !got.Checkpoint.Resumed {
+		t.Fatalf("failed read left checkpoint locked or skipped retry: result=%+v err=%v", got, err)
+	}
+}
+
+func TestScanCheckpointRejectsUnsafeLock(t *testing.T) {
+	for _, kind := range []string{"public", "directory", "symlink"} {
+		t.Run(kind, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "scan.json")
+			lock := path + ".lock"
+			var err error
+			switch kind {
+			case "public":
+				err = os.WriteFile(lock, nil, 0644)
+			case "directory":
+				err = os.Mkdir(lock, 0700)
+			case "symlink":
+				target := filepath.Join(filepath.Dir(path), "target")
+				if err = os.WriteFile(target, []byte("untouched"), 0600); err == nil {
+					err = os.Symlink(target, lock)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			called := false
+			_, err = scanMessages(ScanRequest{Scopes: []SearchMailbox{{"Work", "INBOX"}}, Checkpoint: path}, func(SearchMailbox, int, *ScanPosition) (scanPage, error) {
+				called = true
+				return scanPage{}, nil
+			})
+			if !errors.Is(err, ErrInvalidScanCheckpoint) || called {
+				t.Fatalf("unsafe lock accepted: read=%t error=%v", called, err)
+			}
+		})
+	}
+}
