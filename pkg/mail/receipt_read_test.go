@@ -27,7 +27,7 @@ func TestReadRelocationReceiptFormatsAndRefusals(t *testing.T) {
 			}
 		})
 	}
-	for name, value := range map[string]BatchResult{"dry": {Action: "archive", DryRun: true, Items: []BatchItem{item}}, "wrong-action": {Action: "delete", Items: []BatchItem{item}}, "no-identity": {Action: "archive", Items: []BatchItem{{Status: "succeeded"}}}} {
+	for name, value := range map[string]BatchResult{"dry": {Action: "archive", DryRun: true, Items: []BatchItem{item}}, "wrong-action": {Action: "flag", Items: []BatchItem{item}}, "no-identity": {Action: "archive", Items: []BatchItem{{Status: "succeeded"}}}} {
 		t.Run(name, func(t *testing.T) {
 			data, _ := json.Marshal(value)
 			path := filepath.Join(t.TempDir(), "receipt")
@@ -79,5 +79,42 @@ func TestReconcileRejectsNoEligibleReceiptBeforeReads(t *testing.T) {
 		if _, err := ReconcileMutations(NewClient(), BatchOptions{}, BatchResult{Action: "archive", Items: items}); err == nil {
 			t.Fatal("accepted receipt with no eligible observations")
 		}
+	}
+}
+
+func TestReadDeleteReceiptPreservesPinnedTrashAndUnknownMutation(t *testing.T) {
+	item := verificationItem()
+	item.Status, item.SourceMailbox, item.TargetMailbox, item.MarkedRead = "succeeded", "INBOX", "Deleted Items", true
+	receipt := BatchResult{Action: "delete", MarkReadRequested: true, Attempted: 1, Succeeded: 1, Items: []BatchItem{item}}
+	raw, _ := json.Marshal(receipt)
+	envelope, _ := json.Marshal(map[string]any{"ok": true, "data": receipt})
+	started, _ := json.Marshal(map[string]any{"event": "started", "action": "delete", "matched": 1, "markReadBefore": true})
+	applying, _ := json.Marshal(map[string]any{"event": "mutation_started", "item": item})
+	for name, data := range map[string][]byte{"raw": raw, "envelope": envelope, "uncertain-journal": append(append(started, '\n'), applying...)} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "receipt.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := ReadRelocationReceipt(path)
+			if err != nil || got.Action != "delete" || !got.MarkReadRequested || len(got.Items) != 1 || got.Items[0].TargetMailbox != "Deleted Items" || !got.Items[0].Identity.valid() {
+				t.Fatalf("receipt=%+v err=%v", got, err)
+			}
+			if name == "uncertain-journal" && got.Items[0].Status != "unknown" {
+				t.Fatalf("unknown application lost: %+v", got)
+			}
+		})
+	}
+	for name, invalid := range map[string]BatchItem{"no-pinned-trash": {ID: "101", Account: "Work", SourceMailbox: "INBOX", Status: "succeeded", Identity: item.Identity}, "no-identity": {ID: "101", Account: "Work", SourceMailbox: "INBOX", TargetMailbox: "Deleted Items", Status: "succeeded"}} {
+		t.Run(name, func(t *testing.T) {
+			data, _ := json.Marshal(BatchResult{Action: "delete", Items: []BatchItem{invalid}})
+			path := filepath.Join(t.TempDir(), "receipt.json")
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ReadRelocationReceipt(path); err == nil {
+				t.Fatal("accepted legacy delete receipt without recoverable destination evidence")
+			}
+		})
 	}
 }

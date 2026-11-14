@@ -109,8 +109,8 @@ func ReadRelocationReceipt(path string) (BatchResult, error) {
 	if result.DryRun {
 		return result, fmt.Errorf("a dry-run receipt has no applied relocation to reconcile")
 	}
-	if result.Action != "archive" && result.Action != "move" {
-		return result, fmt.Errorf("reconciliation requires an archive or move receipt")
+	if result.Action != "archive" && result.Action != "move" && result.Action != "delete" {
+		return result, fmt.Errorf("reconciliation requires an archive, move, or delete receipt")
 	}
 	if len(result.Items) == 0 {
 		return result, fmt.Errorf("receipt contains no message identities")

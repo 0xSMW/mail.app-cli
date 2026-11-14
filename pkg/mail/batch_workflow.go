@@ -15,6 +15,7 @@ type batchRunner struct {
 	chunkSize           int
 	autoReceipt         bool
 	archiveDestinations map[string]string
+	trashDestinations   map[string]string
 	nativeArchiveReady  bool
 }
 
@@ -40,6 +41,9 @@ func (r *batchRunner) finish(retErr *error) {
 	}
 	result.EndedAt = time.Now().Format(time.RFC3339)
 	terminal := "completed"
+	if result.StoppedReason != "" {
+		terminal = "stopped"
+	}
 	if client.Done() != nil || isUnknownMutationError(client, *retErr) || hasUnknownItem(result.Items) {
 		terminal = "interrupted"
 	}
@@ -74,6 +78,32 @@ func (r *batchRunner) prepare() error {
 		opts.Settle = relocationSettle(opts, items)
 		if err := ValidateBatchOptions(opts); err != nil {
 			return err
+		}
+	}
+	if opts.Action == "delete" {
+		r.trashDestinations = make(map[string]string)
+		failures := make(map[string]error)
+		for i := range items {
+			item := &items[i]
+			if item.Status == "failed" {
+				continue
+			}
+			destination, known := r.trashDestinations[item.Account]
+			err := failures[item.Account]
+			if !known && err == nil {
+				destination, err = client.ResolveTrashMailbox(item.Account)
+				if err != nil {
+					failures[item.Account] = err
+				} else {
+					r.trashDestinations[item.Account] = destination
+				}
+			}
+			if err == nil {
+				err = client.prepareDeleteItem(item, destination)
+			}
+			if err != nil {
+				item.Status, item.Error = "failed", "recoverable delete preflight: "+err.Error()
+			}
 		}
 	}
 	r.opts, r.items = opts, items
@@ -117,6 +147,11 @@ func (r *batchRunner) preview() error {
 
 func (r *batchRunner) dispatch(mutate Mutator) error {
 	client, opts, result, items, chunkSize := r.client, r.opts, r.result, r.items, r.chunkSize
+	type failureRun struct {
+		message string
+		count   int
+	}
+	failures := make(map[verificationMailboxKey]failureRun)
 	for start := 0; start < len(items); start += chunkSize {
 		end := min(start+chunkSize, len(items))
 		chunkClient := client
@@ -135,9 +170,39 @@ func (r *batchRunner) dispatch(mutate Mutator) error {
 		if opts.Progress != nil {
 			fmt.Fprintf(opts.Progress, "%s: chunk %d/%d (%d messages)\n", opts.Action, (start/chunkSize)+1, result.Chunks, end-start)
 		}
-		for _, item := range items[start:end] {
+		for offset, item := range items[start:end] {
 			if err := r.applyItem(chunkClient, item, mutate); err != nil {
 				return err
+			}
+			if opts.MaxConsecutiveFailures == 0 {
+				continue
+			}
+			applied := result.Items[len(result.Items)-1]
+			key := verificationMailboxKey{applied.Account, applied.SourceMailbox}
+			if applied.Status != "failed" {
+				delete(failures, key)
+				continue
+			}
+			run := failures[key]
+			if run.message != applied.Error {
+				run = failureRun{message: applied.Error}
+			}
+			run.count++
+			failures[key] = run
+			if run.count >= opts.MaxConsecutiveFailures {
+				result.StoppedReason = fmt.Sprintf("stopped after %d identical consecutive failures in %s/%s", run.count, applied.Account, applied.SourceMailbox)
+				for _, pending := range items[start+offset+1:] {
+					pending.Status, pending.Error = "not_attempted", result.StoppedReason
+					result.Items = append(result.Items, pending)
+					result.NotAttempted++
+					if err := opts.Receipt.Record("not_attempted", journalItem(pending)); err != nil {
+						return err
+					}
+				}
+				if opts.Progress != nil {
+					fmt.Fprintln(opts.Progress, result.StoppedReason)
+				}
+				return nil // The caller still verifies applied items before reporting failure.
 			}
 		}
 		if session != nil {

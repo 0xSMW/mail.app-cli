@@ -59,25 +59,30 @@ type RelocationState struct {
 
 // BatchResult is the mutation receipt.
 type BatchResult struct {
-	Action            string      `json:"action"`
-	MarkReadRequested bool        `json:"markReadRequested,omitempty"`
-	DryRun            bool        `json:"dryRun"`
-	StartedAt         string      `json:"startedAt,omitempty"`
-	EndedAt           string      `json:"endedAt,omitempty"`
-	ReceiptPath       string      `json:"receiptPath,omitempty"`
-	JournalError      string      `json:"journalError,omitempty"`
-	Matched           int         `json:"matched"`
-	Attempted         int         `json:"attempted"`
-	Succeeded         int         `json:"succeeded"`
-	Failed            int         `json:"failed"`
-	Unverified        int         `json:"unverified,omitempty"`
-	Skipped           int         `json:"skipped"`
-	Chunks            int         `json:"chunks,omitempty"`
-	Items             []BatchItem `json:"items"`
+	Action            string             `json:"action"`
+	MarkReadRequested bool               `json:"markReadRequested,omitempty"`
+	DryRun            bool               `json:"dryRun"`
+	StartedAt         string             `json:"startedAt,omitempty"`
+	EndedAt           string             `json:"endedAt,omitempty"`
+	ReceiptPath       string             `json:"receiptPath,omitempty"`
+	JournalError      string             `json:"journalError,omitempty"`
+	Matched           int                `json:"matched"`
+	Attempted         int                `json:"attempted"`
+	Succeeded         int                `json:"succeeded"`
+	Failed            int                `json:"failed"`
+	NotAttempted      int                `json:"notAttempted,omitempty"`
+	StoppedReason     string             `json:"stoppedReason,omitempty"`
+	LabelResults      []GmailLabelResult `json:"labelResults,omitempty"`
+	Unverified        int                `json:"unverified,omitempty"`
+	Skipped           int                `json:"skipped"`
+	Chunks            int                `json:"chunks,omitempty"`
+	Items             []BatchItem        `json:"items"`
 }
 
 // BatchOptions controls one mutation run.
 type BatchOptions struct {
+	// LabelResults records explicitly requested provider cleanup completed before filing.
+	LabelResults         []GmailLabelResult
 	Action               string
 	TargetMailbox        string
 	DryRun               bool
@@ -90,6 +95,9 @@ type BatchOptions struct {
 	// VerifyBudget bounds all post-mutation checks; zero uses the default.
 	VerifyBudget time.Duration
 	ChunkSize    int
+	// MaxConsecutiveFailures stops after this many identical failures in one
+	// account/source scope. Zero disables the limit for library callers.
+	MaxConsecutiveFailures int
 	// ReuseBridge is for built-in JXA mutators, never custom mutators.
 	ReuseBridge bool
 	Read        bool
@@ -99,6 +107,8 @@ type BatchOptions struct {
 	Journal bool
 	// Progress receives per-chunk and per-message lines when non-nil.
 	Progress io.Writer
+	// Events mirrors durable receipt events as JSON lines; the receipt remains authoritative.
+	Events io.Writer
 	// TrustSource keeps each item's SourceMailbox as given. Otherwise an
 	// archive looks each message up in the Envelope Index and acts from
 	// INBOX or the backing mailbox, never from a user label, and skips
@@ -162,7 +172,10 @@ func ArchiveMutator(journal bool) Mutator {
 
 // DeleteMutator moves a message to the trash.
 func DeleteMutator(client *Client, item *BatchItem) error {
-	return client.DeleteMessageResolved(item.Account, item.SourceMailbox, item.ID)
+	if err := client.prepareDeleteItem(item, ""); err != nil {
+		return err
+	}
+	return client.moveDeleteToTrash(item)
 }
 
 // MoveMutator moves a message to item.TargetMailbox.
@@ -202,6 +215,7 @@ func FlagMutator(flagged bool) Mutator {
 func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutator) (result BatchResult, retErr error) {
 	result = BatchResult{
 		Action:            opts.Action,
+		LabelResults:      opts.LabelResults,
 		MarkReadRequested: opts.MarkReadBefore,
 		DryRun:            opts.DryRun,
 		StartedAt:         time.Now().Format(time.RFC3339),
@@ -221,6 +235,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		autoReceipt = true
 	}
 	result.ReceiptPath = opts.Receipt.Path()
+	opts.Receipt.SetEvents(opts.Events)
 	if err := opts.Receipt.Record("started", map[string]any{
 		"action": opts.Action, "dryRun": opts.DryRun, "matched": len(items), "markReadBefore": opts.MarkReadBefore, "markReadOnSkip": opts.MarkReadOnSkip, "settle": opts.Settle.String(), "verifyBudget": opts.VerifyBudget.String(),
 	}); err != nil {
@@ -235,7 +250,7 @@ func RunBatch(client *Client, opts BatchOptions, items []BatchItem, mutate Mutat
 		err := r.preview()
 		return result, err
 	}
-	if r.opts.Verify && (r.opts.Action == "archive" || r.opts.Action == "move") {
+	if r.opts.Verify && (r.opts.Action == "archive" || r.opts.Action == "move" || r.opts.Action == "delete") {
 		if err := captureBatchIdentities(client, r.opts, r.items); err != nil {
 			return result, err
 		}
@@ -409,7 +424,7 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 		}
 		return summary
 	}
-	if r.Failed == 0 && r.Unverified == 0 && r.Skipped == 0 {
+	if r.Failed == 0 && r.Unverified == 0 && r.Skipped == 0 && r.NotAttempted == 0 {
 		return fmt.Sprintf("%s %s%s", verb, count, target)
 	}
 	var summary string
@@ -423,6 +438,12 @@ func (r BatchResult) Summary(opts BatchOptions) string {
 	}
 	if r.Unverified > 0 {
 		summary += fmt.Sprintf("; %d unverified", r.Unverified)
+	}
+	if r.NotAttempted > 0 {
+		summary += fmt.Sprintf("; %d not attempted", r.NotAttempted)
+	}
+	if r.StoppedReason != "" {
+		summary += "; " + r.StoppedReason
 	}
 	if r.Skipped > 0 {
 		summary += fmt.Sprintf("; %d already there", r.Skipped)
@@ -468,7 +489,7 @@ func VerifyMutations(client *Client, opts BatchOptions, items []BatchItem) []Bat
 			verified[i].VerifyStatus, verified[i].VerifyError, verified[i].Observed = "", "", nil
 		}
 	}
-	if opts.Action == "mark" || opts.Action == "flag" || opts.Action == "delete" {
+	if opts.Action == "mark" || opts.Action == "flag" {
 		verifyMutationStates(client, opts, verified, schedule)
 	} else {
 		verifyMutationRelocations(client, opts, verified, schedule)
