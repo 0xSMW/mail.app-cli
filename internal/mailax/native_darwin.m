@@ -11,12 +11,10 @@
 @property(strong) id root;
 @property(strong) id window;
 @property(strong) id table;
-@property(strong) NSArray *candidates;
+@property(strong) NSMutableArray *tried;
 @property(strong) id selected;
 @property(strong) id archive;
 @property(copy) NSString *windowID;
-@property NSUInteger cursor;
-@property NSTimeInterval lookupDeadline;
 @end
 @implementation MailArchiveAXSession
 @end
@@ -215,7 +213,8 @@ static NSArray *Candidates(id table) {
         }
     };
     for (NSInteger distance=0; distance<40; distance++) for (NSNumber *hint in hints) { add(hint.integerValue + distance); add(hint.integerValue - distance); }
-    for (NSUInteger index=0; index<MIN(rows.count,80); index++) add(index);
+    // Hints are an optimization only; every exposed row remains eligible.
+    for (NSUInteger index=0; index<rows.count; index++) add(index);
     return candidates;
 }
 
@@ -250,8 +249,7 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                     AXUIElementSetMessagingTimeout(Element(s.root), 0.5);
                     s.window = OwnedWindow(s, YES);
                     s.table = OwnedTable(s, YES);
-                    s.candidates = Candidates(s.table);
-                    s.lookupDeadline = NSProcessInfo.processInfo.systemUptime + 5;
+                    s.tried = [NSMutableArray array];
                     *handle = (uintptr_t)CFBridgingRetain(s);
                     reply = @{};
                 } else {
@@ -262,8 +260,13 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                         OwnedTable(s, NO);
                         NSString *subject = request[@"subject"];
                         BOOL found = NO;
-                        while (s.cursor < s.candidates.count && NSProcessInfo.processInfo.systemUptime < s.lookupDeadline) {
-                            id row = s.candidates[s.cursor++];
+                        // Refresh AXRows on every scan: Mail can populate or replace rows
+                        // after the owned table first appears. Only selected candidates
+                        // are remembered; other rows may acquire labels on a later scan.
+                        for (id row in Candidates(s.table)) {
+                            BOOL tried = NO;
+                            for (id previous in s.tried) if (Same(previous,row)) { tried = YES; break; }
+                            if (tried) continue;
                             id label = Find(row, @"Mail.messageList.cell.view.subjectLabel", 0);
                             if (!label || ![Attribute(label, kAXValueAttribute, YES) isEqual:subject]) continue;
                             if (Find(row, @"Mail.messageList.cell.view.disclosureButton", 0)) continue;
@@ -271,6 +274,7 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                             RequireRowMembership(s, row);
                             AXError status = AXUIElementSetAttributeValue(Element(s.table), kAXSelectedRowsAttribute, (__bridge CFTypeRef)@[row]);
                             if (status != kAXErrorSuccess) Fail(@"Could not select exact Mail row", 2);
+                            [s.tried addObject:row];
                             s.selected = row; found = YES; break;
                         }
                         reply = @{@"value":@(found)};

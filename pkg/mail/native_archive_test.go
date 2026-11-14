@@ -148,6 +148,7 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 		presses   int
 		wantError bool
 	}{
+		{"beyond-first-page", 1, false}, {"replaced-rows", 1, false}, {"delayed-selection", 1, false}, {"transient-selection", 1, false},
 		{"non-gmail", 0, true}, {"gmail-lookalike", 0, true}, {"googlemail", 1, false}, {"apply", 1, false}, {"prepare", 0, false}, {"wrong-id", 0, true}, {"source", 0, true}, {"conversation", 0, true}, {"background-editor", 1, false}, {"background-other-mail-window", 1, false}, {"disabled-menu", 1, false}, {"preview", 0, true}, {"late-selection", 0, true}, {"press-error", 1, true},
 		{"existing-viewer-id", 0, true}, {"created-viewer-missing", 0, true}, {"created-viewer-ambiguous", 0, true},
 		{"ambiguous-window", 0, true}, {"changed-window", 0, true}, {"late-ambiguous-window", 0, true},
@@ -167,6 +168,7 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 			}
 			var got struct {
 				Presses                             int
+				AXSelections, RowReads, Elapsed     int
 				Output, Error                       string
 				Events                              []phaseEvent
 				ActivationCalls, FocusReads         int
@@ -178,6 +180,12 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 			}
 			if got.Presses != tt.presses || (got.Error != "") != tt.wantError {
 				t.Fatalf("mock result = %s", out)
+			}
+			if (tt.scenario == "delayed-selection" || tt.scenario == "transient-selection") && (got.AXSelections != 1 || got.Elapsed < 100) {
+				t.Fatalf("identity settling skipped or reselected target: %s", out)
+			}
+			if tt.scenario == "replaced-rows" && got.RowReads < 3 {
+				t.Fatalf("row collection was not refreshed: %s", out)
 			}
 			if got.TableChildReads != 0 || got.SidebarChildReads != 0 {
 				t.Fatalf("unbounded discovery = %s", out)

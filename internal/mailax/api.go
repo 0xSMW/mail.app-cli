@@ -12,7 +12,8 @@ type Driver interface {
 }
 
 // Session retains only the owned viewer and its message list. SelectNext chooses
-// an individual row with the exact subject; the caller must separately compare
+// an individual row with the exact subject from refreshed, complete AXRows
+// scans within a bounded lookup budget; the caller must separately compare
 // the selected message's Apple Event identity before accepting that row.
 type Session interface {
 	SelectNext(context.Context, string) (bool, error)

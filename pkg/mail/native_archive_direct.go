@@ -113,6 +113,37 @@ func (n *nativeMail) archiveSelection(viewer appleevents.Value, accountID string
 	return actual == expected, nil
 }
 
+// Mail updates its scripting selection asynchronously after AXSelectedRows.
+// Keep the same owned row selected while waiting; a mismatch must not immediately
+// advance the candidate cursor and permanently skip the requested message.
+func (n *nativeMail) settleArchiveSelection(viewer appleevents.Value, accountID string, expected nativeArchiveIdentity, session mailax.Session) (bool, error) {
+	deadline := time.Now().Add(500 * time.Millisecond)
+	previousMatch := false
+	for {
+		matches, err := n.archiveSelection(viewer, accountID, expected)
+		if err != nil {
+			return false, err
+		}
+		if matches && previousMatch {
+			return true, nil
+		}
+		previousMatch = matches
+		if !time.Now().Before(deadline) {
+			return false, nil
+		}
+		if err := session.Guard(); err != nil {
+			return false, err
+		}
+		timer := time.NewTimer(min(25*time.Millisecond, time.Until(deadline)))
+		select {
+		case <-n.ctx.Done():
+			timer.Stop()
+			return false, n.ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (c *Client) runNativeArchiveDirect(account, messageID string, apply bool) error {
 	if id, err := strconv.ParseUint(messageID, 10, 53); err != nil || id == 0 {
 		return fmt.Errorf("invalid native archive message ID: %q", messageID)
@@ -254,9 +285,9 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 			return e
 		}
 		if !found {
-			return fmt.Errorf("could not safely select the exact individual message in Mail; archive it in Mail directly")
+			return fmt.Errorf("could not safely select the exact individual message in Mail within the lookup budget; archive it in Mail directly")
 		}
-		matches, e := n.archiveSelection(viewer, accountID.Text, expected)
+		matches, e := n.settleArchiveSelection(viewer, accountID.Text, expected, session)
 		if e != nil {
 			return e
 		}

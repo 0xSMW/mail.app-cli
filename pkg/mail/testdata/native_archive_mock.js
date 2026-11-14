@@ -3,6 +3,7 @@ const fs = require('fs');
 const vm = require('vm');
 const scenario = process.argv[2];
 const [script, cleanupScript] = fs.readFileSync(0, 'utf8').split('\n// archive-mock-cleanup\n');
+let now = 0, rowReads = 0, axSelections = 0;
 let selectionChecks = 0, tableChildReads = 0, sidebarChildReads = 0, postCreateReadFailed = false;
 let presses = 0, activationCalls = 0, focusReads = 0, selectedMessage;
 const initialFront = scenario === 'background-other-mail-window' ? 'com.apple.mail' : 'com.example.editor';
@@ -14,6 +15,10 @@ const subject = element({AXIdentifier:'Mail.messageList.cell.view.subjectLabel',
 const disclosure = element({AXIdentifier:'Mail.messageList.cell.view.disclosureButton'});
 const row = element({AXChildren:scenario === 'conversation' ? [subject,disclosure] : [subject]});
 const table = element({AXIdentifier:'Mail.messageList', AXRows:[row], AXSelectedRows:[row], AXChildren:[row]});
+if (scenario === 'beyond-first-page') {
+ table.attributes.AXRows = Array.from({length:200}, (_,i) => i === 150 ? row : element({AXChildren:[element({AXIdentifier:'Mail.messageList.cell.view.subjectLabel',AXValue:'Other'})]}));
+ table.attributes.AXSelectedRows = [table.attributes.AXRows[0]];
+}
 const makeButton = () => element({AXRole:'AXButton', AXDescription:'Archive', AXEnabled:true});
 const button = makeButton();
 if (scenario === 'disabled-button') button.attributes.AXEnabled = false;
@@ -31,7 +36,7 @@ const target = message(7);
 selectedMessage = target;
 const account = {id:()=> 'account-id',serverName:()=>scenario === 'non-gmail' ? 'imap.example.com' : scenario === 'gmail-lookalike' ? 'imap.gmail.com.example.com' : scenario === 'googlemail' ? 'IMAP.GOOGLEMAIL.COM.' : 'imap.gmail.com',mailboxes:{byName:()=>source}};
 const source = {name:()=> 'INBOX',account:()=>account,messages:{byId:()=>target}};
-const viewer = {id:()=>{if (created && scenario === 'created-viewer-id-read-error' && !postCreateReadFailed) {postCreateReadFailed=true;throw Error('Post-creation viewer ID read failed');}return 42;},window:()=>win,previewPaneIsVisible:()=>scenario === 'preview', selectedMailboxes:()=>scenario === 'source' ? [] : [source],selectedMessages:()=>{selectionChecks++;return [scenario === 'late-selection' && selectionChecks >= 3 ? message(8) : selectedMessage];}};
+const viewer = {id:()=>{if (created && scenario === 'created-viewer-id-read-error' && !postCreateReadFailed) {postCreateReadFailed=true;throw Error('Post-creation viewer ID read failed');}return 42;},window:()=>win,previewPaneIsVisible:()=>scenario === 'preview', selectedMailboxes:()=>scenario === 'source' ? [] : [source],selectedMessages:()=>{selectionChecks++;if ((scenario === 'delayed-selection' || (scenario === 'transient-selection' && selectionChecks > 1)) && now < 100) return [message(8)];return [scenario === 'late-selection' && selectionChecks >= 3 ? message(8) : selectedMessage];}};
 const unusedViewer = {id:()=>99,window:()=>unusedWin};
 let viewerClosed = false;
 function viewers() {
@@ -52,6 +57,10 @@ Object.assign(dollar,{
   if (key === 'AXChildren' && node.attributes.AXIdentifier === 'Mail.messageList') tableChildReads++;
   if (key === 'AXChildren' && node === sidebar) sidebarChildReads++;
   if (key === 'AXFocusedWindow') {focusReads++;throw Error('Focus must not be read');}
+  if (node === table && key === 'AXRows') {
+   rowReads++;
+   if (scenario === 'replaced-rows') node.attributes.AXRows = rowReads < 3 ? [] : [row];
+  }
   if (!(key in node.attributes)) return 1;
   if (node === root && key === 'AXMenuBar') {
    if (scenario === 'changed-window') root.attributes.AXWindows = [element({...win.attributes}),unusedWin];
@@ -67,6 +76,7 @@ Object.assign(dollar,{
  },
  AXUIElementSetAttributeValue:(node,key,value)=>{
   if (node !== table || key !== 'AXSelectedRows') throw Error('Unexpected AX mutation');
+  axSelections++;
   node.attributes[key]=value;
   selectedMessage=scenario === 'wrong-id' ? message(8) : target;
   return 0;
@@ -101,7 +111,7 @@ function deepUnwrap(value) {
 const context = {
  request:{account:'Test',id:7,apply:scenario !== 'prepare'},owner:{viewerId:42},
  ObjC:{import:()=>{},bindFunction:()=>{},unwrap,deepUnwrap},
- $:dollar,Ref:()=>[],Application:()=>mail,delay:()=>{},
+ $:dollar,Ref:()=>[],Application:()=>mail,Date:{now:()=>now},delay:seconds=>{now += seconds*1000;},
  emitPhase:event=>events.push(event),
  phase:(name,fn)=>{events.push({name,state:'start'});try {const result=fn();events.push({name,state:'done'});return result;} catch(err){events.push({name,state:'failed'});throw err;}}
 };
@@ -110,4 +120,4 @@ try {output=vm.runInNewContext(script,context,{timeout:1000});} catch(err){error
 if (cleanupScript && events.some(event=>event.name === 'archive-viewer-owned' && event.state === 'done')) {
  try {cleanupOutput=vm.runInNewContext(cleanupScript,{...context},{timeout:1000});} catch(err){cleanupError=err.message;}
 }
-process.stdout.write(JSON.stringify({presses,output,error,cleanupOutput,cleanupError,events,closed,activationCalls,focusReads,tableChildReads,sidebarChildReads,unusedViewerPresent:viewers().includes(unusedViewer),focusPreserved:front===initialFront}));
+process.stdout.write(JSON.stringify({axSelections,rowReads,elapsed:now,presses,output,error,cleanupOutput,cleanupError,events,closed,activationCalls,focusReads,tableChildReads,sidebarChildReads,unusedViewerPresent:viewers().includes(unusedViewer),focusPreserved:front===initialFront}));

@@ -23,6 +23,7 @@ type nativeDriver struct{}
 type nativeSession struct {
 	handle         C.uintptr_t
 	lastDiagnostic string
+	lookupDeadline time.Time
 }
 type axReply struct {
 	Code       int             `json:"code"`
@@ -91,6 +92,7 @@ func (nativeDriver) Prepare(ctx context.Context, viewerID int64) (Session, error
 	return prepareOwnedViewer(ctx, func(remaining time.Duration) (Session, bool, error) {
 		session := &nativeSession{}
 		reply, _, err := call(map[string]any{"op": "prepare", "viewer": viewerID, "budgetMs": max(int64(1), remaining.Milliseconds())}, session)
+		session.lookupDeadline = time.Now().Add(5 * time.Second)
 		return session, reply.Code == 1, err
 	}, time.Now().Add(3*time.Second), 50*time.Millisecond)
 }
@@ -99,8 +101,10 @@ func (s *nativeSession) SelectNext(ctx context.Context, subject string) (bool, e
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	r, _, err := call(map[string]any{"op": "select", "subject": subject}, s)
-	return r.Value, err
+	return pollOwnedRows(ctx, s.lookupDeadline, 50*time.Millisecond, func(remaining time.Duration) (bool, error) {
+		r, _, err := call(map[string]any{"op": "select", "subject": subject, "budgetMs": max(int64(1), remaining.Milliseconds())}, s)
+		return r.Value, err
+	})
 }
 func (s *nativeSession) Guard() error {
 	_, _, err := call(map[string]any{"op": "guard"}, s)

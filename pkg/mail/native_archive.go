@@ -261,30 +261,48 @@ function selectionMatches() {
     const selected = viewer.selectedMessages() || [];
     return selected.length === 1 && identity(selected[0]) === expectedIdentity;
 }
-const rows = ax(table,'AXRows');
-const selectedRows = ax(table,'AXSelectedRows');
-const hints = [];
-for (const selected of selectedRows) {
-    const index = rows.findIndex(row => $.CFEqual(row,selected));
-    if (index >= 0) hints.push(index);
-}
-const candidates = [], seen = new Set();
-function add(index) { if (index >= 0 && index < rows.length && !seen.has(index)) {seen.add(index);candidates.push(index);} }
-for (let distance = 0; distance < 40; distance++) for (const hint of hints) {add(hint + distance);add(hint - distance);}
-for (let index = 0; index < Math.min(rows.length,80); index++) add(index);
+// Refresh the complete exposed row collection until the session budget expires.
+// Selected rows are hints only, never a restriction to the visible first page.
 const lookupDeadline = Date.now() + 5000;
+const triedRows = [];
 let selectedRow = null;
-for (const index of candidates) {
-    if (Date.now() >= lookupDeadline) break;
-    const row = rows[index];
-    const label = findAX(row,'Mail.messageList.cell.view.subjectLabel',0);
-    if (!label || ax(label,'AXValue') !== expectedSubject) continue;
-    if (findAX(row,'Mail.messageList.cell.view.disclosureButton',0)) continue;
-    if (viewer.previewPaneIsVisible()) throw Error('Mail preview became visible');
-    if ($.AXUIElementSetAttributeValue(table,$('AXSelectedRows'),$([row])) !== 0) throw Error('Could not select exact Mail row');
-    if (selectionMatches()) {selectedRow = row;break;}
+while (!selectedRow && Date.now() < lookupDeadline) {
+    const windows = ax(root,'AXWindows').filter(w => optionalAX(w,'AXIdentifier') === windowID);
+    const tables = matchingAX(win,'Mail.messageList',0,[]);
+    if (windows.length !== 1 || !$.CFEqual(windows[0],win) || tables.length !== 1 || !$.CFEqual(tables[0],table)) throw Error('Owned Mail message list changed');
+    const rows = ax(table,'AXRows');
+    const hints = ax(table,'AXSelectedRows');
+    const candidates = [], seen = new Set();
+    function add(index) { if (index >= 0 && index < rows.length && !seen.has(index)) {seen.add(index);candidates.push(index);} }
+    for (const hint of hints) add(rows.findIndex(row => $.CFEqual(row,hint)));
+    for (let index = 0; index < rows.length; index++) add(index);
+    for (const index of candidates) {
+        if (Date.now() >= lookupDeadline) break;
+        const row = rows[index];
+        if (triedRows.some(previous => $.CFEqual(previous,row))) continue;
+        const label = findAX(row,'Mail.messageList.cell.view.subjectLabel',0);
+        if (!label || ax(label,'AXValue') !== expectedSubject) continue;
+        if (findAX(row,'Mail.messageList.cell.view.disclosureButton',0)) continue;
+        if (viewer.previewPaneIsVisible()) throw Error('Mail preview became visible');
+        if (ax(table,'AXRows').filter(current => $.CFEqual(current,row)).length !== 1) continue;
+        if ($.AXUIElementSetAttributeValue(table,$('AXSelectedRows'),$([row])) !== 0) throw Error('Could not select exact Mail row');
+        triedRows.push(row);
+        const settleDeadline = Math.min(lookupDeadline,Date.now() + 500);
+        let previousMatch = false;
+        do {
+            const current = ax(table,'AXSelectedRows');
+            if (current.length !== 1 || !$.CFEqual(current[0],row)) throw Error('Mail message selection changed');
+            const matches = selectionMatches();
+            if (matches && previousMatch) {selectedRow = row;break;}
+            previousMatch = matches;
+            if (Date.now() >= settleDeadline) break;
+            delay(0.025);
+        } while (Date.now() < settleDeadline);
+        if (selectedRow) break;
+    }
+    if (!selectedRow && Date.now() < lookupDeadline) delay(0.05);
 }
-if (!selectedRow) throw Error('Could not safely select the exact individual message in Mail; archive it in Mail directly');
+if (!selectedRow) throw Error('Could not safely select the exact individual message in Mail within the lookup budget; archive it in Mail directly');
 function guard() {
     const windows = ax(root,'AXWindows').filter(w => optionalAX(w,'AXIdentifier') === windowID);
     if (windows.length !== 1 || !$.CFEqual(windows[0],win)) throw Error('Owned Mail window changed');
