@@ -170,6 +170,10 @@ func cachedBodyWithFreshMetadata(cached, fresh Message) (*Message, error) {
 	fresh.BodyDiagnostics = cached.BodyDiagnostics
 	fresh.Links, fresh.LinkStatus, fresh.Unsubscribe = cached.Links, cached.LinkStatus, cached.Unsubscribe
 	fresh.InReplyTo, fresh.References = cached.InReplyTo, cached.References
+	// Verification metadata deliberately omits immutable recipient headers.
+	fresh.ToRecipients = append([]string(nil), cached.ToRecipients...)
+	fresh.CcRecipients = append([]string(nil), cached.CcRecipients...)
+	fresh.BccRecipients = append([]string(nil), cached.BccRecipients...)
 	return &fresh, nil
 }
 

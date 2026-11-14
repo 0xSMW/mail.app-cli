@@ -14,7 +14,7 @@ import (
 )
 
 func checkpointMessage(id string) *Message {
-	return &Message{ID: id, Account: "Work", Mailbox: "INBOX", RFCMessageID: "<" + id + "@fixture.test>", Sender: "Sender <sender@fixture.test>", Subject: "Message " + id, DateSent: "2026-11-12T12:00:00Z", MessageSize: 100, Content: "full extracted body " + id, ContentSource: "disk", Read: false, BodyDiagnostics: &BodyDiagnostics{}, Links: []MessageLink{{URL: "https://fixture.test/" + id, Source: "plain", Selected: true, Kind: "link", Openable: true}}, LinkStatus: &LinkExtractionStatus{Complete: true, Source: "disk"}, Unsubscribe: &MessageUnsubscribe{HeaderStatus: "available"}, InReplyTo: "<thread@fixture.test>"}
+	return &Message{ID: id, Account: "Work", Mailbox: "INBOX", RFCMessageID: "<" + id + "@fixture.test>", Sender: "Sender <sender@fixture.test>", Subject: "Message " + id, DateSent: "2026-11-12T12:00:00Z", MessageSize: 100, Content: "full extracted body " + id, ContentSource: "disk", Read: false, ToRecipients: []string{"recipient@fixture.test"}, CcRecipients: []string{"copy@fixture.test"}, BccRecipients: []string{"hidden@fixture.test"}, BodyDiagnostics: &BodyDiagnostics{}, Links: []MessageLink{{URL: "https://fixture.test/" + id, Source: "plain", Selected: true, Kind: "link", Openable: true}}, LinkStatus: &LinkExtractionStatus{Complete: true, Source: "disk"}, Unsubscribe: &MessageUnsubscribe{HeaderStatus: "available"}, InReplyTo: "<thread@fixture.test>"}
 }
 func checkpointRefs(ids ...string) []MessageRef {
 	var out []MessageRef
@@ -41,6 +41,7 @@ func TestReadCheckpointRetriesOnlyFailedReadsAndRefreshesMetadata(t *testing.T) 
 		m.Flagged = true
 		m.Mailbox = "Archive"
 		m.Content = "must not use metadata body"
+		m.ToRecipients, m.CcRecipients, m.BccRecipients = nil, nil, nil
 		return m, nil
 	}
 	first, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
@@ -60,7 +61,7 @@ func TestReadCheckpointRetriesOnlyFailedReadsAndRefreshesMetadata(t *testing.T) 
 	}
 	for _, i := range []int{0, 2} {
 		m := next.Items[i].Message
-		if !m.Read || !m.Flagged || m.Mailbox != "Archive" || m.Content != fmt.Sprintf("full extracted body %d", i+1) || len(m.Links) != 1 || m.LinkStatus == nil || !m.LinkStatus.Complete || m.Unsubscribe == nil || m.InReplyTo != "<thread@fixture.test>" {
+		if !m.Read || !m.Flagged || m.Mailbox != "Archive" || m.Content != fmt.Sprintf("full extracted body %d", i+1) || len(m.Links) != 1 || m.LinkStatus == nil || !m.LinkStatus.Complete || m.Unsubscribe == nil || m.InReplyTo != "<thread@fixture.test>" || strings.Join(m.ToRecipients, ",") != "recipient@fixture.test" || strings.Join(m.CcRecipients, ",") != "copy@fixture.test" || strings.Join(m.BccRecipients, ",") != "hidden@fixture.test" {
 			t.Fatalf("stale metadata/body: %+v", m)
 		}
 	}
