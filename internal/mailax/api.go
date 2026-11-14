@@ -15,8 +15,11 @@ type Driver interface {
 // an individual row with the exact subject from refreshed, complete AXRows
 // scans within a bounded lookup budget; the caller must separately compare
 // the selected message's Apple Event identity before accepting that row.
+// beforeStep must verify the owned Mail viewer's account/mailbox and hidden
+// preview. It runs before each discovery/dispatch step, including expansion
+// and scrolling; discovery alone never authorizes an action.
 type Session interface {
-	SelectNext(context.Context, string) (bool, error)
+	SelectNext(context.Context, string, func() error) (bool, error)
 	Guard() error
 	ValidateArchive() error
 	// Press returns true only after AXPress may have been dispatched. A failure

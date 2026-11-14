@@ -4,6 +4,7 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #include "native_darwin.h"
+#include <math.h>
 
 // Only public AX and NSRunningApplication APIs are used here. The bridge never
 // compiles AppleScript/JXA, loads Mail internals, or operates on another window.
@@ -15,6 +16,15 @@
 @property(strong) id selected;
 @property(strong) id archive;
 @property(copy) NSString *windowID;
+@property(strong) NSMutableArray *expanded;
+@property(strong) id scrollArea;
+@property(strong) id scrollBar;
+@property(strong) NSArray *beforeRows;
+@property double beforeValue;
+@property NSUInteger pages, expansions, pendingPolls, quietPolls;
+@property BOOL scrollStarted, pendingScroll, scrollFinished, pendingProgress;
+@property(copy) NSString *pendingAction;
+@property(strong) id pendingTarget;
 @end
 @implementation MailArchiveAXSession
 @end
@@ -152,12 +162,27 @@ static void RequireRowMembership(MailArchiveAXSession *s, id row) {
     for (id current in ArrayAttribute(s.table, kAXRowsAttribute, YES)) if (Same(current, row)) matches++;
     if (matches != 1) Fail(@"Owned Mail row is unavailable or ambiguous", 2);
 }
+static BOOL Conversation(MailArchiveAXSession *s, id row) {
+    if (Find(row,@"Mail.messageList.cell.view.disclosureButton",0) || ArrayAttribute(row,kAXDisclosedRowsAttribute,NO).count) return YES;
+    id disclosing=Attribute(row,kAXDisclosingAttribute,NO);
+    if (!disclosing) return NO;
+    if (![disclosing isEqual:@NO]) return YES;
+    // Some outlines expose AXDisclosing=false on a leaf. Accept that only
+    // when reciprocal disclosure metadata proves it is an individual child.
+    id parent=Attribute(row,kAXDisclosedByRowAttribute,NO);
+    if (!parent || ![Attribute(parent,kAXDisclosingAttribute,NO) isEqual:@YES]) return YES;
+    RequireRowMembership(s,parent);
+    NSUInteger matches = 0;
+    for (id child in ArrayAttribute(parent, kAXDisclosedRowsAttribute, NO)) if (Same(child,row)) matches++;
+    id level=Attribute(row,kAXDisclosureLevelAttribute,NO), parentLevel=Attribute(parent,kAXDisclosureLevelAttribute,NO);
+    return matches!=1 || ![level isKindOfClass:[NSNumber class]] || ![parentLevel isKindOfClass:[NSNumber class]] || [level integerValue]<=[parentLevel integerValue];
+}
 static void Guard(MailArchiveAXSession *s) {
     OwnedTable(s, NO);
     RequireRowMembership(s, s.selected);
     NSArray *selected = ArrayAttribute(s.table, kAXSelectedRowsAttribute, YES);
     if (selected.count != 1 || !Same(selected.firstObject, s.selected)) Fail(@"Mail message selection changed", 2);
-    if (Find(s.selected, @"Mail.messageList.cell.view.disclosureButton", 0)) Fail(@"Conversation archive is not allowed for an individual message", 2);
+    if (Conversation(s,s.selected)) Fail(@"Conversation archive is not allowed for an individual message", 2);
 }
 static void CollectToolbar(id element, NSUInteger depth, NSMutableArray *matches) {
     if (!element || depth > 8) return;
@@ -218,6 +243,242 @@ static NSArray *Candidates(id table) {
     return candidates;
 }
 
+// Navigation is confined to a verified parent/children chain from the exact
+// owned table to its window. Never infer ownership from role or focus alone.
+static BOOL ChildOnce(id parent, id child) {
+    NSUInteger count = 0;
+    for (id item in ArrayAttribute(parent,kAXChildrenAttribute,YES)) if (Same(item,child)) count++;
+    return count == 1;
+}
+static id OwnedScroll(MailArchiveAXSession *s) {
+    OwnedTable(s,NO);
+    id child = s.table, area = nil;
+    for (NSUInteger depth=0; depth<8; depth++) {
+        id parent = Attribute(child,kAXParentAttribute,NO);
+        if (!parent) return nil;
+        if (!ChildOnce(parent,child)) Fail(@"Owned Mail scroll ancestry changed",2);
+        if (!area && [Attribute(parent,kAXRoleAttribute,NO) isEqual:(__bridge NSString *)kAXScrollAreaRole]) area = parent;
+        if (Same(parent,s.window)) {
+            if (!area) return nil;
+            if (s.scrollArea && !Same(area,s.scrollArea)) Fail(@"Owned Mail scroll area changed",2);
+            id bar = Attribute(area,kAXVerticalScrollBarAttribute,NO);
+            if (!bar) return nil;
+            if (![Attribute(bar,kAXRoleAttribute,YES) isEqual:(__bridge NSString *)kAXScrollBarRole] ||
+                !Same(Attribute(bar,kAXParentAttribute,YES),area) || !ChildOnce(area,bar)) Fail(@"Owned Mail scroll bar provenance is invalid",2);
+            if (s.scrollBar && !Same(bar,s.scrollBar)) Fail(@"Owned Mail scroll bar changed",2);
+            s.scrollArea = area;
+            s.scrollBar = bar;
+            return bar;
+        }
+        child = parent;
+    }
+    Fail(@"Owned Mail scroll ancestry exceeded its bound",2); return nil;
+}
+static BOOL Settable(id element, CFStringRef key) {
+    Boolean settable = false;
+    return AXUIElementIsAttributeSettable(Element(element),key,&settable) == kAXErrorSuccess && settable;
+}
+static BOOL Supports(id element, CFStringRef action) {
+    CFArrayRef copied = NULL;
+    AXError status = AXUIElementCopyActionNames(Element(element),&copied);
+    NSArray *actions = CFBridgingRelease(copied);
+    return status == kAXErrorSuccess && [actions containsObject:(__bridge NSString *)action];
+}
+// Never blind-toggle a disclosure. A public press fallback is allowed only
+// with explicit collapsed state and a unique control proven inside this row.
+static id ExpansionControl(id row) {
+    NSMutableArray *controls = [NSMutableArray array];
+    CollectID(row, @"Mail.messageList.cell.view.disclosureButton", 0, controls);
+    if (controls.count != 1) return nil;
+    id control = controls.firstObject;
+    id state = Attribute(row, kAXDisclosingAttribute, NO);
+    id value = Attribute(control, kAXValueAttribute, NO);
+    if (!([state isEqual:@NO] || (!state && [value isEqual:@NO])) || [value isEqual:@YES]) return nil;
+    if (![Attribute(control, kAXEnabledAttribute, NO) isEqual:@YES] || !Supports(control, kAXPressAction)) return nil;
+    id child = control;
+    for (NSUInteger depth = 0; depth < 8; depth++) {
+        id parent = Attribute(child, kAXParentAttribute, NO);
+        if (!parent || !ChildOnce(parent, child)) return nil;
+        if (Same(parent, row)) return control;
+        child = parent;
+    }
+    return nil;
+}
+static BOOL CanExpand(id row) {
+    return ([Attribute(row, kAXDisclosingAttribute, NO) isEqual:@NO] && Settable(row, kAXDisclosingAttribute)) || ExpansionControl(row) != nil;
+}
+static void NavigationDeadline(void) {
+    if (NSProcessInfo.processInfo.systemUptime >= operationDeadline) Fail(@"Mail traversal timed out before action dispatch", 2);
+}
+static double ScrollNumber(id bar, CFStringRef key) {
+    id value = Attribute(bar,key,YES);
+    if (![value isKindOfClass:[NSNumber class]] || !isfinite([value doubleValue])) Fail(@"Owned Mail scroll position is invalid",2);
+    return [value doubleValue];
+}
+static void PageControls(id node, NSUInteger depth, NSMutableArray *matches) {
+    if (depth>3) return;
+    for (id child in ArrayAttribute(node,kAXChildrenAttribute,NO)) {
+        if (!Same(Attribute(child,kAXParentAttribute,YES),node)) Fail(@"Owned Mail page control ancestry changed",2);
+        if ([Attribute(child,kAXSubroleAttribute,NO) isEqual:(__bridge NSString *)kAXIncrementPageSubrole]) [matches addObject:child];
+        PageControls(child,depth+1,matches);
+    }
+}
+static BOOL SameRows(NSArray *left, NSArray *right) {
+    if (left.count != right.count) return NO;
+    for (NSUInteger i=0;i<left.count;i++) if (!Same(left[i],right[i])) return NO;
+    return YES;
+}
+// Discovery and dispatch are separate steps. The caller performs a fresh Mail
+// preview/account check between them, after potentially expensive row scanning.
+static BOOL DispatchNavigation(MailArchiveAXSession *s) {
+    NSString *action = s.pendingAction;
+    id target = s.pendingTarget;
+    s.pendingAction = nil;
+    s.pendingTarget = nil;
+    OwnedTable(s, NO);
+    if ([action isEqual:@"expand"] || [action isEqual:@"select"]) {
+        RequireRowMembership(s, target);
+        if ([action isEqual:@"expand"]) {
+            if (!Conversation(s, target) || !CanExpand(target)) return NO;
+            if ([Attribute(target, kAXDisclosingAttribute, NO) isEqual:@NO] && Settable(target, kAXDisclosingAttribute)) {
+                NavigationDeadline();
+                if (AXUIElementSetAttributeValue(Element(target), kAXDisclosingAttribute, kCFBooleanTrue) != kAXErrorSuccess) Fail(@"Could not expand owned Mail conversation", 2);
+            } else {
+                id control = ExpansionControl(target);
+                if (!control) Fail(@"Owned Mail disclosure control changed", 2);
+                NavigationDeadline();
+                if (AXUIElementPerformAction(Element(control), kAXPressAction) != kAXErrorSuccess) Fail(@"Could not expand owned Mail conversation", 2);
+            }
+            [s.expanded addObject:target];
+            s.expansions++;
+            s.quietPolls = 0;
+            return NO;
+        }
+        if (Conversation(s, target)) Fail(@"Mail candidate became a conversation", 2);
+        NavigationDeadline();
+        if (AXUIElementSetAttributeValue(Element(s.table), kAXSelectedRowsAttribute, (__bridge CFTypeRef)@[target]) != kAXErrorSuccess) Fail(@"Could not select exact Mail row", 2);
+        [s.tried addObject:target];
+        s.selected = target;
+        return YES;
+    }
+    id bar = OwnedScroll(s);
+    if (!bar || ScrollNumber(bar, kAXValueAttribute) != s.beforeValue) return NO;
+    if ([action isEqual:@"reset"]) {
+        if (!Same(target, bar) || !Settable(bar, kAXValueAttribute)) Fail(@"Owned Mail scroll bar changed", 2);
+        double minimum = ScrollNumber(bar, kAXMinValueAttribute);
+        NavigationDeadline();
+        if (AXUIElementSetAttributeValue(Element(bar), kAXValueAttribute, (__bridge CFTypeRef)@(minimum)) != kAXErrorSuccess) Fail(@"Could not reset owned Mail scroll position", 2);
+    } else {
+        CFStringRef press = kAXPressAction;
+        if (Same(target, bar)) press = kAXIncrementAction;
+        else {
+            NSMutableArray *controls = [NSMutableArray array];
+            PageControls(bar, 0, controls);
+            if (controls.count != 1 || !Same(controls.firstObject, target)) Fail(@"Owned Mail page control changed", 2);
+        }
+        if (![Attribute(target, kAXEnabledAttribute, YES) isEqual:@YES] || !Supports(target, press)) Fail(@"Owned Mail page control is unavailable", 2);
+        NavigationDeadline();
+        if (AXUIElementPerformAction(Element(target), press) != kAXErrorSuccess) Fail(@"Could not advance owned Mail message list", 2);
+        OwnedScroll(s);
+        if (!Same(target, bar)) {
+            NSMutableArray *controls = [NSMutableArray array];
+            PageControls(bar, 0, controls);
+            if (controls.count != 1 || !Same(controls.firstObject, target)) Fail(@"Owned Mail page control changed", 2);
+        }
+    }
+    s.scrollStarted = YES;
+    s.pages++;
+    s.pendingScroll = YES;
+    s.pendingProgress = NO;
+    s.pendingPolls = 0;
+    s.quietPolls = 0;
+    return NO;
+}
+static void QueueNavigation(MailArchiveAXSession *s, NSString *action, id target) {
+    s.pendingAction = action;
+    s.pendingTarget = target;
+}
+static BOOL SelectStep(MailArchiveAXSession *s, NSString *subject) {
+    if (s.pendingAction) return DispatchNavigation(s);
+    OwnedTable(s, NO);
+    NSArray *rows = ArrayAttribute(s.table, kAXRowsAttribute, YES);
+    if (rows.count > 10000 || s.tried.count > 10000) Fail(@"Owned Mail row traversal limit reached", 2);
+    if (s.pendingScroll) {
+        id bar = OwnedScroll(s);
+        if (!bar) Fail(@"Owned Mail scroll bar disappeared", 2);
+        double value = ScrollNumber(bar, kAXValueAttribute);
+        if (value != s.beforeValue || !SameRows(rows, s.beforeRows)) {
+            s.pendingProgress = YES;
+            s.beforeValue = value;
+            s.beforeRows = rows;
+            s.pendingPolls = 0;
+            return NO;
+        }
+        if (++s.pendingPolls < 6) return NO;
+        s.pendingScroll = NO;
+        if (s.pendingProgress) {
+            // Virtualized AX row objects may now represent different messages.
+            [s.tried removeAllObjects];
+            [s.expanded removeAllObjects];
+        } else {
+            s.scrollFinished = YES;
+        }
+    }
+    for (id row in Candidates(s.table)) {
+        if (Conversation(s, row)) {
+            if (CanExpand(row)) {
+                BOOL tried = NO;
+                for (id previous in s.expanded) if (Same(previous, row)) { tried = YES; break; }
+                if (!tried) {
+                    if (s.expansions >= 128) Fail(@"Owned Mail conversation expansion limit reached", 2);
+                    QueueNavigation(s, @"expand", row);
+                    return NO;
+                }
+            }
+            continue; // A parent is never an individual archive candidate.
+        }
+        BOOL tried = NO;
+        for (id previous in s.tried) if (Same(previous, row)) { tried = YES; break; }
+        if (tried) continue;
+        id label = Find(row, @"Mail.messageList.cell.view.subjectLabel", 0);
+        if (!label || ![Attribute(label, kAXValueAttribute, YES) isEqual:subject]) continue;
+        QueueNavigation(s, @"select", row);
+        return NO;
+    }
+    // Wait for asynchronously disclosed children before leaving the viewport.
+    if (++s.quietPolls < 6 || s.scrollFinished) return NO;
+    id bar = OwnedScroll(s);
+    if (!bar) { s.scrollFinished = YES; return NO; }
+    double value = ScrollNumber(bar, kAXValueAttribute);
+    double minimum = ScrollNumber(bar, kAXMinValueAttribute);
+    double maximum = ScrollNumber(bar, kAXMaxValueAttribute);
+    if (minimum >= maximum || value < minimum || value > maximum) Fail(@"Owned Mail scroll range is invalid", 2);
+    if (s.pages >= 64) Fail(@"Owned Mail scroll page limit reached", 2);
+    s.beforeRows = rows;
+    s.beforeValue = value;
+    if (!s.scrollStarted && value > minimum) {
+        if (!Settable(bar, kAXValueAttribute)) { s.scrollFinished = YES; return NO; }
+        QueueNavigation(s, @"reset", bar);
+        return NO;
+    }
+    s.scrollStarted = YES;
+    if (value >= maximum) { s.scrollFinished = YES; return NO; }
+    NSMutableArray *controls = [NSMutableArray array];
+    PageControls(bar, 0, controls);
+    if (controls.count > 1) Fail(@"Owned Mail page control is ambiguous", 2);
+    id control = controls.firstObject;
+    CFStringRef action = kAXPressAction;
+    if (!control && Supports(bar, kAXIncrementAction)) { control = bar; action = kAXIncrementAction; }
+    if (!control || ![Attribute(control, kAXEnabledAttribute, YES) isEqual:@YES] || !Supports(control, action)) {
+        s.scrollFinished = YES;
+        return NO;
+    }
+    // Page/line increments preserve contiguous viewport progression. Arbitrary
+    // scrollbar fractions could skip rows and are never used for forward travel.
+    QueueNavigation(s, @"page", control);
+    return NO;
+}
+
 char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
     @autoreleasepool {
         *attempted = 0;
@@ -250,6 +511,7 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                     s.window = OwnedWindow(s, YES);
                     s.table = OwnedTable(s, YES);
                     s.tried = [NSMutableArray array];
+                    s.expanded = [NSMutableArray array];
                     *handle = (uintptr_t)CFBridgingRetain(s);
                     reply = @{};
                 } else {
@@ -257,27 +519,8 @@ char *mail_ax_call(const char *input, uintptr_t *handle, int *attempted) {
                     if ([op isEqual:@"guard"]) { Guard(s); reply = @{}; }
                     else if ([op isEqual:@"archive"]) { Guard(s); s.archive = ArchiveControl(s); reply = @{}; }
                     else if ([op isEqual:@"select"]) {
-                        OwnedTable(s, NO);
-                        NSString *subject = request[@"subject"];
-                        BOOL found = NO;
-                        // Refresh AXRows on every scan: Mail can populate or replace rows
-                        // after the owned table first appears. Only selected candidates
-                        // are remembered; other rows may acquire labels on a later scan.
-                        for (id row in Candidates(s.table)) {
-                            BOOL tried = NO;
-                            for (id previous in s.tried) if (Same(previous,row)) { tried = YES; break; }
-                            if (tried) continue;
-                            id label = Find(row, @"Mail.messageList.cell.view.subjectLabel", 0);
-                            if (!label || ![Attribute(label, kAXValueAttribute, YES) isEqual:subject]) continue;
-                            if (Find(row, @"Mail.messageList.cell.view.disclosureButton", 0)) continue;
-                            OwnedTable(s, NO);
-                            RequireRowMembership(s, row);
-                            AXError status = AXUIElementSetAttributeValue(Element(s.table), kAXSelectedRowsAttribute, (__bridge CFTypeRef)@[row]);
-                            if (status != kAXErrorSuccess) Fail(@"Could not select exact Mail row", 2);
-                            [s.tried addObject:row];
-                            s.selected = row; found = YES; break;
-                        }
-                        reply = @{@"value":@(found)};
+                        BOOL found=SelectStep(s,request[@"subject"]);
+                        reply = @{@"value":@(found),@"exhausted":@(s.scrollFinished && !found)};
                     } else if ([op isEqual:@"press"]) {
                         Guard(s);
                         id archive = ArchiveControl(s);

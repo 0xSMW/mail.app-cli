@@ -2,6 +2,7 @@ package mailax
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -38,4 +39,28 @@ func pollOwnedRows(ctx context.Context, deadline time.Time, interval time.Durati
 		case <-timer.C:
 		}
 	}
+}
+
+var errTraversalExhausted = errors.New("owned Mail traversal exhausted")
+
+// The Mail scope check can itself wait on Apple Events. Recompute the budget
+// afterwards so expiry/cancellation cannot authorize a subsequent AX mutation.
+func scanAfterGuard(ctx context.Context, deadline time.Time, before func() error, scan func(time.Duration) (bool, error)) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := before(); err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	remaining := time.Until(deadline)
+	if end, ok := ctx.Deadline(); ok {
+		remaining = min(remaining, time.Until(end))
+	}
+	if remaining <= 0 {
+		return false, errTraversalExhausted
+	}
+	return scan(remaining)
 }

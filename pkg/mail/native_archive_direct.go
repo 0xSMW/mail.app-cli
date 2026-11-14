@@ -280,7 +280,10 @@ func (n *nativeMail) archiveInboxDirect(accountName, messageID string, apply boo
 		if preview.Kind != "bool" || preview.Boolean {
 			return fmt.Errorf("Mail preview became visible or could not be verified")
 		}
-		found, e := session.SelectNext(n.ctx, expected.Subject)
+		found, e := session.SelectNext(n.ctx, expected.Subject, func() error {
+			_, err := n.archiveSelection(viewer, accountID.Text, expected)
+			return err
+		})
 		if e != nil {
 			return e
 		}

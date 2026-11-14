@@ -9,11 +9,13 @@ import (
 
 type readinessSession struct{ released int }
 
-func (*readinessSession) SelectNext(context.Context, string) (bool, error) { return false, nil }
-func (*readinessSession) Guard() error                                     { return nil }
-func (*readinessSession) ValidateArchive() error                           { return nil }
-func (*readinessSession) Press() (bool, error)                             { return false, nil }
-func (s *readinessSession) Release()                                       { s.released++ }
+func (*readinessSession) SelectNext(context.Context, string, func() error) (bool, error) {
+	return false, nil
+}
+func (*readinessSession) Guard() error           { return nil }
+func (*readinessSession) ValidateArchive() error { return nil }
+func (*readinessSession) Press() (bool, error)   { return false, nil }
+func (s *readinessSession) Release()             { s.released++ }
 
 func TestOwnedViewerReadinessRetriesOnlyUnavailableTree(t *testing.T) {
 	waiting, ready := &readinessSession{}, &readinessSession{}

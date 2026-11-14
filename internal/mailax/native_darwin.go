@@ -13,6 +13,7 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -29,6 +30,7 @@ type axReply struct {
 	Code       int             `json:"code"`
 	Error      string          `json:"error"`
 	Value      bool            `json:"value"`
+	Exhausted  bool            `json:"exhausted"`
 	Diagnostic json.RawMessage `json:"diagnostic"`
 }
 
@@ -92,19 +94,29 @@ func (nativeDriver) Prepare(ctx context.Context, viewerID int64) (Session, error
 	return prepareOwnedViewer(ctx, func(remaining time.Duration) (Session, bool, error) {
 		session := &nativeSession{}
 		reply, _, err := call(map[string]any{"op": "prepare", "viewer": viewerID, "budgetMs": max(int64(1), remaining.Milliseconds())}, session)
-		session.lookupDeadline = time.Now().Add(5 * time.Second)
+		session.lookupDeadline = time.Now().Add(15 * time.Second)
 		return session, reply.Code == 1, err
 	}, time.Now().Add(3*time.Second), 50*time.Millisecond)
 }
 
-func (s *nativeSession) SelectNext(ctx context.Context, subject string) (bool, error) {
+func (s *nativeSession) SelectNext(ctx context.Context, subject string, beforeStep func() error) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	return pollOwnedRows(ctx, s.lookupDeadline, 50*time.Millisecond, func(remaining time.Duration) (bool, error) {
-		r, _, err := call(map[string]any{"op": "select", "subject": subject, "budgetMs": max(int64(1), remaining.Milliseconds())}, s)
-		return r.Value, err
+	exhausted := errTraversalExhausted
+	found, err := pollOwnedRows(ctx, s.lookupDeadline, 50*time.Millisecond, func(remaining time.Duration) (bool, error) {
+		return scanAfterGuard(ctx, s.lookupDeadline, beforeStep, func(remaining time.Duration) (bool, error) {
+			r, _, err := call(map[string]any{"op": "select", "subject": subject, "budgetMs": max(int64(1), remaining.Milliseconds())}, s)
+			if err == nil && r.Exhausted {
+				return false, exhausted
+			}
+			return r.Value, err
+		})
 	})
+	if errors.Is(err, exhausted) {
+		return false, nil
+	}
+	return found, err
 }
 func (s *nativeSession) Guard() error {
 	_, _, err := call(map[string]any{"op": "guard"}, s)

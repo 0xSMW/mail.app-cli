@@ -613,8 +613,12 @@ System Settings. The command briefly opens a separate Mail window in the
 background with its preview hidden, selects and checks the individual message,
 then closes that window. It does not activate Mail or restore another app's
 focus afterward. If it cannot establish the exact owned window, selection, and
-Archive button, the command stops before archiving. Conversation rows that cannot be selected
-as an individual message require archiving in Mail directly. An uncertain
+Archive button, the command stops before archiving. It expands conversations and
+scrolls the owned message list within fixed time and traversal limits to find
+the individual message. Conversation headers remain ineligible for Archive;
+each selected child must pass the same exact message-identity checks. If Mail
+does not expose the controls needed to reach that child safely, the command
+stops. An uncertain
 Archive response stops the batch; reconcile its receipt before taking further
 action. All mailbox changes continue to go through Mail.
 

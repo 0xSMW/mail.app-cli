@@ -48,3 +48,32 @@ func TestOwnedRowsLookupBudgetAndFailures(t *testing.T) {
 		}
 	})
 }
+
+func TestNavigationGuardCannotAuthorizeExpiredOrChangedScope(t *testing.T) {
+	for _, name := range []string{"expired", "cancelled", "preview", "account"} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			deadline := time.Now().Add(time.Second)
+			if name == "expired" {
+				deadline = time.Now().Add(2 * time.Millisecond)
+			}
+			calls := 0
+			_, err := scanAfterGuard(ctx, deadline, func() error {
+				if name == "expired" {
+					time.Sleep(5 * time.Millisecond)
+				}
+				if name == "cancelled" {
+					cancel()
+				}
+				if name == "preview" || name == "account" {
+					return errors.New("Mail scope changed")
+				}
+				return nil
+			}, func(time.Duration) (bool, error) { calls++; return true, nil })
+			if err == nil || calls != 0 {
+				t.Fatalf("error=%v AX dispatches=%d", err, calls)
+			}
+		})
+	}
+}

@@ -169,6 +169,7 @@ ObjC.import('ApplicationServices');
 ObjC.bindFunction('AXUIElementCreateApplication', ['id', ['int']]);
 ObjC.bindFunction('AXUIElementCopyAttributeValue', ['int', ['id', 'id', 'id*']]);
 ObjC.bindFunction('AXUIElementSetAttributeValue', ['int', ['id', 'id', 'id']]);
+ObjC.bindFunction('AXUIElementIsAttributeSettable', ['int', ['id', 'id', 'bool*']]);
 ObjC.bindFunction('AXUIElementPerformAction', ['int', ['id', 'id']]);
 ObjC.bindFunction('AXUIElementCopyActionNames', ['int', ['id', 'id*']]);
 ObjC.bindFunction('CFEqual', ['bool', ['id', 'id']]);
@@ -263,14 +264,147 @@ function selectionMatches() {
 }
 // Refresh the complete exposed row collection until the session budget expires.
 // Selected rows are hints only, never a restriction to the visible first page.
-const lookupDeadline = Date.now() + 5000;
-const triedRows = [];
-let selectedRow = null;
-while (!selectedRow && Date.now() < lookupDeadline) {
+const lookupDeadline = Date.now() + 15000;
+const expandedRows = [];
+let expansions = 0, pages = 0, quietPolls = 0, scrollStarted = false, scrollFinished = false;
+let scrollArea = null, scrollBar = null, pendingScroll = null;
+function falseState(value) { return value === false || value === 0; }
+function trueState(value) { return value === true || value === 1; }
+function conversation(row) {
+    if (findAX(row,'Mail.messageList.cell.view.disclosureButton',0) || (optionalAX(row,'AXDisclosedRows') || []).length > 0) return true;
+    const disclosing = optionalAX(row,'AXDisclosing');
+    if (disclosing === null) return false;
+    if (!falseState(disclosing)) return true;
+    const parent = optionalAX(row,'AXDisclosedByRow');
+    if (!parent || !trueState(optionalAX(parent,'AXDisclosing'))) return true;
+    if (ax(table,'AXRows').filter(current => $.CFEqual(current,parent)).length!==1) throw Error('Owned Mail disclosure parent changed');
+    const level=optionalAX(row,'AXDisclosureLevel'), parentLevel=optionalAX(parent,'AXDisclosureLevel');
+    return (optionalAX(parent,'AXDisclosedRows') || []).filter(child => $.CFEqual(child,row)).length!==1 || typeof level!=='number' || typeof parentLevel!=='number' || level<=parentLevel;
+}
+function ownedTable() {
     const windows = ax(root,'AXWindows').filter(w => optionalAX(w,'AXIdentifier') === windowID);
     const tables = matchingAX(win,'Mail.messageList',0,[]);
     if (windows.length !== 1 || !$.CFEqual(windows[0],win) || tables.length !== 1 || !$.CFEqual(tables[0],table)) throw Error('Owned Mail message list changed');
+}
+function childOnce(parent,child) { return ax(parent,'AXChildren').filter(item => $.CFEqual(item,child)).length === 1; }
+function ownedScroll() {
+    ownedTable();
+    let child = table, area = null;
+    for (let depth = 0; depth < 8; depth++) {
+        const parent = optionalAX(child,'AXParent');
+        if (!parent) return null;
+        if (!childOnce(parent,child)) throw Error('Owned Mail scroll ancestry changed');
+        if (!area && optionalAX(parent,'AXRole') === 'AXScrollArea') area = parent;
+        if ($.CFEqual(parent,win)) {
+            if (!area) return null;
+            if (scrollArea && !$.CFEqual(scrollArea,area)) throw Error('Owned Mail scroll area changed');
+            const bar = optionalAX(area,'AXVerticalScrollBar');
+            if (!bar) return null;
+            if (ax(bar,'AXRole') !== 'AXScrollBar' || !$.CFEqual(ax(bar,'AXParent'),area) || !childOnce(area,bar)) throw Error('Owned Mail scroll bar provenance is invalid');
+            if (scrollBar && !$.CFEqual(scrollBar,bar)) throw Error('Owned Mail scroll bar changed');
+            scrollArea = area;
+            scrollBar = bar;
+            return bar;
+        }
+        child = parent;
+    }
+    throw Error('Owned Mail scroll ancestry exceeded its bound');
+}
+function settable(element,key) { const value = Ref();return $.AXUIElementIsAttributeSettable(element,$(key),value) === 0 && !!value[0]; }
+function supports(element,action) { const value = Ref();return $.AXUIElementCopyActionNames(element,value) === 0 && ObjC.deepUnwrap(value[0]).includes(action); }
+function expansionControl(row) {
+    const controls = matchingAX(row,'Mail.messageList.cell.view.disclosureButton',0,[]);
+    if (controls.length !== 1) return null;
+    const control = controls[0], state = optionalAX(row,'AXDisclosing'), value = optionalAX(control,'AXValue');
+    if (!(falseState(state) || (state === null && falseState(value))) || trueState(value)) return null;
+    if (!trueState(optionalAX(control,'AXEnabled')) || !supports(control,'AXPress')) return null;
+    let child = control;
+    for (let depth = 0; depth < 8; depth++) {
+        const parent = optionalAX(child,'AXParent');
+        if (!parent || !childOnce(parent,child)) return null;
+        if ($.CFEqual(parent,row)) return control;
+        child = parent;
+    }
+    return null;
+}
+function canExpand(row) { return (falseState(optionalAX(row,'AXDisclosing')) && settable(row,'AXDisclosing')) || !!expansionControl(row); }
+function navigationDeadline() { if (Date.now() >= lookupDeadline) throw Error('Mail traversal timed out before action dispatch'); }
+function scrollNumber(bar,key) { const value=ax(bar,key);if (typeof value !== 'number' || !Number.isFinite(value)) throw Error('Owned Mail scroll position is invalid');return value; }
+function pageControls(node,depth,matches) {
+    if (depth > 3) return;
+    for (const child of optionalAX(node,'AXChildren') || []) {
+        if (!$.CFEqual(ax(child,'AXParent'),node)) throw Error('Owned Mail page control ancestry changed');
+        if (optionalAX(child,'AXSubrole') === 'AXIncrementPage') matches.push(child);
+        pageControls(child,depth+1,matches);
+    }
+}
+function sameRows(left,right) { return left.length === right.length && left.every((row,index) => $.CFEqual(row,right[index])); }
+function advance(rows) {
+    if (++quietPolls < 6 || scrollFinished) return;
+    const bar=ownedScroll();
+    if (!bar) {scrollFinished=true;return;}
+    const value=scrollNumber(bar,'AXValue'), minimum=scrollNumber(bar,'AXMinValue'), maximum=scrollNumber(bar,'AXMaxValue');
+    if (minimum >= maximum || value < minimum || value > maximum) throw Error('Owned Mail scroll range is invalid');
+    if (pages >= 64) throw Error('Owned Mail scroll page limit reached');
+    if (!scrollStarted && value > minimum) {
+        if (!settable(bar,'AXValue')) {scrollFinished=true;return;}
+        selectionMatches();
+        ownedScroll();
+        navigationDeadline();
+        if ($.AXUIElementSetAttributeValue(bar,$('AXValue'),$(minimum)) !== 0) throw Error('Could not reset owned Mail scroll position');
+    } else {
+        scrollStarted=true;
+        if (value >= maximum) {scrollFinished=true;return;}
+        const controls=[];pageControls(bar,0,controls);
+        if (controls.length > 1) throw Error('Owned Mail page control is ambiguous');
+        let control=controls[0], action='AXPress';
+        if (!control && supports(bar,'AXIncrement')) {control=bar;action='AXIncrement';}
+        if (!control || ax(control,'AXEnabled') !== true || !supports(control,action)) {scrollFinished=true;return;}
+        selectionMatches();
+        ownedScroll();
+        navigationDeadline();
+        if ($.AXUIElementPerformAction(control,$(action)) !== 0) throw Error('Could not advance owned Mail message list');
+        ownedScroll();
+        if (!$.CFEqual(control,bar)) {
+            const current = [];
+            pageControls(bar,0,current);
+            if (current.length !== 1 || !$.CFEqual(current[0],control)) throw Error('Owned Mail page control changed');
+        }
+    }
+    scrollStarted = true;
+    pages++;
+    quietPolls = 0;
+    pendingScroll = {rows,value,polls:0,progress:false};
+}
+const triedRows = [];
+let selectedRow = null;
+while (!selectedRow && Date.now() < lookupDeadline) {
+    ownedTable();
     const rows = ax(table,'AXRows');
+    if (rows.length > 10000 || triedRows.length > 10000) throw Error('Owned Mail row traversal limit reached');
+    if (pendingScroll) {
+        const bar = ownedScroll();
+        if (!bar) throw Error('Owned Mail scroll bar disappeared');
+        const value=scrollNumber(bar,'AXValue');
+        if (value !== pendingScroll.value || !sameRows(rows,pendingScroll.rows)) {
+            pendingScroll.progress = true;
+            pendingScroll.value = value;
+            pendingScroll.rows = rows;
+            pendingScroll.polls = 0;
+            delay(0.05);
+            continue;
+        }
+        if (++pendingScroll.polls < 6) {delay(0.05);continue;}
+        if (pendingScroll.progress) {
+            // AX objects may have been recycled for a different viewport.
+            triedRows.length = 0;
+            expandedRows.length = 0;
+        } else {
+            scrollFinished = true;
+        }
+        pendingScroll = null;
+    }
+    let expanded=false;
     const hints = ax(table,'AXSelectedRows');
     const candidates = [], seen = new Set();
     function add(index) { if (index >= 0 && index < rows.length && !seen.has(index)) {seen.add(index);candidates.push(index);} }
@@ -279,12 +413,37 @@ while (!selectedRow && Date.now() < lookupDeadline) {
     for (const index of candidates) {
         if (Date.now() >= lookupDeadline) break;
         const row = rows[index];
+        if (conversation(row)) {
+            if (canExpand(row) && !expandedRows.some(previous => $.CFEqual(previous,row))) {
+                if (expansions >= 128) throw Error('Owned Mail conversation expansion limit reached');
+                selectionMatches();
+                ownedTable();
+                if (ax(table,'AXRows').filter(current => $.CFEqual(current,row)).length !== 1) throw Error('Owned Mail row is unavailable or ambiguous');
+                if (falseState(optionalAX(row,'AXDisclosing')) && settable(row,'AXDisclosing')) {
+                    navigationDeadline();
+                    if ($.AXUIElementSetAttributeValue(row,$('AXDisclosing'),$(true)) !== 0) throw Error('Could not expand owned Mail conversation');
+                } else {
+                    const control = expansionControl(row);
+                    if (!control) throw Error('Owned Mail disclosure control changed');
+                    navigationDeadline();
+                    if ($.AXUIElementPerformAction(control,$('AXPress')) !== 0) throw Error('Could not expand owned Mail conversation');
+                }
+                expandedRows.push(row);
+                expansions++;
+                quietPolls = 0;
+                expanded = true;
+                break;
+            }
+            continue;
+        }
         if (triedRows.some(previous => $.CFEqual(previous,row))) continue;
         const label = findAX(row,'Mail.messageList.cell.view.subjectLabel',0);
         if (!label || ax(label,'AXValue') !== expectedSubject) continue;
-        if (findAX(row,'Mail.messageList.cell.view.disclosureButton',0)) continue;
-        if (viewer.previewPaneIsVisible()) throw Error('Mail preview became visible');
+        selectionMatches();
+        ownedTable();
+        if (conversation(row)) throw Error('Mail candidate became a conversation');
         if (ax(table,'AXRows').filter(current => $.CFEqual(current,row)).length !== 1) continue;
+        navigationDeadline();
         if ($.AXUIElementSetAttributeValue(table,$('AXSelectedRows'),$([row])) !== 0) throw Error('Could not select exact Mail row');
         triedRows.push(row);
         const settleDeadline = Math.min(lookupDeadline,Date.now() + 500);
@@ -300,6 +459,8 @@ while (!selectedRow && Date.now() < lookupDeadline) {
         } while (Date.now() < settleDeadline);
         if (selectedRow) break;
     }
+    if (!selectedRow && !expanded) advance(rows);
+    if (!selectedRow && scrollFinished) break;
     if (!selectedRow && Date.now() < lookupDeadline) delay(0.05);
 }
 if (!selectedRow) throw Error('Could not safely select the exact individual message in Mail within the lookup budget; archive it in Mail directly');
@@ -312,7 +473,7 @@ function guard() {
     if (currentRows.filter(row => $.CFEqual(row,selectedRow)).length !== 1) throw Error('Owned Mail row changed');
     const selected = ax(table,'AXSelectedRows');
     if (selected.length !== 1 || !$.CFEqual(selected[0],selectedRow) || !selectionMatches()) throw Error('Mail message selection changed');
-    if (findAX(selectedRow,'Mail.messageList.cell.view.disclosureButton',0)) throw Error('Conversation archive is not allowed for an individual message');
+    if (conversation(selectedRow)) throw Error('Conversation archive is not allowed for an individual message');
 }
 guard();
 let archiveTitle = null;

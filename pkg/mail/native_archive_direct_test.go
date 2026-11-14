@@ -45,8 +45,11 @@ type directArchiveDriver struct{ *directArchiveAX }
 func (a directArchiveDriver) Prepare(ctx context.Context, id int64) (mailax.Session, error) {
 	return a.sessionPrepare(ctx, id)
 }
-func (s *directArchiveSession) SelectNext(ctx context.Context, subject string) (bool, error) {
+func (s *directArchiveSession) SelectNext(ctx context.Context, subject string, beforeStep func() error) (bool, error) {
 	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := beforeStep(); err != nil {
 		return false, err
 	}
 	s.ax.selections++

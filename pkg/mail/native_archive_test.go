@@ -148,6 +148,10 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 		presses   int
 		wantError bool
 	}{
+		{"expand-child", 1, false}, {"button-expansion", 1, false}, {"button-expansion-numeric", 1, false}, {"button-expansion-unknown", 0, true}, {"expand-duplicate-subject", 1, false}, {"expand-leaf-metadata", 1, false},
+		{"offscreen-target", 1, false}, {"reset-top", 1, false}, {"async-scroll", 1, false}, {"recycled-row", 1, false}, {"recycled-delayed", 1, false},
+		{"expand-wrong-child", 0, true}, {"expanded-parent", 0, true}, {"no-progress-scroll", 0, true},
+		{"moved-expansion", 0, true}, {"moved-scroll", 0, true}, {"preview-expansion", 0, true}, {"account-expansion", 0, true}, {"preview-scroll", 0, true}, {"account-scroll", 0, true},
 		{"beyond-first-page", 1, false}, {"replaced-rows", 1, false}, {"delayed-selection", 1, false}, {"transient-selection", 1, false},
 		{"non-gmail", 0, true}, {"gmail-lookalike", 0, true}, {"googlemail", 1, false}, {"apply", 1, false}, {"prepare", 0, false}, {"wrong-id", 0, true}, {"source", 0, true}, {"conversation", 0, true}, {"background-editor", 1, false}, {"background-other-mail-window", 1, false}, {"disabled-menu", 1, false}, {"preview", 0, true}, {"late-selection", 0, true}, {"press-error", 1, true},
 		{"existing-viewer-id", 0, true}, {"created-viewer-missing", 0, true}, {"created-viewer-ambiguous", 0, true},
@@ -167,13 +171,13 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 				t.Fatalf("mock execution: %v: %s", err, out)
 			}
 			var got struct {
-				Presses                             int
-				AXSelections, RowReads, Elapsed     int
-				Output, Error                       string
-				Events                              []phaseEvent
-				ActivationCalls, FocusReads         int
-				TableChildReads, SidebarChildReads  int
-				UnusedViewerPresent, FocusPreserved bool
+				Presses                                                  int
+				AXSelections, RowReads, Elapsed, Expansions, PagePresses int
+				Output, Error                                            string
+				Events                                                   []phaseEvent
+				ActivationCalls, FocusReads                              int
+				TableChildReads, SidebarChildReads                       int
+				UnusedViewerPresent, FocusPreserved                      bool
 			}
 			if err := json.Unmarshal(out, &got); err != nil {
 				t.Fatalf("decode mock: %v: %s", err, out)
@@ -186,6 +190,15 @@ func TestNativeArchiveScriptGuardsAndPress(t *testing.T) {
 			}
 			if tt.scenario == "replaced-rows" && got.RowReads < 3 {
 				t.Fatalf("row collection was not refreshed: %s", out)
+			}
+			if tt.scenario == "no-progress-scroll" && got.PagePresses != 1 {
+				t.Fatalf("no-progress page replay: %s", out)
+			}
+			if tt.scenario == "expanded-parent" && got.Expansions != 1 {
+				t.Fatalf("parent expansion replay: %s", out)
+			}
+			if (tt.scenario == "recycled-row" || tt.scenario == "recycled-delayed") && (got.AXSelections != 2 || got.PagePresses != 1) {
+				t.Fatalf("recycled row skipped: %s", out)
 			}
 			if got.TableChildReads != 0 || got.SidebarChildReads != 0 {
 				t.Fatalf("unbounded discovery = %s", out)
