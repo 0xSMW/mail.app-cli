@@ -24,6 +24,12 @@ func checkpointRefs(ids ...string) []MessageRef {
 	return out
 }
 
+// Unit fixtures model a complete unchanged scoped local file. Integration
+// tests below use the production SQLite, live metadata, and EMLX boundaries.
+func readSelectedCheckpointFixture(refs []MessageRef, opts SelectedReadOptions, mailBody, alternatives bool, metadata func(MessageRef) (*Message, error), read func(MessageRef, int) (*Message, *PhaseTrace, error)) (SelectedReadResult, error) {
+	return readSelectedWithCheckpoint(refs, opts, mailBody, alternatives, metadata, read, selectedReadHooks{Revision: func(MessageRef, *StableIdentity) (string, error) { return strings.Repeat("a", 64), nil }})
+}
+
 func TestReadCheckpointRetriesOnlyFailedReadsAndRefreshesMetadata(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "read.json")
 	refs := checkpointRefs("1", "2", "3")
@@ -44,7 +50,7 @@ func TestReadCheckpointRetriesOnlyFailedReadsAndRefreshesMetadata(t *testing.T) 
 		m.ToRecipients, m.CcRecipients, m.BccRecipients = nil, nil, nil
 		return m, nil
 	}
-	first, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
+	first, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
 	if err != nil || first.Complete || calls["2"] != 1 || len(first.Items) != 3 {
 		t.Fatalf("first=%+v calls=%v err=%v", first, calls, err)
 	}
@@ -55,7 +61,7 @@ func TestReadCheckpointRetriesOnlyFailedReadsAndRefreshesMetadata(t *testing.T) 
 	refs[0].MailboxName = "Archive"
 	refs[2].MailboxName = "Archive"
 	var events bytes.Buffer
-	next, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path, Events: &events}, false, false, metadata, read)
+	next, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path, Events: &events}, false, false, metadata, read)
 	if err != nil || !next.Complete || calls["1"] != 1 || calls["2"] != 2 || calls["3"] != 1 {
 		t.Fatalf("next=%+v calls=%v err=%v", next, calls, err)
 	}
@@ -95,7 +101,7 @@ func TestReadCheckpointDurablyRetainsBodyAcrossInterruptedInvocation(t *testing.
 		return checkpointMessage(ref.MessageID), nil, nil
 	}
 	metadata := func(ref MessageRef) (*Message, error) { return checkpointMessage(ref.MessageID), nil }
-	result, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path, Events: &interruptedReadEvents{}}, false, false, metadata, read)
+	result, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path, Events: &interruptedReadEvents{}}, false, false, metadata, read)
 	if err == nil || result.Complete || calls["1"] != 1 || calls["2"] != 0 {
 		t.Fatalf("interruption result=%+v calls=%v err=%v", result, calls, err)
 	}
@@ -103,7 +109,7 @@ func TestReadCheckpointDurablyRetainsBodyAcrossInterruptedInvocation(t *testing.
 	if err != nil || state.Result.Complete || len(state.Result.Items) != 1 {
 		t.Fatalf("durable state=%+v err=%v", state, err)
 	}
-	result, err = readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
+	result, err = readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
 	if err != nil || !result.Complete || calls["1"] != 1 || calls["2"] != 1 {
 		t.Fatalf("resume=%+v calls=%v err=%v", result, calls, err)
 	}
@@ -135,14 +141,14 @@ func TestReadCheckpointRejectsStaleIdentityAndMissingRegeneratedID(t *testing.T)
 				}
 				return m, nil
 			}
-			if _, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
+			if _, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
 				t.Fatal(err)
 			}
-			result, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
+			result, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
 			if err != nil || result.Complete || calls != 1 || result.Items[0].Message != nil || !strings.Contains(result.Items[0].Error, "stale read checkpoint") {
 				t.Fatalf("result=%+v calls=%d err=%v", result, calls, err)
 			}
-			third, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
+			third, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
 			if err != nil || third.Complete || calls != 1 || third.Items[0].Message != nil || !strings.Contains(third.Items[0].Error, "stale read checkpoint") {
 				t.Fatalf("third invocation extracted recycled ID: result=%+v calls=%d err=%v", third, calls, err)
 			}
@@ -163,7 +169,7 @@ func TestReadCheckpointRefusesMalformedInsecureOrDifferentRequestBeforeReads(t *
 				t.Fatal("metadata called for rejected checkpoint")
 				return nil, nil
 			}
-			if _, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
+			if _, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
 				t.Fatal(err)
 			}
 			switch kind {
@@ -178,7 +184,7 @@ func TestReadCheckpointRefusesMalformedInsecureOrDifferentRequestBeforeReads(t *
 			case "selection":
 				refs = checkpointRefs("2")
 			}
-			_, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, kind == "source", kind == "alternatives", metadata, func(MessageRef, int) (*Message, *PhaseTrace, error) {
+			_, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, kind == "source", kind == "alternatives", metadata, func(MessageRef, int) (*Message, *PhaseTrace, error) {
 				t.Fatal("body called for rejected checkpoint")
 				return nil, nil, nil
 			})
@@ -205,12 +211,12 @@ func TestReadCheckpointPreservesAllStaleEvidenceAcrossLaterSuccessfulItems(t *te
 		}
 		return m, nil
 	}
-	if _, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
+	if _, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read); err != nil {
 		t.Fatal(err)
 	}
 	changed = true
 	for invocation := 2; invocation <= 3; invocation++ {
-		result, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
+		result, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, metadata, read)
 		if err != nil || result.Complete || result.Items[0].Message != nil || result.Items[0].Error == "" || result.Items[1].Message == nil || calls["1"] != 1 || calls["2"] != 1 {
 			t.Fatalf("invocation %d result=%+v calls=%v err=%v", invocation, result, calls, err)
 		}
@@ -220,7 +226,7 @@ func TestReadCheckpointPreservesAllStaleEvidenceAcrossLaterSuccessfulItems(t *te
 func TestReadCheckpointResumeMetadataHonorsPerMessageTimeout(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "read.json")
 	refs := checkpointRefs("1")
-	if _, err := readSelectedWithCheckpoint(refs, SelectedReadOptions{Checkpoint: path}, false, false, nil, func(ref MessageRef, _ int) (*Message, *PhaseTrace, error) {
+	if _, err := readSelectedCheckpointFixture(refs, SelectedReadOptions{Checkpoint: path}, false, false, nil, func(ref MessageRef, _ int) (*Message, *PhaseTrace, error) {
 		return checkpointMessage(ref.MessageID), nil, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -249,25 +255,26 @@ func TestReadCheckpointRetainsFullSelectionAcrossMissingLocatedIDs(t *testing.T)
 		return checkpointMessage(ref.MessageID), nil, nil
 	}
 	metadata := func(ref MessageRef) (*Message, error) { return checkpointMessage(ref.MessageID), nil }
-	first, err := readSelectedWithCheckpoint(checkpointRefs("1"), opts, false, false, metadata, read)
+	first, err := readSelectedCheckpointFixture(checkpointRefs("1"), opts, false, false, metadata, read)
 	if err != nil || first.Complete || calls["1"] != 1 || calls["2"] != 0 {
 		t.Fatalf("first=%+v calls=%v err=%v", first, calls, err)
 	}
-	second, err := readSelectedWithCheckpoint(checkpointRefs("1", "2"), opts, false, false, metadata, read)
+	second, err := readSelectedCheckpointFixture(checkpointRefs("1", "2"), opts, false, false, metadata, read)
 	if err != nil || !second.Complete || calls["1"] != 1 || calls["2"] != 1 {
 		t.Fatalf("second=%+v calls=%v err=%v", second, calls, err)
 	}
 	// Losing the cached local ID in a later locator result must preserve its
 	// original success as evidence, so a later account change cannot bypass it.
-	third, err := readSelectedWithCheckpoint(checkpointRefs("2"), opts, false, false, metadata, read)
-	if err != nil || third.Complete {
+	third, err := readSelectedCheckpointFixture(checkpointRefs("2"), opts, false, false, metadata, read)
+	if err != nil || !third.Complete {
 		t.Fatalf("third=%+v err=%v", third, err)
 	}
+	opts.Account = "Other"
 	moved := checkpointRefs("1", "2")
 	moved[0].AccountName = "Other"
 	for invocation := 0; invocation < 2; invocation++ {
-		result, err := readSelectedWithCheckpoint(moved, opts, false, false, metadata, read)
-		if err != nil || result.Complete || result.Items[0].Message != nil || !strings.Contains(result.Items[0].Error, "checkpoint account") || calls["1"] != 1 || calls["2"] != 1 {
+		result, err := readSelectedCheckpointFixture(moved, opts, false, false, metadata, read)
+		if err != nil || result.Complete || result.Items[0].Message != nil || !strings.Contains(result.Items[0].Error, "explicit account") || calls["1"] != 1 || calls["2"] != 1 {
 			t.Fatalf("account-changed=%+v calls=%v err=%v", result, calls, err)
 		}
 	}

@@ -35,6 +35,7 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 // progress. A checkpoint is read-only evidence, never a mutation selection.
 type SelectedReadOptions struct {
 	Checkpoint string
+	Account    string // An explicit CLI account constraint, when supplied.
 	// SelectionIDs includes requested IDs that could not yet be located. When
 	// omitted, the selection is derived from refs. Cached successes remain bound
 	// to their captured account even when a later locator changes its answer.
@@ -46,22 +47,44 @@ func (c *Client) ReadSelectedMessagesWithOptions(refs []MessageRef, timeout, bud
 	ctx, cancel := context.WithTimeout(c.Context(), budget)
 	defer cancel()
 	client := c.WithContext(ctx)
+	itemClient := client
 	var session *jxaSession
 	defer func() {
 		if session != nil {
 			session.Close()
 		}
 	}()
+	hooks := selectedReadHooks{}
+	if opts.Checkpoint != "" {
+		hooks.Begin = func() func() {
+			itemContext, cancelItem := context.WithTimeout(ctx, timeout)
+			itemClient = c.WithContext(itemContext)
+			return func() {
+				if session != nil {
+					session.Close()
+					session = nil
+				}
+				cancelItem()
+			}
+		}
+		hooks.AccountID = func(account string) (string, error) { return itemClient.checkpointAccountID(account) }
+		hooks.Recover = func(origin readCheckpointOrigin) (*Message, error) {
+			return itemClient.recoverCheckpointMessage(origin)
+		}
+		hooks.Revision = func(ref MessageRef, identity *StableIdentity) (string, error) {
+			return itemClient.checkpointContentRevision(ref, identity)
+		}
+		hooks.Confirm = func(ref MessageRef) (*Message, error) { return itemClient.checkpointExactMetadata(ref) }
+	}
 	return readSelectedWithCheckpoint(refs, opts, c.shared.bodyFromMail, c.shared.bodyAlternatives, func(ref MessageRef) (*Message, error) {
-		itemContext, cancelItem := context.WithTimeout(ctx, timeout)
-		defer cancelItem()
-		return client.WithContext(itemContext).GetMessageDetailsForVerificationJSON(ref.AccountName, ref.MailboxName, ref.MessageID)
+		return itemClient.GetMessageDetailsForVerificationJSON(ref.AccountName, ref.MailboxName, ref.MessageID)
 	}, func(ref MessageRef, i int) (*Message, *PhaseTrace, error) {
-		if err := ctx.Err(); err != nil {
+		if err := itemClient.Done(); err != nil {
 			return nil, nil, err
 		}
-		if client.nativeEnabled() {
-			return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout, !c.shared.bodyFromMail)
+		effectiveTimeout := checkpointRemainingTimeout(itemClient.Context(), timeout)
+		if itemClient.nativeEnabled() {
+			return itemClient.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, effectiveTimeout, !c.shared.bodyFromMail)
 		}
 		if i%10 == 0 || (session != nil && session.closed) {
 			if session != nil {
@@ -71,14 +94,14 @@ func (c *Client) ReadSelectedMessagesWithOptions(refs []MessageRef, timeout, bud
 		}
 		if session == nil {
 			var err error
-			session, err = newJXASession(ctx)
+			session, err = newJXASession(itemClient.Context())
 			if err != nil {
 				return nil, nil, err
 			}
-			client.session = session
+			itemClient.session = session
 		}
-		return client.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, timeout, !c.shared.bodyFromMail)
-	})
+		return itemClient.getMessageDetailsTraced(ref.AccountName, ref.MailboxName, ref.MessageID, effectiveTimeout, !c.shared.bodyFromMail)
+	}, hooks)
 }
 
 func readSelectedMessages(refs []MessageRef, read func(MessageRef, int) (*Message, *PhaseTrace, error)) SelectedReadResult {

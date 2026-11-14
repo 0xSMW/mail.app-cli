@@ -19,12 +19,14 @@ const maxReadCheckpointBytes = 64 << 20
 var ErrInvalidReadCheckpoint = errors.New("invalid read checkpoint")
 
 type readCheckpoint struct {
-	Version      int                `json:"version"`
-	Checksum     string             `json:"checksum"`
-	Selection    []string           `json:"selection"`
-	MailBody     bool               `json:"mailBody"`
-	Alternatives bool               `json:"alternatives"`
-	Result       SelectedReadResult `json:"result"`
+	Version      int                             `json:"version"`
+	Checksum     string                          `json:"checksum"`
+	Selection    []string                        `json:"selection"`
+	MailBody     bool                            `json:"mailBody"`
+	Alternatives bool                            `json:"alternatives"`
+	Result       SelectedReadResult              `json:"result"`
+	Origins      map[string]readCheckpointOrigin `json:"origins,omitempty"`
+	Revisions    map[string]string               `json:"revisions,omitempty"`
 }
 
 func readCheckpointError(format string, args ...any) error {
@@ -98,8 +100,32 @@ func loadReadCheckpoint(path string) (readCheckpoint, error) {
 			return state, readCheckpointError("invalid result identity")
 		}
 		items[key] = true
-		if item.Error == "" && (item.Message == nil || item.Message.ContentError != "" || !cacheIdentityUsable(*item.Message) || item.Message.ID != item.ID || item.Message.Account != item.Account) {
+		if _, hasOrigin := state.Origins[key]; !hasOrigin && item.Message != nil && item.Message.ID != item.ID {
+			return state, readCheckpointError("legacy selection differs from saved local ID without immutable origin")
+		}
+		if item.Error == "" && (item.Message == nil || item.Message.ContentError != "" || !cacheIdentityUsable(*item.Message) || item.Message.ID == "" || item.Message.Account != item.Account) {
 			return state, readCheckpointError("invalid successful body")
+		}
+	}
+	for id, origin := range state.Origins {
+		if !seen[id] || origin.Account == "" || !cacheIdentityUsable(Message{RFCMessageID: origin.Identity.RFCMessageID, Sender: origin.Identity.Sender, Subject: origin.Identity.Subject, DateSent: origin.Identity.DateSent, MessageSize: origin.Identity.MessageSize}) {
+			return state, readCheckpointError("invalid immutable origin")
+		}
+		for _, item := range state.Result.Items {
+			if item.ID == id && item.Error == "" && !checkpointOriginMatches(origin, item.Message) {
+				return state, readCheckpointError("successful body differs from immutable origin")
+			}
+		}
+	}
+	for id, revision := range state.Revisions {
+		decoded, err := hex.DecodeString(revision)
+		if !items[id] || err != nil || len(decoded) != sha256.Size {
+			return state, readCheckpointError("invalid content revision")
+		}
+		for _, item := range state.Result.Items {
+			if item.ID == id && (item.Error != "" || item.Message == nil || item.Message.ContentSource != BodySourceDisk) {
+				return state, readCheckpointError("revision does not describe a successful disk extraction")
+			}
 		}
 	}
 	if state.Result.Complete && len(items) != len(seen) {
@@ -177,9 +203,13 @@ func cachedBodyWithFreshMetadata(cached, fresh Message) (*Message, error) {
 	return &fresh, nil
 }
 
-func readSelectedWithCheckpoint(refs []MessageRef, opts SelectedReadOptions, mailBody, alternatives bool, metadata func(MessageRef) (*Message, error), read func(MessageRef, int) (*Message, *PhaseTrace, error)) (SelectedReadResult, error) {
+func readSelectedWithCheckpoint(refs []MessageRef, opts SelectedReadOptions, mailBody, alternatives bool, metadata func(MessageRef) (*Message, error), read func(MessageRef, int) (*Message, *PhaseTrace, error), options ...selectedReadHooks) (SelectedReadResult, error) {
+	hooks := selectedReadHooks{}
+	if len(options) > 0 {
+		hooks = options[0]
+	}
 	result := SelectedReadResult{Items: []MessageReadResult{}, Complete: true}
-	state := readCheckpoint{Version: 1, MailBody: mailBody, Alternatives: alternatives, Result: SelectedReadResult{Items: []MessageReadResult{}}}
+	state := readCheckpoint{Version: 1, MailBody: mailBody, Alternatives: alternatives, Result: SelectedReadResult{Items: []MessageReadResult{}}, Origins: map[string]readCheckpointOrigin{}, Revisions: map[string]string{}}
 	state.Selection = append([]string{}, opts.SelectionIDs...)
 	if len(state.Selection) == 0 {
 		for _, ref := range refs {
@@ -219,9 +249,18 @@ func readSelectedWithCheckpoint(refs []MessageRef, opts SelectedReadOptions, mai
 			if !slices.Equal(previous.Selection, state.Selection) || previous.MailBody != mailBody || previous.Alternatives != alternatives {
 				return result, readCheckpointError("selection or body options differ; use original selection/options or a new checkpoint")
 			}
+			for id, origin := range previous.Origins {
+				state.Origins[id] = origin
+			}
+			for id, revision := range previous.Revisions {
+				state.Revisions[id] = revision
+			}
 			for _, item := range previous.Result.Items {
 				if item.Error == "" {
 					cached[item.ID] = item
+					if _, exists := state.Origins[item.ID]; !exists {
+						state.Origins[item.ID] = readCheckpointOrigin{Account: item.Account, Identity: StableIdentityFromMessage(*item.Message)}
+					}
 				}
 			}
 		} else if !os.IsNotExist(err) {
@@ -233,6 +272,17 @@ func readSelectedWithCheckpoint(refs []MessageRef, opts SelectedReadOptions, mai
 			return result, fmt.Errorf("persist read checkpoint: %w", err)
 		}
 	}
+	// A missing locator row is recoverable only when the checkpoint already
+	// contains a successful extraction and its original logical identity.
+	for _, id := range state.Selection {
+		if !seenRefs[id] {
+			if saved, ok := cached[id]; ok {
+				refs = append(refs, MessageRef{AccountName: saved.Account, MailboxName: saved.Mailbox, MessageID: id})
+				seenRefs[id] = true
+			}
+		}
+	}
+	result.Complete = len(refs) == len(state.Selection)
 	emit := func(event string, item *MessageReadResult, completed int) error {
 		if opts.Events == nil {
 			return nil
@@ -262,38 +312,106 @@ func readSelectedWithCheckpoint(refs []MessageRef, opts SelectedReadOptions, mai
 			result.Complete = false
 			return result, err
 		}
+		finish := func() {}
+		if hooks.Begin != nil {
+			finish = hooks.Begin()
+		}
 		var err error
+		expectedAccountID := ""
+		revision := ""
 		if resume {
-			var fresh *Message
-			if saved.Account != ref.AccountName {
-				err = fmt.Errorf("checkpoint account %q differs from current account %q", saved.Account, ref.AccountName)
+			origin := state.Origins[ref.MessageID]
+			if opts.Account != "" && opts.Account != origin.Account {
+				err = fmt.Errorf("explicit account differs from original checkpoint account")
 			} else {
-				fresh, err = metadata(ref)
-			}
-			if err == nil && fresh == nil {
-				err = fmt.Errorf("message absent")
-			}
-			if err == nil && (fresh.ID != ref.MessageID || fresh.Account != ref.AccountName) {
-				err = fmt.Errorf("current metadata does not match requested account and local ID")
-			}
-			if err == nil {
-				item.Message, err = cachedBodyWithFreshMetadata(*saved.Message, *fresh)
+				if hooks.AccountID != nil {
+					expectedAccountID, err = hooks.AccountID(origin.Account)
+				}
+				if err == nil && origin.AccountID != "" && expectedAccountID != "" && origin.AccountID != expectedAccountID {
+					err = fmt.Errorf("checkpoint account identity changed")
+				}
+				if err == nil && origin.AccountID == "" && expectedAccountID != "" {
+					origin.AccountID = expectedAccountID
+				}
+				if err == nil {
+					item.Message, item.Diagnostics, revision, err = resumeCheckpointBody(saved, origin, state.Revisions[ref.MessageID], ref, hooks, metadata, read, i, mailBody)
+				}
 			}
 			if err != nil {
-				err = fmt.Errorf("stale read checkpoint: cannot validate current local ID %s: %w; locate the message again and use a new checkpoint", ref.MessageID, err)
+				err = fmt.Errorf("stale read checkpoint: %w", err)
 			}
 		} else {
-			item.Message, item.Diagnostics, err = read(ref, i)
+			if opts.Account != "" && opts.Account != ref.AccountName {
+				err = fmt.Errorf("explicit account differs from selected account")
+			}
+			if err == nil && opts.Checkpoint != "" && hooks.AccountID != nil {
+				expectedAccountID, err = hooks.AccountID(ref.AccountName)
+			}
+			before := ""
+			if err == nil && opts.Checkpoint != "" && !mailBody && hooks.Revision != nil {
+				before, err = hooks.Revision(ref, nil)
+			}
+			if err == nil {
+				item.Message, item.Diagnostics, err = read(ref, i)
+			}
 			if err == nil && item.Message == nil {
 				err = fmt.Errorf("message not found")
 			}
 			if err == nil && item.Message.ContentError != "" {
 				err = fmt.Errorf("body unavailable: %s", item.Message.ContentError)
 			}
-			if err == nil && opts.Checkpoint != "" && (item.Message.ID != ref.MessageID || item.Message.Account != ref.AccountName || !cacheIdentityUsable(*item.Message)) {
-				err = fmt.Errorf("cannot checkpoint body without complete stable identity")
+			if err == nil && opts.Checkpoint != "" {
+				if item.Message.ID != ref.MessageID || item.Message.Account != ref.AccountName || !cacheIdentityUsable(*item.Message) {
+					err = fmt.Errorf("cannot checkpoint body without complete stable identity")
+				} else {
+					origin := readCheckpointOrigin{Account: item.Account, AccountID: expectedAccountID, Identity: StableIdentityFromMessage(*item.Message)}
+					if item.Message.ContentSource == BodySourceDisk && hooks.Revision != nil {
+						var after string
+						after, err = hooks.Revision(ref, &origin.Identity)
+						if err == nil && before != "" && after != "" {
+							if before != after {
+								err = fmt.Errorf("content changed during extraction")
+							} else {
+								revision = after
+							}
+						}
+					}
+				}
 			}
 		}
+		if item.Message != nil && err == nil {
+			item.Account = item.Message.Account
+			item.Mailbox = item.Message.Mailbox
+		}
+		if err == nil && opts.Checkpoint != "" {
+			if hooks.AccountID != nil {
+				current, accountErr := hooks.AccountID(item.Account)
+				if accountErr != nil {
+					err = accountErr
+					item.Message = nil
+				} else if current != expectedAccountID {
+					err = fmt.Errorf("account identity changed during selected read")
+					item.Message = nil
+				}
+			}
+			if err == nil {
+				if !resume {
+					state.Origins[ref.MessageID] = readCheckpointOrigin{Account: item.Account, AccountID: expectedAccountID, Identity: StableIdentityFromMessage(*item.Message)}
+				} else if origin := state.Origins[ref.MessageID]; origin.AccountID == "" {
+					origin.AccountID = expectedAccountID
+					state.Origins[ref.MessageID] = origin
+				}
+			}
+			if err == nil {
+				if revision != "" {
+					state.Revisions[ref.MessageID] = revision
+				} else {
+					delete(state.Revisions, ref.MessageID)
+				}
+			}
+		}
+
+		finish()
 		if err != nil {
 			item.Error = err.Error()
 			result.Complete = false

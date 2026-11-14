@@ -455,7 +455,7 @@ Gmail Inbox moves to All Mail, including supported archive aliases, use the same
 
 For repeatable selections across accounts, [cleanup manifests](docs/cleanup-manifest.md) record exact identities, actions, and required final mailbox memberships. Preview with `messages manifest apply cleanup.json --dry-run`, apply with `messages manifest apply cleanup.json`, and inspect fresh outcomes with `messages manifest verify cleanup.json`.
 
-Selected body reads support `--checkpoint <path>` and `--events`. Repeat the same selection and body options to reuse completed extraction while refreshing message metadata. Changed or missing identities are refused; select the current message explicitly and use a new checkpoint. Checkpoints contain private message bodies and are written with owner-only permissions.
+Selected body reads support `--checkpoint <path>` and `--events`. Repeat the same selection and body options to resume completed extraction while refreshing message metadata. Saved reads can follow a regenerated local ID when the original account and a unique RFC Message-ID match the captured sender, subject, and sent date. Changed content is read again; cached disk bodies are reused only after checking their content revision. Ambiguous or different identities remain refused. Checkpoints contain private message bodies and are written with owner-only permissions. See [resumable reads](docs/resumable-reads.md) for recovery details.
 
 ## Sending and drafts
 

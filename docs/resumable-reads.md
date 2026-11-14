@@ -6,11 +6,21 @@
 mail-app-cli messages read 101 102 103 --checkpoint ./selected-bodies.json --json
 ```
 
-Run the same selection with the same `--body-source` and `--body-alternatives` options to resume. Each saved success receives a fresh metadata read before its body is reused. The current read, flagged, deleted, account, mailbox, recipient, and date metadata comes from that observation. The saved body, extracted links, header controls, and extraction diagnostics are reused only when the stable message identity and message size still match.
+Run the same requested IDs with the same `--body-source` and `--body-alternatives` options to resume. The full selection is retained even when an ID cannot initially be located. A later invocation can read a newly located ID while validating the other saved messages.
 
-The full requested ID selection is retained even when an ID cannot initially be located. A later invocation can extract a newly located ID while validating and reusing the other bodies. Saved successes remain bound to their original account. Failed extractions are attempted once per invocation. Running the command again explicitly retries those failures. A failed freshness check keeps the original successful extraction as identity evidence, so a recycled local ID can never become an unchecked fresh extraction on a later invocation. An absent or changed local ID is refused; locate the intended message again and use a new checkpoint path. Checkpoints are evidence for body reads and are never used as mutation selections.
+Each saved success retains its original account and logical message identity independently of its latest body or local ID. A new invocation reads current metadata before using a saved body. If Mail has moved the message, regenerated its local ID, or reused the old ID for unrelated mail, recovery searches only the original account. Recovery requires an RFC Message-ID corroborated by the same sender address, exact subject, and sent date. Every indexed candidate receives an exact live metadata check, and exactly one physical message must match. Ambiguous candidates, incomplete discovery, changed accounts, and unrelated copies are refused. An explicit `--account` must match the original account exactly.
 
-Checkpoints contain message bodies and must remain regular files with mode `0600`. Their parent directory must already exist. Corrupt files, changed selections, and changed body options are rejected before extraction. Completion means that every requested extraction succeeded; the body diagnostics continue to describe MIME alternatives, nontext parts, images, and partial files.
+The result keeps the originally requested ID in `items[].id`. Its current Mail ID is in `items[].message.id`, and the current mailbox is in `items[].message.mailbox`. Read and flagged state come from the fresh observation. These reads never mark a message read or change its mailbox.
+
+A saved disk body is reused only when its complete, account-scoped local message file has the same content revision and size. The revision covers the RFC message bytes, including the body and MIME parts; changes to Mail's separate read-state trailer do not invalidate it. Same-size content edits are detected. A changed body, changed size, or invalid extraction is read again only after the original RFC identity has been uniquely confirmed. The new extraction must still match the original account and logical identity, and its physical mailbox and metadata are checked again before the checkpoint is replaced.
+
+Bodies rendered with `--body-source mail` are read again because a local file revision cannot prove Mail's rendered result is unchanged. A disk body without a trustworthy revision is also read again after secure RFC confirmation. Older checkpoints have no stored revision, so their first resume requires this confirmation and fresh extraction before reuse becomes possible.
+
+Messages without a corroborated RFC identity use the strict original sender, subject, sent date, and size fallback. That fallback permits reuse of an unchanged, proven local body at the same local ID. It cannot authorize relocation or replacement content when a revision changes or is unavailable. Those cases remain incomplete rather than guessing at a match.
+
+Failed operations are attempted once per invocation. Run the command again explicitly to retry. A failed recovery or extraction preserves the original identity and prior successful body, including when other messages succeed afterward. The checkpoint never turns a failed identity check into an unchecked fresh read of a recycled ID. Checkpoints are evidence for body reads and are never used as mutation selections.
+
+Checkpoints contain message bodies and must remain regular files with mode `0600`. Their parent directory must already exist. Corrupt files, changed selections, and changed body options are rejected before extraction. Completion means that every requested extraction succeeded; body diagnostics continue to describe MIME alternatives, nontext parts, images, and partial files.
 
 `--events` writes JSONL progress to stderr while the final normal result remains on stdout:
 
@@ -19,7 +29,7 @@ mail-app-cli messages read 101 102 --checkpoint ./selected-bodies.json --events 
   > ./result.json 2> ./progress.jsonl
 ```
 
-Read events include `started`, `metadata_started` and `metadata_completed` for reused bodies, `body_started` and `body_completed` for new extractions, `item_completed`, and `completed`. Item events include the ID and any failure. Each metadata read honors `--timeout`, and all reads share `--budget`.
+Read events include `started`, metadata and body phases, `item_completed`, and `completed`. Item events include the requested ID and any failure. Each checkpoint item's metadata checks, recovery, revision reads, and extraction share one `--timeout`; all selected items also share `--budget`.
 
 `messages status <receipt-file>` inspects a batch receipt locally without contacting Mail or repeating an action. It accepts a live durable JSONL journal, a final batch receipt or envelope, and a manifest receipt or envelope. Manifest parent receipts list the child receipts so each group can be inspected independently.
 

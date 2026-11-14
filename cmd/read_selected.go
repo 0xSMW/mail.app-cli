@@ -46,6 +46,9 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 				requests[i] = mail.MessageRef{AccountName: ref.Account, MailboxName: ref.Mailbox, MessageID: ref.ID}
 			}
 			opts := mail.SelectedReadOptions{Checkpoint: checkpoint, SelectionIDs: ids}
+			if a.accountExplicit() {
+				opts.Account = a.resolved.Account.Value
+			}
 			if events {
 				opts.Events = cmd.ErrOrStderr()
 			}
@@ -59,13 +62,15 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 					byID[item.ID] = item
 				}
 				for _, item := range failed {
-					byID[item.ID] = item
+					if _, recovered := byID[item.ID]; !recovered {
+						byID[item.ID] = item
+						result.Complete = false
+					}
 				}
 				result.Items = make([]mail.MessageReadResult, 0, len(ids))
 				for _, id := range ids {
 					result.Items = append(result.Items, byID[id])
 				}
-				result.Complete = false
 			}
 			var failure *clierr.Error
 			if readErr != nil {
