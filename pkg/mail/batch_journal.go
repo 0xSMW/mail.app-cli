@@ -3,6 +3,7 @@ package mail
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -13,9 +14,10 @@ import (
 // complete JSON object so a caller can recover the work completed before an
 // interrupted process lost its normal stdout receipt.
 type BatchJournal struct {
-	path string
-	file *os.File
-	mu   sync.Mutex
+	path   string
+	file   *os.File
+	mu     sync.Mutex
+	events io.Writer
 }
 
 var userConfigDir = os.UserConfigDir
@@ -66,6 +68,15 @@ func (j *BatchJournal) Close() error {
 	return j.file.Close()
 }
 
+// SetEvents mirrors subsequent durable events to an optional progress stream.
+func (j *BatchJournal) SetEvents(w io.Writer) {
+	if j != nil {
+		j.mu.Lock()
+		defer j.mu.Unlock()
+		j.events = w
+	}
+}
+
 // Record appends and synchronizes one event. Syncing every event exceeds the
 // per-chunk durability guarantee and deliberately favors recoverability over
 // the small overhead of a bulk mutation receipt.
@@ -90,6 +101,9 @@ func (j *BatchJournal) Record(event string, fields map[string]any) error {
 	}
 	if err := j.file.Sync(); err != nil {
 		return fmt.Errorf("sync batch receipt %q: %w", j.path, err)
+	}
+	if j.events != nil {
+		_, _ = j.events.Write(append(data, '\n'))
 	}
 	return nil
 }

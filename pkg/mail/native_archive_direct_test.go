@@ -45,8 +45,11 @@ type directArchiveDriver struct{ *directArchiveAX }
 func (a directArchiveDriver) Prepare(ctx context.Context, id int64) (mailax.Session, error) {
 	return a.sessionPrepare(ctx, id)
 }
-func (s *directArchiveSession) SelectNext(ctx context.Context, subject string) (bool, error) {
+func (s *directArchiveSession) SelectNext(ctx context.Context, subject string, beforeStep func() error) (bool, error) {
 	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := beforeStep(); err != nil {
 		return false, err
 	}
 	s.ax.selections++
@@ -82,6 +85,7 @@ func (s *directArchiveSession) Release() { s.ax.released++ }
 type directArchiveMail struct {
 	account, box, stableMailboxRef, target                             appleevents.Value
 	selected                                                           appleevents.Value
+	selectionReads, delayedSelectionReads                              int
 	selectedAccount, selectedMailbox, host                             string
 	hostInvalid, preview, open, remains, existingOwner, malformedOwner bool
 	created, closed                                                    int
@@ -198,6 +202,10 @@ func (m *directArchiveMail) get(v appleevents.Value) (appleevents.Value, error) 
 	case "mbxc":
 		return appleevents.Null(), nil
 	case "smgs":
+		m.selectionReads++
+		if m.selectionReads <= m.delayedSelectionReads {
+			return appleevents.List(appleevents.ByID("mssg", appleevents.Int(8), m.box)), nil
+		}
 		return appleevents.List(m.selected), nil
 	}
 	return appleevents.Value{}, fmt.Errorf("unexpected direct archive property: %s", code)
@@ -447,5 +455,15 @@ func TestNativeArchiveDirectPreparesOwnedViewerWithoutActivation(t *testing.T) {
 	}
 	if !prepared || a.presses != 0 || m.closedID != 42 {
 		t.Fatalf("prepared=%v presses=%d closedID=%d", prepared, a.presses, m.closedID)
+	}
+}
+
+func TestNativeArchiveDirectWaitsForSelectedMessageIdentity(t *testing.T) {
+	m := newDirectArchiveMail()
+	m.delayedSelectionReads = 3
+	a := &directArchiveAX{attempted: true}
+	err := directArchiveClient(t, m, a).runNativeArchive("Test", "7", true)
+	if err != nil || a.selections != 1 || a.presses != 1 || m.selectionReads < 4 || m.closed != 1 {
+		t.Fatalf("error=%v candidateSelections=%d presses=%d identityReads=%d closed=%d", err, a.selections, a.presses, m.selectionReads, m.closed)
 	}
 }

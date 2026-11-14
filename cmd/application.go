@@ -117,34 +117,37 @@ type application struct {
 
 // options contains the values Cobra binds while parsing this invocation.
 type options struct {
-	labelsEmail         string
-	batchQuery          string
-	batchSender         string
-	batchSenderDomain   string
-	batchStdin          bool
-	batchDryRun         bool
-	batchYes            bool
-	batchRead           bool
-	batchFlagged        bool
-	batchMarkReadBefore bool
-	batchMarkReadOnSkip bool
-	batchSettle         time.Duration
-	batchVerifyBudget   time.Duration
-	batchVerify         bool
-	batchProgress       bool
-	batchChunkSize      int
-	batchLimit          int
-	batchReportFile     string
-	exportOutput        string
-	msgLimit            int
-	msgOffset           int
-	msgWithContent      bool
-	ruleDryRun          bool
-	threadLimit         int
-	verbDryRun          bool
-	verbVerify          bool
-	verbSettle          time.Duration
-	verbVerifyBudget    time.Duration
+	labelsEmail                 string
+	batchEvents                 bool
+	batchRemoveImportant        bool
+	batchQuery                  string
+	batchSender                 string
+	batchSenderDomain           string
+	batchStdin                  bool
+	batchDryRun                 bool
+	batchYes                    bool
+	batchRead                   bool
+	batchFlagged                bool
+	batchMarkReadBefore         bool
+	batchMarkReadOnSkip         bool
+	batchSettle                 time.Duration
+	batchVerifyBudget           time.Duration
+	batchVerify                 bool
+	batchProgress               bool
+	batchChunkSize              int
+	batchMaxConsecutiveFailures int
+	batchLimit                  int
+	batchReportFile             string
+	exportOutput                string
+	msgLimit                    int
+	msgOffset                   int
+	msgWithContent              bool
+	ruleDryRun                  bool
+	threadLimit                 int
+	verbDryRun                  bool
+	verbVerify                  bool
+	verbSettle                  time.Duration
+	verbVerifyBudget            time.Duration
 }
 
 func newApplication() *application {
@@ -174,7 +177,7 @@ func newApplication() *application {
 	a.buildVerbsCommands()
 	a.buildUnsubscribeCommands()
 	a.buildVersionCommands()
-	a.messagesCmd.AddCommand(a.newMessagesReadCmd(), a.newMessagesReconcileCmd(), a.newMessagesScanCmd())
+	a.messagesCmd.AddCommand(a.newMessagesReadCmd(), a.newMessagesReconcileCmd(), a.newMessagesScanCmd(), a.newMessagesStatusCmd(), a.newManifestCmd())
 	a.buildRootCommands()
 	a.rootCmd.AddCommand(a.newLabelsCmd())
 	a.markMutations()

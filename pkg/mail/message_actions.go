@@ -230,6 +230,28 @@ end tell
 }
 
 func (c *Client) MoveMessage(accountName, sourceMailbox, messageID, targetMailbox string) error {
+	// Gmail's All Mail is a label view. A scripting move can leave INBOX
+	// attached, so this explicit move needs Mail's native Archive action too.
+	archiveTarget := targetMailbox
+	if strings.EqualFold(sourceMailbox, "INBOX") && isArchiveAlias(targetMailbox) {
+		gmail, err := c.archiveUsesNative(accountName, sourceMailbox, "All Mail")
+		if err != nil {
+			return err
+		}
+		if gmail && targetMailbox != "All Mail" {
+			archiveTarget, err = c.ResolveArchiveMailbox(accountName)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	useNativeArchive, err := c.archiveUsesNative(accountName, sourceMailbox, archiveTarget)
+	if err != nil {
+		return err
+	}
+	if useNativeArchive {
+		return c.archiveInboxThroughMail(accountName, messageID)
+	}
 	if c.nativeEnabled() {
 		return c.nativeMove(accountName, sourceMailbox, messageID, targetMailbox, false)
 	}

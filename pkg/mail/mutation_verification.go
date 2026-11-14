@@ -198,6 +198,9 @@ const DefaultVerifyBudget = 30 * time.Second
 
 // ValidateBatchOptions runs before source resolution or any mailbox changes.
 func ValidateBatchOptions(opts BatchOptions) error {
+	if opts.MaxConsecutiveFailures < 0 {
+		return fmt.Errorf("--max-consecutive-failures must be non-negative")
+	}
 	if opts.MarkReadOnSkip && (!opts.MarkReadBefore || opts.Action != "archive") {
 		return fmt.Errorf("--mark-read-on-skip requires --mark-read and archive")
 	}
@@ -338,8 +341,8 @@ func captureBatchIdentities(client *Client, opts BatchOptions, items []BatchItem
 // mutation. Unknown relocations can be reconciled when a pre-mutation stable
 // identity survived; their original application status remains unchanged.
 func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) (BatchResult, error) {
-	if receipt.Action != "archive" && receipt.Action != "move" {
-		return receipt, fmt.Errorf("reconciliation requires an archive or move receipt")
+	if receipt.Action != "archive" && receipt.Action != "move" && receipt.Action != "delete" {
+		return receipt, fmt.Errorf("reconciliation requires an archive, move, or delete receipt")
 	}
 	if receipt.DryRun {
 		return receipt, fmt.Errorf("cannot reconcile a dry-run receipt")
@@ -379,7 +382,7 @@ func ReconcileMutations(client *Client, opts BatchOptions, receipt BatchResult) 
 	client = client.WithContext(ctx)
 	items := append([]BatchItem(nil), receipt.Items...)
 	for i := range items {
-		if items[i].Status == "unknown" && (opts.Action == "move" || opts.Action == "archive") && items[i].Identity.valid() {
+		if items[i].Status == "unknown" && (opts.Action == "move" || opts.Action == "archive" || opts.Action == "delete") && items[i].Identity.valid() {
 			items[i].Status = "succeeded"
 		}
 		items[i].VerifyStatus, items[i].VerifyError, items[i].Observed = "", "", nil

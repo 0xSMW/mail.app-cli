@@ -39,10 +39,8 @@ func verifyMutationStates(client *Client, opts BatchOptions, verified []BatchIte
 				ids = append(ids, verified[index].ID)
 			}
 			snapshots[key], snapshotErrors[key] = client.getMessageEnvelopesForVerification(key.account, key.mailbox, ids)
-			// Read/flag changes can finish as soon as their requested state is
-			// observed. Delete still needs the full settling window: an old
-			// local ID disappearing does not preclude a regenerated copy.
-			if snapshotErrors[key] == nil && opts.Action != "delete" {
+			// Read/flag changes finish once their requested state is observed.
+			if snapshotErrors[key] == nil {
 				pending := make([]int, 0, len(indices))
 				for _, index := range indices {
 					item := &verified[index]
@@ -87,13 +85,6 @@ func verifyMutationStates(client *Client, opts BatchOptions, verified []BatchIte
 			}
 			message, present := snapshots[key][item.ID]
 			switch opts.Action {
-			case "delete":
-				if present {
-					item.VerifyStatus = "present-in-source"
-					item.VerifyError = fmt.Sprintf("message still present in %s", item.SourceMailbox)
-				} else {
-					item.VerifyStatus = "absent-from-source"
-				}
 			case "mark":
 				item.VerifyStatus, item.VerifyError = verifyBoolState(present, message.Read, opts.Read, "read")
 			case "flag":
@@ -108,6 +99,29 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 	syncErrors := make(map[string]error)
 	syncRequests := make(map[string]string)
 	successful := 0
+	deleteErrors := make(map[int]error)
+	if opts.Action == "delete" {
+		destinations := make(map[string]string)
+		destinationErrors := make(map[string]error)
+		for i := range verified {
+			item := &verified[i]
+			if item.Status != "succeeded" {
+				continue
+			}
+			if !item.Identity.valid() || item.TargetMailbox == "" {
+				deleteErrors[i] = fmt.Errorf("delete verification requires a pre-mutation stable identity and pinned Trash destination")
+				continue
+			}
+			if _, seen := destinations[item.Account]; !seen {
+				destinations[item.Account], destinationErrors[item.Account] = client.ResolveTrashMailbox(item.Account)
+			}
+			if err := destinationErrors[item.Account]; err != nil {
+				deleteErrors[i] = fmt.Errorf("resolve recoverable Trash: %w", err)
+				continue
+			}
+			deleteErrors[i] = client.prepareDeleteItem(item, destinations[item.Account])
+		}
+	}
 	for _, item := range verified {
 		if item.Status == "succeeded" {
 			successful++
@@ -126,7 +140,7 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 	retainedSources := make(map[verificationMailboxKey]bool)
 	identityGroups := make(map[verificationMailboxKey][]relocationRef)
 	for i, item := range verified {
-		if item.Status != "succeeded" || syncErrors[item.Account] != nil {
+		if item.Status != "succeeded" || syncErrors[item.Account] != nil || deleteErrors[i] != nil {
 			continue
 		}
 		policyKey := verificationMailboxKey{item.Account, item.SourceMailbox + "\x00" + item.TargetMailbox}
@@ -145,7 +159,7 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 		for _, ref := range refs {
 			identities = append(identities, verified[ref.index].Identity)
 		}
-		scopes = append(scopes, identityVerificationScope{key: key, identities: identities})
+		scopes = append(scopes, identityVerificationScope{key: key, identities: identities, literal: opts.Action == "delete"})
 	}
 	states := make([]RelocationState, len(verified))
 	lookupErrors := make([]error, len(verified))
@@ -186,16 +200,16 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 					case 1:
 						present = true
 					default:
-						if validRFCMessageID(item.Identity.RFCMessageID) != "" {
-							// The snapshot already checked each candidate's
-							// live header. A later singleton must not erase
-							// the ambiguity observed in this snapshot.
+						if opts.Action == "delete" || validRFCMessageID(item.Identity.RFCMessageID) != "" {
+							// Delete identities and live-header-confirmed RFC
+							// identities must retain snapshot ambiguity; a later
+							// singleton cannot establish a unique destination.
 							err = fmt.Errorf("stable identity is ambiguous in %s", key.mailbox)
 						} else {
 							present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
 						}
 					}
-				} else if !isVerificationTimeout(err) {
+				} else if !isVerificationTimeout(err) && opts.Action != "delete" {
 					present, err = client.hasMessageIdentityWithWhoseJXA(key.account, key.mailbox, item.Identity)
 				}
 				if err != nil {
@@ -228,6 +242,13 @@ func verifyMutationRelocations(client *Client, opts BatchOptions, verified []Bat
 	for i := range verified {
 		item := &verified[i]
 		if item.Status != "succeeded" {
+			continue
+		}
+		if err := deleteErrors[i]; err != nil {
+			item.VerifyStatus, item.VerifyError = "applied_destination_unverified", err.Error()
+			if isVerificationTimeout(err) {
+				item.VerifyStatus = "unknown_after_timeout"
+			}
 			continue
 		}
 		observed := states[i]

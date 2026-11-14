@@ -436,7 +436,7 @@ ID      STATUS   LOCATION      DETAIL
  "items": [{"id": "100001", "account": "Example Account", "sourceMailbox": "INBOX", "targetMailbox": "All Mail", "status": "succeeded"}]}
 ```
 
-`--verify` re-reads each message afterwards and records `verifyStatus`. Mutation counts remain separate from verification: a move accepted by Mail.app can be `succeeded` while its destination is `applied_destination_unverified`. The receipt records `unverified`, returns `ok: false` with `code: "mutation_failed"`, and exits 6 so callers know the requested proof is incomplete. For an archive or move, `observed` reports `sourcePresent`, `destinationPresent`, and `destinationRead` separately, found by sender, subject, sent date, and size instead of the old local ID. When Mail.app regenerates a Gmail message in INBOX after an archive, `verifyStatus` is `present_in_source` and `observed.sourceIds` holds the new local ID. `ok` means "this command did what you asked and any requested verification completed", so check it, or check the exit code, before trusting a receipt.
+`--verify` re-reads each message afterwards and records `verifyStatus`. Mutation counts remain separate from verification: a move accepted by Mail.app can be `succeeded` while its destination is `applied_destination_unverified`. The receipt records `unverified`, returns `ok: false` with `code: "mutation_failed"`, and exits 6 so callers know the requested proof is incomplete. For an archive, move, or verified delete, `observed` reports `sourcePresent`, `destinationPresent`, and `destinationRead` separately, found by sender, subject, sent date, and size instead of the old local ID. When Mail.app regenerates a Gmail message in INBOX after an archive, `verifyStatus` is `present_in_source` and `observed.sourceIds` holds the new local ID. `ok` means "this command did what you asked and any requested verification completed", so check it, or check the exit code, before trusting a receipt.
 
 Bulk selection by query, sender, or domain lives under `messages batch` and needs `--yes` for archive, delete, and move unless `--dry-run` is set:
 
@@ -446,6 +446,16 @@ mail-app-cli messages batch archive -a "Example Account" -m INBOX --sender-domai
 mail-app-cli search "sample alert" --ids-only | xargs mail-app-cli delete --dry-run
 mail-app-cli messages batch mark --read=false 100003 100004
 ```
+
+Batch commands stop after three identical consecutive failures within an account/mailbox. Use `--max-consecutive-failures N` to change the threshold or `0` to disable it. Stopped receipts distinguish `not_attempted` items, and requested verification still runs for successful items. `--events --json` streams durable JSON progress to stderr while the final JSON receipt remains on stdout. Inspect a receipt without accessing Mail using `messages status <receipt-file> --json`.
+
+Deletes move to the account's actual recoverable Trash. A missing or ambiguous Trash destination, or a source already in Trash, stops that item before changes. `messages batch delete <ids...> --mark-read --verify` confirms stable identity in Trash, source removal, and the requested read state; source disappearance alone is insufficient. Use `messages reconcile <receipt-file>` to inspect an uncertain verified deletion without repeating it.
+
+Gmail Inbox moves to All Mail, including supported archive aliases, use the same guarded Archive action as `archive`. To explicitly remove Important as well, use `messages batch archive <ids...> --remove-important --verify`. This requires existing Gmail label authorization and preflights every selected account/message before removing labels. The receipt includes separate label results and recovery paths. Without this option, archive preserves Important.
+
+For repeatable selections across accounts, [cleanup manifests](docs/cleanup-manifest.md) record exact identities, actions, and required final mailbox memberships. Preview with `messages manifest apply cleanup.json --dry-run`, apply with `messages manifest apply cleanup.json`, and inspect fresh outcomes with `messages manifest verify cleanup.json`.
+
+Selected body reads support `--checkpoint <path>` and `--events`. Repeat the same selection and body options to resume completed extraction while refreshing message metadata. Saved reads can follow a regenerated local ID when the original account and a unique RFC Message-ID match the captured sender, subject, and sent date. Changed content is read again; cached disk bodies are reused only after checking their content revision. Ambiguous or different identities remain refused. Checkpoints contain private message bodies and are written with owner-only permissions. See [resumable reads](docs/resumable-reads.md) for recovery details.
 
 ## Sending and drafts
 
@@ -510,7 +520,7 @@ followed by a check for new mail; other receiving accounts check for new mail. W
 are requested individually. A completed result means Mail accepted the request.
 `--wait` additionally observes stable local counts, which do not establish that
 individual messages or server-side labels are synchronized. Use
-`messages reconcile receipt.json` to recheck archive or move identities.
+`messages reconcile receipt.json` to recheck archive, move, or verified delete identities.
 
 
 `messages show|mark|flag|archive|delete|move` are the 1.x spellings and still work; they now return receipts and accept `--dry-run`.
@@ -587,12 +597,12 @@ This project is a hard fork of [intelligrit/mail-app-cli](https://github.com/int
 
 ### Reliable repeated cleanup in 2.4
 
-Verified archive and move capture message identity without asking Mail to render
+Verified archive, move, and delete capture message identity without asking Mail to render
 a body. `--settle` extends final observation and `--verify-budget` bounds the
 stage. Archive destinations are recorded before the move so an interrupted
 operation retains the scope needed for recovery.
 `messages reconcile receipt.json --settle 10s --verify-budget 30s --json`
-rechecks saved archive/move identities without repeating the operation. Receipts
+rechecks saved archive/move/delete identities without repeating the operation. Receipts
 report when and where the final source/destination state was observed, and
 whether observation followed a synchronization request. These observations
 cover Mail's local state; they do not certify server-side labels or future state.
@@ -603,8 +613,12 @@ System Settings. The command briefly opens a separate Mail window in the
 background with its preview hidden, selects and checks the individual message,
 then closes that window. It does not activate Mail or restore another app's
 focus afterward. If it cannot establish the exact owned window, selection, and
-Archive button, the command stops before archiving. Conversation rows that cannot be selected
-as an individual message require archiving in Mail directly. An uncertain
+Archive button, the command stops before archiving. It expands conversations and
+scrolls the owned message list within fixed time and traversal limits to find
+the individual message. Conversation headers remain ineligible for Archive;
+each selected child must pass the same exact message-identity checks. If Mail
+does not expose the controls needed to reach that child safely, the command
+stops. An uncertain
 Archive response stops the batch; reconcile its receipt before taking further
 action. All mailbox changes continue to go through Mail.
 

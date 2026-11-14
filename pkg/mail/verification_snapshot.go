@@ -11,6 +11,8 @@ type verificationMailboxKey struct{ account, mailbox string }
 type identityVerificationScope struct {
 	key        verificationMailboxKey
 	identities []StableIdentity
+	literal    bool // Preserve a pinned physical path without mailbox aliases.
+	strict     bool // Reject multiple physical candidates instead of choosing one.
 }
 
 type identityVerificationResult struct {
@@ -44,7 +46,13 @@ func (c *Client) getIdentitySnapshotForVerification(scopes []identityVerificatio
 		index := len(queried)
 		queried = append(queried, scope)
 		name := fmt.Sprintf("verification_mailbox_%d", index)
-		ctes = append(ctes, name+" as ("+verificationMailboxSelect(account.ID, scope.key.mailbox)+")")
+		mailboxSelect := verificationMailboxSelect(account.ID, scope.key.mailbox)
+		if scope.literal {
+			mailboxSelect = literalVerificationMailboxSelect(account.ID, scope.key.mailbox)
+		} else if scope.strict {
+			mailboxSelect = strictVerificationMailboxSelect(account.ID, scope.key.mailbox)
+		}
+		ctes = append(ctes, name+" as ("+mailboxSelect+")")
 		// All Mail and Archive use the backing mailbox, while other mailboxes
 		// also include their labels, as in indexMailboxMembershipCondition.
 		// GLOB treats the URL-encoded percent sign literally; LIKE would also
@@ -171,7 +179,11 @@ func (c *Client) matchVerificationSnapshot(scope identityVerificationScope, mail
 			actual, read := enriched[row.ID]
 			if !read {
 				var err error
-				actual, err = c.GetMessageDetailsForVerificationJSON(scope.key.account, scope.key.mailbox, row.ID)
+				if scope.literal {
+					actual, err = c.getLiteralMessageDetailsForVerification(scope.key.account, scope.key.mailbox, row.ID)
+				} else {
+					actual, err = c.GetMessageDetailsForVerificationJSON(scope.key.account, scope.key.mailbox, row.ID)
+				}
 				if err != nil {
 					return nil, fmt.Errorf("read RFC identity candidate %s: %w", row.ID, err)
 				}
@@ -224,4 +236,26 @@ func verificationUnion(selects []string) string {
 // then broad nested-leaf preference, resolving it afresh in every snapshot.
 func verificationMailboxSelect(accountID, mailbox string) string {
 	return indexMailboxSelect(accountID, mailbox, false)
+}
+
+// Literal scopes are already canonical physical paths obtained from Mail.
+// Reject duplicate rows and never broaden an absent path to a leaf or alias.
+func literalVerificationMailboxSelect(accountID, mailbox string) string {
+	forms := escapeMailboxURLPathForms(mailbox)
+	comparisons := make([]string, len(forms))
+	for i, form := range forms {
+		comparisons[i] = indexMailboxPath(accountID) + " = " + sqlQuote(form) + " collate binary"
+	}
+	return "select ROWID as ID, url as URL, case when count(*) over () > 1 then 1 else 0 end as Ambiguous from mailboxes where " + indexAccountMailboxCondition(accountID) + " and (" + strings.Join(comparisons, " or ") + ") order by ROWID limit 1"
+}
+
+// Strict selection preserves ordinary aliases but cannot infer absence by
+// choosing one of several physical mailboxes accepted by those aliases.
+func strictVerificationMailboxSelect(accountID, mailbox string) string {
+	preference := indexMailboxPreference(accountID, mailbox)
+	where := preference.exact + " or " + preference.broad
+	if preference.literal != "" {
+		where += " or " + preference.literal + " or " + preference.nested
+	}
+	return "select ROWID as ID, url as URL, case when count(*) over () > 1 then 1 else 0 end as Ambiguous from mailboxes where " + where + " order by ROWID limit 1"
 }

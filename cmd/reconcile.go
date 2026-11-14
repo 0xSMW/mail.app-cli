@@ -14,9 +14,9 @@ func (a *application) newMessagesReconcileCmd() *cobra.Command {
 	var settle, budget time.Duration
 	cmd := &cobra.Command{
 		Use:         "reconcile <receipt-file>",
-		Short:       "Recheck archived or moved identities without changing mail",
+		Short:       "Recheck archived, moved, or deleted identities without changing mail",
 		Args:        cobra.ExactArgs(1),
-		Annotations: map[string]string{annotationAgentNotes: "Read-only final observation of an archive/move receipt or journal, including identities previously confirmed. Does not repeat mutations or synchronize accounts. Checks current source and destination memberships and requested read state; exits 6 when unresolved. This is an observation, not a guarantee against future provider changes."},
+		Annotations: map[string]string{annotationAgentNotes: "Read-only final observation of an archive/move/delete receipt or journal, including identities previously confirmed. Does not repeat mutations or synchronize accounts. Checks current source and destination memberships and requested read state; exits 6 when unresolved. This is an observation, not a guarantee against future provider changes."},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := mail.BatchOptions{Verify: true, Settle: settle, VerifyBudget: budget}
 			if err := mail.ValidateBatchOptions(opts); err != nil {

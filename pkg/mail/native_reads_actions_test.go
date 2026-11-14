@@ -348,6 +348,7 @@ func TestNativeReadListFiltersOffsetAndContent(t *testing.T) {
 
 func TestNativeReadActionsDescriptorsAndNoReplay(t *testing.T) {
 	f := newNativeReadFixture()
+	f.properties["mact:a"]["host"] = appleevents.String("imap.example.test")
 	c := fixtureClient(t, f)
 	for _, action := range []func() error{func() error { return c.MarkMessageAsRead("Personal", "INBOX", "42", true) }, func() error { return c.FlagMessage("Personal", "INBOX", "42", false) }, func() error { return c.MoveMessage("Personal", "INBOX", "42", "All Mail") }} {
 		if err := action(); err != nil {

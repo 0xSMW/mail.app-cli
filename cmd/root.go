@@ -17,7 +17,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const version = "3.2.2"
+const version = "3.3.0"
 
 const (
 	groupMail   = "mail"
