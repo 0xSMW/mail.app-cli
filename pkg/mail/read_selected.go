@@ -3,6 +3,7 @@ package mail
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 )
 
@@ -26,6 +27,22 @@ type SelectedReadResult struct {
 // is missing or stalls. A timed-out read is never retried automatically. The
 // next ID gets a fresh bridge; the overall budget bounds all reads and queueing.
 func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Duration) SelectedReadResult {
+	result, _ := c.ReadSelectedMessagesWithOptions(refs, timeout, budget, SelectedReadOptions{})
+	return result
+}
+
+// SelectedReadOptions enables durable body extraction and machine-readable
+// progress. A checkpoint is read-only evidence, never a mutation selection.
+type SelectedReadOptions struct {
+	Checkpoint string
+	// SelectionIDs includes requested IDs that could not yet be located. When
+	// omitted, the selection is derived from refs. Cached successes remain bound
+	// to their captured account even when a later locator changes its answer.
+	SelectionIDs []string
+	Events       io.Writer
+}
+
+func (c *Client) ReadSelectedMessagesWithOptions(refs []MessageRef, timeout, budget time.Duration, opts SelectedReadOptions) (SelectedReadResult, error) {
 	ctx, cancel := context.WithTimeout(c.Context(), budget)
 	defer cancel()
 	client := c.WithContext(ctx)
@@ -35,7 +52,11 @@ func (c *Client) ReadSelectedMessages(refs []MessageRef, timeout, budget time.Du
 			session.Close()
 		}
 	}()
-	return readSelectedMessages(refs, func(ref MessageRef, i int) (*Message, *PhaseTrace, error) {
+	return readSelectedWithCheckpoint(refs, opts, c.shared.bodyFromMail, c.shared.bodyAlternatives, func(ref MessageRef) (*Message, error) {
+		itemContext, cancelItem := context.WithTimeout(ctx, timeout)
+		defer cancelItem()
+		return client.WithContext(itemContext).GetMessageDetailsForVerificationJSON(ref.AccountName, ref.MailboxName, ref.MessageID)
+	}, func(ref MessageRef, i int) (*Message, *PhaseTrace, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, nil, err
 		}
