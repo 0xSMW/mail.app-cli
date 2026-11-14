@@ -195,12 +195,15 @@ messages batch --help (-h)
 messages batch archive
 messages batch archive --chunk-size
 messages batch archive --dry-run
+messages batch archive --events
 messages batch archive --help (-h)
 messages batch archive --limit (-l)
 messages batch archive --mark-read
 messages batch archive --mark-read-on-skip
+messages batch archive --max-consecutive-failures
 messages batch archive --progress
 messages batch archive --query
+messages batch archive --remove-important
 messages batch archive --report-file
 messages batch archive --sender
 messages batch archive --sender-domain
@@ -212,9 +215,11 @@ messages batch archive --yes
 messages batch delete
 messages batch delete --chunk-size
 messages batch delete --dry-run
+messages batch delete --events
 messages batch delete --help (-h)
 messages batch delete --limit (-l)
 messages batch delete --mark-read
+messages batch delete --max-consecutive-failures
 messages batch delete --progress
 messages batch delete --query
 messages batch delete --report-file
@@ -228,10 +233,12 @@ messages batch delete --yes
 messages batch flag
 messages batch flag --chunk-size
 messages batch flag --dry-run
+messages batch flag --events
 messages batch flag --flagged
 messages batch flag --help (-h)
 messages batch flag --limit (-l)
 messages batch flag --mark-read
+messages batch flag --max-consecutive-failures
 messages batch flag --progress
 messages batch flag --query
 messages batch flag --report-file
@@ -245,9 +252,11 @@ messages batch flag --yes
 messages batch mark
 messages batch mark --chunk-size
 messages batch mark --dry-run
+messages batch mark --events
 messages batch mark --help (-h)
 messages batch mark --limit (-l)
 messages batch mark --mark-read
+messages batch mark --max-consecutive-failures
 messages batch mark --progress
 messages batch mark --query
 messages batch mark --read
@@ -262,9 +271,11 @@ messages batch mark --yes
 messages batch move
 messages batch move --chunk-size
 messages batch move --dry-run
+messages batch move --events
 messages batch move --help (-h)
 messages batch move --limit (-l)
 messages batch move --mark-read
+messages batch move --max-consecutive-failures
 messages batch move --progress
 messages batch move --query
 messages batch move --report-file
@@ -314,6 +325,13 @@ messages list --offset (-o)
 messages list --since (-s)
 messages list --unread (-u)
 messages list --with-content
+messages manifest
+messages manifest --help (-h)
+messages manifest apply
+messages manifest apply --dry-run
+messages manifest apply --help (-h)
+messages manifest verify
+messages manifest verify --help (-h)
 messages mark
 messages mark --dry-run
 messages mark --help (-h)
@@ -327,6 +345,8 @@ messages read
 messages read --body-alternatives
 messages read --body-source
 messages read --budget
+messages read --checkpoint
+messages read --events
 messages read --help (-h)
 messages read --timeout
 messages reconcile
@@ -349,6 +369,8 @@ messages sent --offset (-o)
 messages sent --with-content
 messages show
 messages show --help (-h)
+messages status
+messages status --help (-h)
 messages trash
 messages trash --help (-h)
 messages trash --limit (-l)

@@ -68,6 +68,9 @@ func invalidateBatchCaches(action string, items []batchItem) {
 func renderReceipt(result batchResult, opts batchOptions) func(*output.Printer) {
 	return func(p *output.Printer) {
 		summary := result.Summary(opts)
+		for _, label := range result.LabelResults {
+			p.Line("Important cleanup: %s (provider confirmed: %t; Mail: %s; receipt: %s)", label.Status, label.ProviderConfirmed, label.MailStatus, label.ReceiptPath)
+		}
 		if result.Failed > 0 {
 			p.Line("%s", p.Red(summary))
 		} else if result.DryRun || result.Unverified > 0 {
@@ -162,7 +165,11 @@ func (a *application) preflightBatchReceipt(opts *batchOptions, reportFile strin
 		return nil, err
 	}
 	opts.Receipt = journal
-	fmt.Fprintf(a.writer.Stderr, "receipt journal: %s\n", journal.Path())
+	if a.batchEvents {
+		_ = json.NewEncoder(a.writer.Stderr).Encode(map[string]any{"event": "receipt", "path": journal.Path()})
+	} else {
+		fmt.Fprintf(a.writer.Stderr, "receipt journal: %s\n", journal.Path())
+	}
 	return journal, nil
 }
 
@@ -224,6 +231,35 @@ func (a *application) runDurableMessageBatch(client *mail.Client, opts batchOpti
 	}
 	ctx, stop := signal.NotifyContext(client.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if a.batchRemoveImportant {
+		journal.SetEvents(opts.Events)
+		if err := journal.Record("label_cleanup_started", map[string]any{"action": opts.Action, "matched": len(items), "dryRun": opts.DryRun}); err != nil {
+			_ = journal.Close()
+			return result, err
+		}
+		labelCmd := *a.messagesBatchArchiveCmd
+		labelCmd.SetContext(ctx)
+		labels, labelErr := a.prepareArchiveImportant(&labelCmd, opts, items, true)
+		opts.LabelResults = labels
+		if err := journal.Record("label_cleanup_result", map[string]any{"labelResults": labels}); err != nil {
+			labelErr = errors.Join(labelErr, err)
+		}
+		if labelErr != nil {
+			result = batchResult{Action: opts.Action, DryRun: opts.DryRun, Matched: len(items), NotAttempted: len(items), LabelResults: labels, ReceiptPath: journal.Path(), StoppedReason: "Gmail Important cleanup did not complete; archive not attempted"}
+			for _, item := range items {
+				item.Status = "not_attempted"
+				item.Error = result.StoppedReason
+				result.Items = append(result.Items, item)
+			}
+			if err := journal.Record("stopped", map[string]any{"result": result}); err != nil {
+				labelErr = errors.Join(labelErr, err)
+			}
+			if err := journal.Close(); err != nil {
+				labelErr = errors.Join(labelErr, err)
+			}
+			return result, labelErr
+		}
+	}
 	result, mutationErr = a.runMessageBatch(client.WithContext(ctx), opts, items, mutate)
 	if err := journal.Close(); err != nil {
 		result.JournalError = err.Error()
@@ -263,20 +299,24 @@ func (a *application) mutateByIDs(ids []string, opts batchOptions, mutate mail.M
 
 func (a *application) batchOptionsFromFlags(action, target string) batchOptions {
 	opts := batchOptions{
-		Action:         action,
-		TargetMailbox:  target,
-		DryRun:         a.batchDryRun,
-		Verify:         a.batchVerify,
-		MarkReadBefore: a.batchMarkReadBefore,
-		MarkReadOnSkip: a.batchMarkReadOnSkip,
-		Settle:         a.batchSettle,
-		VerifyBudget:   a.batchVerifyBudget,
-		ChunkSize:      a.batchChunkSize,
-		ReuseBridge:    true,
-		Read:           a.batchRead,
-		Flagged:        a.batchFlagged,
+		Action:                 action,
+		TargetMailbox:          target,
+		DryRun:                 a.batchDryRun,
+		Verify:                 a.batchVerify,
+		MarkReadBefore:         a.batchMarkReadBefore,
+		MarkReadOnSkip:         a.batchMarkReadOnSkip,
+		Settle:                 a.batchSettle,
+		VerifyBudget:           a.batchVerifyBudget,
+		ChunkSize:              a.batchChunkSize,
+		MaxConsecutiveFailures: a.batchMaxConsecutiveFailures,
+		ReuseBridge:            true,
+		Read:                   a.batchRead,
+		Flagged:                a.batchFlagged,
 	}
-	if a.batchProgress {
+	if a.batchEvents {
+		opts.Events = a.writer.Stderr
+	}
+	if a.batchProgress && !a.batchEvents {
 		opts.Progress = a.writer.Stderr
 	}
 	return opts
@@ -449,11 +489,14 @@ func (a *application) buildBatchCommands() {
 		cmd.Flags().DurationVar(&a.batchSettle, "settle", 0, "Extend the final verification observation window (up to 5m)")
 		cmd.Flags().DurationVar(&a.batchVerifyBudget, "verify-budget", 0, "Bound all verification checks (default 30s, up to 10m)")
 		cmd.Flags().BoolVar(&a.batchVerify, "verify", false, "Re-read each message after mutation and record the outcome")
+		cmd.Flags().BoolVar(&a.batchEvents, "events", false, "Stream durable progress events as JSON lines to stderr")
 		cmd.Flags().BoolVar(&a.batchProgress, "progress", false, "Print per-chunk and per-message progress to stderr")
+		cmd.Flags().IntVar(&a.batchMaxConsecutiveFailures, "max-consecutive-failures", 3, "Stop after identical consecutive failures per account/mailbox (0 disables)")
 		cmd.Flags().IntVar(&a.batchChunkSize, "chunk-size", 0, "Process selected messages in chunks of this size")
 		cmd.Flags().StringVar(&a.batchReportFile, "report-file", "", "Also write the receipt JSON to this path; journal uses .journal.jsonl")
 		cmd.Flags().IntVarP(&a.batchLimit, "limit", "l", 100, "Maximum selector-selected messages")
 	}
+	a.messagesBatchArchiveCmd.Flags().BoolVar(&a.batchRemoveImportant, "remove-important", false, "Explicitly remove Gmail Important before archiving; requires provider authorization")
 	a.messagesBatchArchiveCmd.Flags().BoolVar(&a.batchMarkReadOnSkip, "mark-read-on-skip", false, "Mark already archived messages read; requires --mark-read")
 	a.messagesBatchMarkCmd.Flags().BoolVar(&a.batchRead, "read", true, "Mark messages read; use --read=false for unread")
 	a.messagesBatchFlagCmd.Flags().BoolVar(&a.batchFlagged, "flagged", true, "Flag messages; use --flagged=false to unflag")

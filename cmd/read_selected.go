@@ -13,7 +13,8 @@ import (
 func (a *application) newMessagesReadCmd() *cobra.Command {
 	var timeout, budget time.Duration
 	var bodySource string
-	var alternatives bool
+	var alternatives, events bool
+	var checkpoint string
 	cmd := &cobra.Command{
 		Use:         "read <message-id> [message-id...]",
 		Short:       "Read selected bodies serially with per-message results",
@@ -33,6 +34,9 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 					return clierr.Usagef("message ID %q is not numeric", id)
 				}
 			}
+			if err := mail.ValidateReadCheckpoint(checkpoint); err != nil {
+				return clierr.Usage(err.Error())
+			}
 			refs, failed, notices, err := a.locateSelectedMessages(ids)
 			if err != nil {
 				return err
@@ -41,7 +45,14 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 			for i, ref := range refs {
 				requests[i] = mail.MessageRef{AccountName: ref.Account, MailboxName: ref.Mailbox, MessageID: ref.ID}
 			}
-			result := a.mailClient.ReadSelectedMessages(requests, timeout, budget)
+			opts := mail.SelectedReadOptions{Checkpoint: checkpoint, SelectionIDs: ids}
+			if events {
+				opts.Events = cmd.ErrOrStderr()
+			}
+			result, readErr := a.mailClient.ReadSelectedMessagesWithOptions(requests, timeout, budget, opts)
+			if readErr != nil && len(result.Items) == 0 {
+				return clierr.Usage(readErr.Error())
+			}
 			if len(failed) > 0 {
 				byID := make(map[string]mail.MessageReadResult)
 				for _, item := range result.Items {
@@ -57,6 +68,10 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 				result.Complete = false
 			}
 			var failure *clierr.Error
+			if readErr != nil {
+				result.Complete = false
+				notices = append(notices, readErr.Error())
+			}
 			if !result.Complete {
 				failure = clierr.New(clierr.CodePartial, "selected body read incomplete; inspect per-message errors")
 			}
@@ -72,6 +87,8 @@ func (a *application) newMessagesReadCmd() *cobra.Command {
 			}})
 		},
 	}
+	cmd.Flags().StringVar(&checkpoint, "checkpoint", "", "Persist successful bodies privately and resume after fresh stable-identity validation")
+	cmd.Flags().BoolVar(&events, "events", false, "Write JSONL phase and item progress to stderr")
 	cmd.Flags().DurationVar(&timeout, "timeout", 10*time.Second, "Maximum bridge execution time per message")
 	cmd.Flags().StringVar(&bodySource, "body-source", mail.BodySourceDisk, bodySourceUsage)
 	cmd.Flags().BoolVar(&alternatives, "body-alternatives", false, "Include extracted text from MIME alternatives alongside body diagnostics")
@@ -86,7 +103,7 @@ func (a *application) locateSelectedMessages(ids []string) ([]messageRef, []mail
 		refs, notices, err := a.locateMessages(ids)
 		return refs, nil, notices, err
 	}
-	located, indexErr := a.mailClient.LocateMessages(ids)
+	located, indexErr := a.locateIndexed(ids)
 	var refs []messageRef
 	var failed []mail.MessageReadResult
 	var notices []string
